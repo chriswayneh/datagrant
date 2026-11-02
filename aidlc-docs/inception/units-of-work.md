@@ -1,5 +1,3 @@
-# units-of-work (template)
+# Units of work
 
-**Status:** Not started (see ROADMAP).
-
-<!-- Fill in during Inception. Get maintainer approval and log it in ../audit.md. -->
+**Status:** Approved 2026-11-02. Canonical list and order: [execution-plan.md](execution-plan.md#construction-units-pr-order) (U1–U8).
