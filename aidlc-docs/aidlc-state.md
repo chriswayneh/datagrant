@@ -4,8 +4,8 @@
 | --- | --- | --- |
 | Inception | Workspace detection | ✅ Done (new project) |
 | Inception | Vision | Draft, awaiting approval |
-| Inception | Requirements | Draft, awaiting approval |
-| Inception | User stories | Not started |
+| Inception | Requirements + application design | Draft, awaiting approval |
+| Inception | User stories | Draft, awaiting approval |
 | Inception | Units of work | Not started |
 | Construction | Functional design | Not started |
 | Construction | NFR requirements / design | Not started |
