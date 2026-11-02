@@ -3,9 +3,9 @@
 | Stage | Step | Status |
 | --- | --- | --- |
 | Inception | Workspace detection | ✅ Done (new project) |
-| Inception | Vision | Draft, awaiting approval |
-| Inception | Requirements + application design | Draft, awaiting approval |
-| Inception | User stories | Draft, awaiting approval |
+| Inception | Vision | ✅ Approved 2026-11-02 |
+| Inception | Requirements + application design | ✅ Approved 2026-11-02 |
+| Inception | User stories | ✅ Approved 2026-11-02 |
 | Inception | Units of work | Not started |
 | Construction | Functional design | Not started |
 | Construction | NFR requirements / design | Not started |
@@ -13,4 +13,4 @@
 | Construction | Build and test | Not started |
 | Operations | Runbook / deployment | Not started |
 
-**Current stage:** Inception. **Next gate:** maintainer approval of vision and requirements (task `I-1`).
+**Current stage:** Inception approved 2026-11-02. **Next:** units of work / execution plan, then Construction.

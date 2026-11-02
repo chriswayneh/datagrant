@@ -1,9 +1,9 @@
-# Open questions (need maintainer decision)
+# Open questions — resolved 2026-11-02 (Chris Hickman)
 
-1. **Approval in v1:** policy-only auto-approve, or add a second-person `datagrant approve <id>`?
-2. **Receipt signing key storage:** local file (0600), env var, or pluggable KMS?
-3. **Credential delivery:** print one-time password, or write a `.pgpass`/DSN file?
-4. **Hash masking:** require pgcrypto (keyed HMAC) or do masking-free hashing in Python views? Key managed where?
-5. **Receipt log:** local JSONL only, or also write receipts into a DB table / external sink?
-6. **Python floor:** 3.11+ (this design) vs 3.10+ in earlier draft/pyproject — confirm 3.11.
-7. **Name for docs:** `technical-design.md` vs new `application-design.md` — keep both or merge?
+1. **Approval in v1:** policy auto-approves; optional two-person `datagrant approve` mode via config. ✅
+2. **Signing key storage:** local file (0600) by default, env var override. ✅
+3. **Credential delivery:** one-time password printed once. ✅
+4. **Hash masking:** pgcrypto keyed HMAC; key stored alongside signing key. ✅
+5. **Receipt log:** local JSONL in v1 (default; external sinks deferred). ✅
+6. **Python floor:** 3.11+; pyproject updated. ✅
+7. **Docs:** technical-design.md folded into application-design.md and removed. ✅

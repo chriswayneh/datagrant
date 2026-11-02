@@ -1,4 +1,6 @@
-# Application design (draft)
+# Application design
+
+**Status:** Approved 2026-11-02. Replaces the former technical-design.md stub.
 
 Python 3.11+, single CLI package `datagrant`, psycopg 3, `cryptography` (ed25519), PyYAML. No server.
 
@@ -32,3 +34,10 @@ Sweep (cron) → select expired active grants → revoke each → `expired` rece
 | PostgreSQL Anonymizer | In-DB masking rules/dynamic masking | No JIT request, expiry, or receipts |
 
 **Distinct:** a pip-installable, open-source CLI with no proxy/server that combines policy-as-code, per-request column/row scoping, masking, automatic expiry, and verifiable signed receipts. Real-world use hinges on: working with only a CREATEROLE admin role, cron-based sweep, and receipts that auditors accept. Overlap risk: teams already on Vault/Teleport may prefer to bolt masking views onto those.
+
+## Approved decisions (2026-11-02)
+- **Approval:** policy file auto-approves in v1. Optional two-person mode (`approval: two_person` in config) adds `datagrant approve <id>`; approver must differ from requester.
+- **Keys:** ed25519 signing key in a local file (default `~/.config/datagrant/signing.key`, 0600); override with `DATAGRANT_SIGNING_KEY` env var.
+- **Credentials:** grant role password generated per grant and printed once; never stored or logged.
+- **Hash masking:** keyed HMAC via pgcrypto (`hmac()`); hash key stored alongside the signing key (`hash.key`, 0600, env override `DATAGRANT_HASH_KEY`).
+- **Runtime:** Python 3.11+.

@@ -1,4 +1,6 @@
-# User stories (draft)
+# User stories
+
+**Status:** Approved 2026-11-02.
 
 | ID | As a… | I want… | So that… | Acceptance |
 | --- | --- | --- | --- | --- |

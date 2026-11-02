@@ -1,6 +1,6 @@
 # Requirements (draft)
 
-**Status:** Draft, awaiting maintainer approval (task `I-1`).
+**Status:** Approved by Chris Hickman, 2026-11-02 (task `I-1`).
 
 ## Users
 - **AI/ML developer** — needs a narrow, temporary slice of regulated data (PHI/PII) to build, debug, or evaluate a model or pipeline.
@@ -30,7 +30,7 @@ Developers on regulated data usually get standing, over-broad read access (or fu
 | NFR-2 | Fail closed: on any error during grant, roll back; if revoke fails, exit non-zero and retry on next sweep; never extend access silently. |
 | NFR-3 | Maximum grant duration enforced by policy; `VALID UNTIL` is a backstop, sweep is the primary revoker. |
 | NFR-4 | Signing keys never printed or logged; key file permissions checked (0600). |
-| NFR-5 | Python 3.11+, psycopg 3; Linux/macOS (Windows best-effort). |
+| NFR-5 | Python 3.11+ (requires-python >=3.11), psycopg 3; Linux/macOS (Windows best-effort). |
 | NFR-6 | All SQL identifiers quoted via `psycopg.sql`; row filters parsed/validated, never interpolated raw. |
 | NFR-7 | datagrant's own admin connection uses a dedicated least-privilege role (CREATEROLE + ownership of a `datagrant` schema), not superuser. |
 | NFR-8 | ≥90% unit coverage; integration tests against real Postgres in CI. Fictional data only. |

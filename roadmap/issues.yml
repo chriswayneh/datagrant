@@ -26,7 +26,7 @@ issues:
   title: Technical design document and execution plan; approve Inception
   why: Every later stage builds on agreed scope.
   files: aidlc-docs/inception/*
-  acceptance: aidlc-docs/inception/technical-design.md and execution-plan.md written; no code; maintainer approval recorded in aidlc-docs/audit.md; open questions resolved or deferred
+  acceptance: aidlc-docs/inception/application-design.md and execution-plan.md written; no code; maintainer approval recorded in aidlc-docs/audit.md; open questions resolved or deferred
     with reason.
   size: S
   depends_on: []
