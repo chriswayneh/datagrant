@@ -16,7 +16,7 @@ import yaml
 
 MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null"})
 APPROVAL_MODES = frozenset({"auto", "two-person"})
-_DURATION_RE = re.compile(r"^(\d+)([mhd])$")
+_DURATION_RE = re.compile(r"^(\d{1,6})([mhd])$")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days"}
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -34,7 +34,10 @@ def parse_duration(value: object, where: str = "duration") -> timedelta:
     m = _DURATION_RE.match(value.strip())
     if not m or int(m.group(1)) == 0:
         raise PolicyError(f"{where}: invalid duration {value!r} (use e.g. '30m', '4h', '1d')")
-    return timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
+    try:
+        return timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
+    except OverflowError as exc:  # pragma: no cover - bounded by regex; defensive
+        raise PolicyError(f"{where}: duration {value!r} is too large") from exc
 
 
 @dataclass(frozen=True)
@@ -130,7 +133,7 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
     for col, mask in cols.items():
         if not isinstance(col, str) or not _IDENT_RE.match(col):
             raise PolicyError(f"{where}.columns: invalid column name {col!r}")
-        if mask not in MASK_TYPES:
+        if not isinstance(mask, str) or mask not in MASK_TYPES:
             raise PolicyError(
                 f"{where}.columns.{col}: unknown mask {mask!r} (one of {sorted(MASK_TYPES)})"
             )
@@ -194,20 +197,48 @@ def parse_policy(data: object, sha256: str = "") -> Policy:
     return Policy(version, approval, cap, groups, datasets, sha256)
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that rejects anchors/aliases and duplicate mapping keys."""
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        event = self.peek_event()
+        if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
+            raise PolicyError(f"YAML anchors/aliases are not allowed ({event.start_mark})")
+        return super().compose_node(parent, index)
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> Any:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                dup = key in seen
+            except TypeError:
+                raise PolicyError(f"unhashable YAML mapping key ({key_node.start_mark})") from None
+            if dup:
+                raise PolicyError(f"duplicate YAML key {key!r} ({key_node.start_mark})")
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def load_policy(path: str | Path) -> Policy:
     """Read, size-check, safely parse, and validate a YAML policy file."""
     p = Path(path)
+    if not p.is_file():
+        raise PolicyError(f"cannot read policy file {p}: not a regular file")
     try:
-        raw = p.read_bytes()
+        with p.open("rb") as fh:
+            raw = fh.read(MAX_POLICY_BYTES + 1)
     except OSError as exc:
         raise PolicyError(f"cannot read policy file {p}: {exc.strerror}") from exc
     if len(raw) > MAX_POLICY_BYTES:
         raise PolicyError(f"policy file {p} is larger than {MAX_POLICY_BYTES} bytes")
     try:
-        data = yaml.safe_load(raw)
+        data = yaml.load(raw, Loader=_StrictLoader)  # SafeLoader subclass
+        return parse_policy(data, hashlib.sha256(raw).hexdigest())
     except yaml.YAMLError as exc:
         raise PolicyError(f"policy file {p} is not valid YAML: {exc}") from exc
-    return parse_policy(data, hashlib.sha256(raw).hexdigest())
+    except RecursionError:
+        raise PolicyError(f"policy file {p} is nested too deeply") from None
 
 
 def evaluate(policy: Policy, req: Request) -> Decision:

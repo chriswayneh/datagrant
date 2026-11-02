@@ -139,6 +139,10 @@ def test_approval_defaults_to_auto_and_two_person_ok() -> None:
         (table(row_filters=[]), "no row_filters"),
         (table(max_duration="9h"), "exceeds"),
         (table(foo=1), "unknown key"),
+        (table(columns={"id": ["hash"]}), "unknown mask"),
+        (table(columns={"id": {"a": 1}}), "unknown mask"),
+        (doc(max_duration="99999999999d"), "invalid duration"),
+        (table(max_duration="99999999999d"), "invalid duration"),
     ],
 )
 def test_invalid_policies(data: object, msg: str) -> None:
@@ -226,3 +230,87 @@ def test_optional_row_filter() -> None:
 def test_two_person_mode_reported() -> None:
     d = evaluate(parse_policy(doc(approval="two-person")), req())
     assert d.allowed and d.approval == "two-person"
+
+
+def test_huge_duration_rejected() -> None:
+    with pytest.raises(PolicyError):
+        parse_duration("9999999d")
+    assert parse_duration("999999d") == timedelta(days=999999)  # regex bound fits timedelta
+
+
+def _write(tmp_path: Path, text: str) -> Path:
+    f = tmp_path / "p.yaml"
+    f.write_text(text)
+    return f
+
+
+def test_deep_nesting_rejected(tmp_path: Path) -> None:
+    f = _write(tmp_path, "a: " + "[" * 5000 + "]" * 5000 + "\n")
+    with pytest.raises(PolicyError):
+        load_policy(f)
+
+
+def test_deep_nesting_in_parse_caught(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import datagrant.policy as mod
+
+    def boom(*_: object, **__: object) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr(mod.yaml, "load", boom)
+    with pytest.raises(PolicyError, match="nested too deeply"):
+        load_policy(_write(tmp_path, "version: 1\n"))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "groups: &g {ml: [alice]}\nother: *g\n",
+        "a: &x 1\n",
+        "a: [&x 1, *x]\n",
+    ],
+)
+def test_anchors_and_aliases_rejected(tmp_path: Path, text: str) -> None:
+    with pytest.raises(PolicyError, match="anchors/aliases"):
+        load_policy(_write(tmp_path, text))
+
+
+def test_duplicate_keys_rejected(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text() + "approval: two-person\n"
+    with pytest.raises(PolicyError, match="duplicate YAML key 'approval'"):
+        load_policy(_write(tmp_path, text))
+    with pytest.raises(PolicyError, match="duplicate YAML key"):
+        load_policy(_write(tmp_path, "a:\n  b: 1\n  b: 2\n"))
+
+
+def test_unhashable_key_rejected(tmp_path: Path) -> None:
+    with pytest.raises(PolicyError):
+        load_policy(_write(tmp_path, "? [a, b]\n: 1\n"))
+
+
+def test_directory_rejected(tmp_path: Path) -> None:
+    with pytest.raises(PolicyError, match="not a regular file"):
+        load_policy(tmp_path)
+
+
+def test_size_limit_boundary(tmp_path: Path) -> None:
+    from datagrant.policy import MAX_POLICY_BYTES
+
+    ok = tmp_path / "ok.yaml"
+    ok.write_bytes(b"#" * MAX_POLICY_BYTES)
+    with pytest.raises(PolicyError, match="top level"):  # read fully, parsed as empty
+        load_policy(ok)
+    big = tmp_path / "big.yaml"
+    big.write_bytes(b"#" * (MAX_POLICY_BYTES + 1))
+    with pytest.raises(PolicyError, match="larger than"):
+        load_policy(big)
+
+
+def test_read_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    f = _write(tmp_path, "x: 1\n")
+
+    def bad_open(*_: object, **__: object) -> object:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "open", bad_open)
+    with pytest.raises(PolicyError, match="cannot read"):
+        load_policy(f)
