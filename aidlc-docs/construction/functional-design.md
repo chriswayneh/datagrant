@@ -24,3 +24,16 @@ Deny by default; all failing checks are reported: dataset/table exists, requeste
 
 ### Out of U1
 SQL generation, filter parsing (filters are matched against an allowlist only; U2 validates/quotes them), CLI wiring (U6).
+
+## U2 — Grant engine (Postgres view + expiring role + grant state)
+
+**Status:** In progress (approved 2026-11-02 5:35 PM CT; see ../audit.md). Modules: `src/datagrant/rowfilter.py`, `src/datagrant/pg/{grant,scram}.py`.
+
+- **Setup:** `ensure_state(conn)` creates schemas `datagrant` (state) and `datagrant_views` (grant views), both `REVOKE ALL … FROM PUBLIC`, and table `datagrant.grants` (id, role, view, dataset, table, requester, purpose, columns, row filter, approval, policy SHA-256, created/expires, status). No passwords or data values stored.
+- **Plan (pure):** `build_plan(decision, request, password=…)` → `CREATE ROLE dg_<12hex> LOGIN NOINHERIT … PASSWORD <SCRAM verifier> VALID UNTIL <expiry>`; `CREATE VIEW datagrant_views.g_<id> WITH (security_barrier) AS SELECT <allowed cols> FROM schema.table [WHERE filter]`; revoke PUBLIC; grant schema USAGE + SELECT on the view only; insert state row. Every name/value via `psycopg.sql.Identifier`/`Literal`.
+- **Password:** `new_password()` (256-bit, URL-safe) is returned once to the caller; only a client-computed SCRAM-SHA-256 verifier is sent, so plaintext never appears in server logs.
+- **Row filters:** policy filters must parse under a small grammar (`col op literal`, `IS [NOT] NULL`, AND/OR, parentheses; ≤1000 chars, depth ≤16) at policy load; re-emitted as composed SQL. Request must match an allowlisted filter exactly (U1).
+- **Masks:** U3 hook. U2 supports `passthrough` and `null` (`NULL::text`); any other mask fails closed with `GrantError`.
+- **Apply:** `apply_plan(conn, plan)` runs all statements in one transaction; any error rolls back and raises `GrantError` (SQLSTATE only, no data).
+- **Not in U2:** revocation/sweep (U4), receipts (U5), CLI (U6), two-person approval (refused for now).
+- **Known limits:** view runs with the admin owner's privileges (base-table RLS not applied to grantee); `VALID UNTIL` blocks new logins only — live sessions are ended by sweep (U4).
