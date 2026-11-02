@@ -40,8 +40,11 @@ def dec(masks: dict[str, str] | None = None, **kw: object) -> Decision:
 
 
 def test_plan_sql() -> None:
-    plan = build_plan(dec(), req(), password="pw", grant_id="abcdef012345", now=NOW)
+    plan = build_plan(
+        dec(), req(), database="clinicdb", password="pw", grant_id="abcdef012345", now=NOW
+    )
     assert plan.role == "dg_abcdef012345" and plan.view == "datagrant_views.g_abcdef012345"
+    assert plan.database == "clinicdb"
     assert plan.expires_at == NOW + timedelta(hours=2)
     text = [s.as_string(None) for s in plan.statements]
     assert text[0].startswith('CREATE ROLE "dg_abcdef012345" LOGIN NOINHERIT')
@@ -56,7 +59,7 @@ def test_plan_sql() -> None:
 
 
 def test_plan_without_filter_and_random_id() -> None:
-    plan = build_plan(dec(), req(row_filter=None), password="x", now=NOW)
+    plan = build_plan(dec(), req(row_filter=None), database="db", password="x", now=NOW)
     assert re.fullmatch(r"dg_[0-9a-f]{12}", plan.role)
     assert "WHERE" not in plan.statements[1].as_string(None)
 
@@ -72,7 +75,7 @@ def test_plan_without_filter_and_random_id() -> None:
     ],
 )
 def test_plan_errors(kwargs: dict[str, object], msg: str) -> None:
-    args: dict[str, object] = {"decision": dec(), "password": "x", "now": NOW}
+    args: dict[str, object] = {"decision": dec(), "database": "db", "password": "x", "now": NOW}
     args.update(kwargs)
     d = args.pop("decision")
     with pytest.raises(GrantError, match=msg):

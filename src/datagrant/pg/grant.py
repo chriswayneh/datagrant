@@ -33,6 +33,7 @@ class GrantPlan:
     role: str
     view: str
     expires_at: datetime
+    database: str
     statements: tuple[sql.Composed, ...]
 
 
@@ -53,11 +54,28 @@ STATE_DDL: tuple[sql.Composed, ...] = (
 )
 
 
-def ensure_state(conn: psycopg.Connection) -> None:
-    """Create datagrant's schemas and grant-state table if missing."""
+_PREFLIGHT = sql.SQL(
+    "SELECT 'PUBLIC can CONNECT to database ' || quote_ident(datname)"
+    " FROM pg_database WHERE datallowconn AND datname <> current_database()"
+    " AND has_database_privilege('public', datname, 'CONNECT')"
+    " UNION ALL SELECT 'PUBLIC can create TEMP tables in ' || quote_ident(current_database())"
+    " WHERE has_database_privilege('public', current_database(), 'TEMP')"
+    " UNION ALL SELECT 'PUBLIC can CREATE in schema public'"
+    " WHERE has_schema_privilege('public', 'public', 'CREATE')"
+)
+
+
+def preflight(conn: psycopg.Connection) -> list[str]:
+    """Return warnings about PUBLIC defaults that every grant role inherits."""
+    return sorted(row[0] for row in conn.execute(_PREFLIGHT).fetchall())
+
+
+def ensure_state(conn: psycopg.Connection) -> list[str]:
+    """Create datagrant's schemas and grant-state table if missing; return preflight warnings."""
     with conn.transaction():
         for stmt in STATE_DDL:
             conn.execute(stmt)
+    return preflight(conn)
 
 
 def _column_expr(col: str, mask: str) -> sql.Composable:
@@ -73,6 +91,7 @@ def build_plan(
     decision: Decision,
     req: Request,
     *,
+    database: str,
     password: str,
     grant_id: str | None = None,
     now: datetime | None = None,
@@ -132,7 +151,7 @@ def build_plan(
             ),
         ),
     )
-    return GrantPlan(gid, role, f"{VIEW_SCHEMA}.{view}", expires, stmts)
+    return GrantPlan(gid, role, f"{VIEW_SCHEMA}.{view}", expires, database, stmts)
 
 
 def new_password() -> str:
@@ -144,6 +163,11 @@ def apply_plan(conn: psycopg.Connection, plan: GrantPlan) -> None:
     """Execute a plan atomically; any failure rolls everything back."""
     try:
         with conn.transaction():
+            current = conn.execute(sql.SQL("SELECT current_database()")).fetchone()
+            if current != (plan.database,):
+                raise GrantError(
+                    f"connected to database {current!r} but dataset is in {plan.database!r}"
+                )
             for stmt in plan.statements:
                 conn.execute(stmt)
     except psycopg.Error as exc:

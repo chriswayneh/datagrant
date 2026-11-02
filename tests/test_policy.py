@@ -32,7 +32,12 @@ BASE: dict[str, Any] = {
                     "name": "public.patients",
                     "allowed_groups": ["ml"],
                     "max_duration": "4h",
-                    "columns": {"id": "hash", "zip": "partial", "name": "redact"},
+                    "columns": {
+                        "id": "hash",
+                        "zip": "partial",
+                        "name": "redact",
+                        "region": "passthrough",
+                    },
                     "row_filters": ["region = 'west'"],
                     "require_row_filter": True,
                 }
@@ -139,6 +144,8 @@ def test_approval_defaults_to_auto_and_two_person_ok() -> None:
         (table(row_filters=[]), "no row_filters"),
         (table(max_duration="9h"), "exceeds"),
         (table(foo=1), "unknown key"),
+        (table(row_filters=["ssn = '1'"]), "not listed in columns"),
+        (table(row_filters=["region = 'x' OR ssn = 1"]), r"\['ssn'\]"),
         (table(columns={"id": ["hash"]}), "unknown mask"),
         (table(columns={"id": {"a": 1}}), "unknown mask"),
         (doc(max_duration="99999999999d"), "invalid duration"),

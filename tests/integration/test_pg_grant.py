@@ -10,7 +10,14 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from datagrant.pg.grant import GrantError, apply_plan, build_plan, ensure_state, new_password
+from datagrant.pg.grant import (
+    GrantError,
+    apply_plan,
+    build_plan,
+    ensure_state,
+    new_password,
+    preflight,
+)
 from datagrant.policy import Request, evaluate, parse_policy
 
 DSN = os.environ.get("DATAGRANT_TEST_DSN")
@@ -29,7 +36,12 @@ POLICY = parse_policy(
                     {
                         "name": "public.dg_patients",
                         "allowed_groups": ["ml"],
-                        "columns": {"id": "passthrough", "zip": "null", "name": "passthrough"},
+                        "columns": {
+                            "id": "passthrough",
+                            "zip": "null",
+                            "name": "passthrough",
+                            "region": "passthrough",
+                        },
                         "row_filters": ["region = 'west'"],
                     }
                 ],
@@ -65,7 +77,12 @@ def admin() -> Iterator[psycopg.Connection]:
         conn.execute("DROP TABLE public.dg_patients")
 
 
-def _grant(admin: psycopg.Connection, now: datetime | None = None, **kw: object) -> tuple:
+def _grant(
+    admin: psycopg.Connection,
+    now: datetime | None = None,
+    database: str = "postgres",
+    **kw: object,
+) -> tuple:
     base: dict[str, object] = {
         "requester": "alice",
         "dataset": "clinic",
@@ -80,14 +97,16 @@ def _grant(admin: psycopg.Connection, now: datetime | None = None, **kw: object)
     d = evaluate(POLICY, req)
     assert d.allowed, d.reasons
     pw = new_password()
-    plan = build_plan(d, req, password=pw, now=now)
+    plan = build_plan(d, req, database=database, password=pw, now=now)
     apply_plan(admin, plan)
     return plan, pw
 
 
-def _login(role: str, pw: str) -> psycopg.Connection:
+def _login(role: str, pw: str, dbname: str | None = None) -> psycopg.Connection:
     info = psycopg.conninfo.conninfo_to_dict(DSN)
     info.update(user=role, password=pw, host=info.get("host") or "localhost")
+    if dbname:
+        info["dbname"] = dbname
     return psycopg.connect(**info, autocommit=True)
 
 
@@ -127,3 +146,31 @@ def test_failure_rolls_back(admin: psycopg.Connection) -> None:
     assert admin.execute("SELECT count(*) FROM datagrant.grants").fetchone() == (0,)
     roles = admin.execute("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'dg\\_%'")
     assert roles.fetchone() == (0,)
+
+
+def test_database_mismatch_refused(admin: psycopg.Connection) -> None:
+    with pytest.raises(GrantError, match="dataset is in 'clinicdb'"):
+        _grant(admin, database="clinicdb")
+    assert admin.execute("SELECT count(*) FROM datagrant.grants").fetchone() == (0,)
+    roles = admin.execute("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'dg\\_%'")
+    assert roles.fetchone() == (0,)
+
+
+@pytest.fixture
+def other_db(admin: psycopg.Connection) -> Iterator[str]:
+    admin.execute("DROP DATABASE IF EXISTS dg_other")
+    admin.execute("CREATE DATABASE dg_other")
+    yield "dg_other"
+    admin.execute("DROP DATABASE IF EXISTS dg_other WITH (FORCE)")
+
+
+def test_preflight_and_hardening(admin: psycopg.Connection, other_db: str) -> None:
+    warnings = preflight(admin)
+    assert "PUBLIC can CONNECT to database dg_other" in warnings
+    assert any("TEMP" in w for w in warnings)
+    plan, pw = _grant(admin)
+    _login(plan.role, pw, other_db).close()  # default PUBLIC CONNECT: reachable
+    admin.execute("REVOKE CONNECT, TEMP ON DATABASE dg_other FROM PUBLIC")
+    assert "PUBLIC can CONNECT to database dg_other" not in preflight(admin)
+    with pytest.raises(psycopg.OperationalError):
+        _login(plan.role, pw, other_db)
