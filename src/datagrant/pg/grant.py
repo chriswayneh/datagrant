@@ -58,6 +58,13 @@ STATE_DDL: tuple[sql.Composed, ...] = (
         "CREATE TABLE IF NOT EXISTS {}.hash_keys (id text PRIMARY KEY, key bytea NOT NULL,"
         " created_at timestamptz NOT NULL DEFAULT now())"
     ).format(sql.Identifier(STATE_SCHEMA)),
+    # U4: revocation bookkeeping (additive, safe to re-run on U2/U3 databases).
+    sql.SQL(
+        "ALTER TABLE {}.grants ADD COLUMN IF NOT EXISTS revoked_at timestamptz,"
+        " ADD COLUMN IF NOT EXISTS revoke_reason text"
+        " CHECK (revoke_reason IN ('expired','manual')),"
+        " ADD COLUMN IF NOT EXISTS last_error text, ADD COLUMN IF NOT EXISTS last_error_at timestamptz"
+    ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
 
