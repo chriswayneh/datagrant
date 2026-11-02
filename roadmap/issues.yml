@@ -1,0 +1,276 @@
+milestones:
+- id: M0
+  title: 'v0.1.0: Scaffolding and AI-DLC Inception'
+  description: Repo skeleton, CI, Inception artifacts approved.
+- id: M1
+  title: 'v0.2.0: Construction: design and grant model'
+  description: Designs, NFRs and the grant/policy data model.
+- id: M2
+  title: 'v0.3.0: Construction: Postgres grants'
+  description: Create and revoke expiring, column/row limited Postgres access.
+- id: M3
+  title: 'v0.4.0: Construction: masking'
+  description: Presidio-based masking of PHI/PII in granted views.
+- id: M4
+  title: 'v0.5.0: Construction: signed access receipts'
+  description: Tamper-evident record of who saw what.
+- id: M5
+  title: 'v0.9.0: Operations and API freeze'
+  description: Docs, runbooks, threat model, packaging.
+- id: M6
+  title: 'v1.0.0: Stable release'
+  description: Release candidate proven from a fresh install.
+issues:
+- id: I-1
+  milestone: M0
+  title: Approve Inception vision and requirements
+  why: Every later stage builds on agreed scope.
+  files: aidlc-docs/inception/*
+  acceptance: Maintainer approval recorded in aidlc-docs/audit.md; open questions resolved or deferred
+    with reason.
+  size: S
+  depends_on: []
+  status: planned
+- id: I-2
+  milestone: M0
+  title: User stories and personas
+  why: Stories drive acceptance tests.
+  files: aidlc-docs/inception/user-stories.md
+  acceptance: At least 8 INVEST stories with acceptance criteria covering request, approve, use, revoke,
+    receipt.
+  size: S
+  depends_on:
+  - I-1
+  status: planned
+- id: I-3
+  milestone: M0
+  title: Units of work
+  why: Splits construction into reviewable units.
+  files: aidlc-docs/inception/units-of-work.md
+  acceptance: Each unit maps to stories and a roadmap task id.
+  size: S
+  depends_on:
+  - I-2
+  status: planned
+- id: I-4
+  milestone: M0
+  title: Release v0.1.0 scaffolding
+  why: Baseline release.
+  files: CHANGELOG.md, pyproject.toml
+  acceptance: Release checklist passed; maintainer tags.
+  size: S
+  depends_on:
+  - I-3
+  status: planned
+- id: D-1
+  milestone: M1
+  title: 'Functional design: grant request schema'
+  why: A stable request format is the core contract.
+  files: aidlc-docs/construction/functional-design.md, schema/grant-request.schema.json
+  acceptance: JSON Schema for table/columns/row filter/duration/purpose; fictional examples validate.
+  size: M
+  depends_on:
+  - I-3
+  status: planned
+- id: D-2
+  milestone: M1
+  title: NFR requirements and design
+  why: PHI/PII demands explicit security, audit and failure behavior.
+  files: aidlc-docs/construction/nfr-*.md
+  acceptance: Covers max TTL, fail-closed revoke, key handling, logging without data values.
+  size: M
+  depends_on:
+  - D-1
+  status: planned
+- id: D-3
+  milestone: M1
+  title: Grant request parser and validator
+  why: Turn requests into typed objects.
+  files: src/datagrant/request.py, tests/
+  acceptance: Invalid requests exit 2 with stable error codes; >=90% coverage.
+  size: M
+  depends_on:
+  - D-1
+  status: planned
+- id: D-4
+  milestone: M1
+  title: Policy file and offline policy check
+  why: Decide allow/deny before touching a database.
+  files: src/datagrant/policy.py, examples/policy.yaml
+  acceptance: Deny-by-default; max duration, allowed columns, purpose required; `datagrant check` command.
+  size: M
+  depends_on:
+  - D-3
+  status: planned
+- id: P-1
+  milestone: M2
+  title: Postgres connector and test harness
+  why: Need a real database to test against.
+  files: src/datagrant/pg.py, tests/integration/, CI service container
+  acceptance: Integration tests run against Postgres in CI; skipped locally without DSN.
+  size: M
+  depends_on:
+  - D-4
+  status: planned
+- id: P-2
+  milestone: M2
+  title: Create scoped view and temporary role
+  why: The core grant.
+  files: src/datagrant/grant.py
+  acceptance: Role has VALID UNTIL; only granted columns and filtered rows are readable; SQL identifiers
+    are quoted.
+  size: L
+  depends_on:
+  - P-1
+  status: planned
+- id: P-3
+  milestone: M2
+  title: Revoke and expiry sweep
+  why: Access must end on time even if a process dies.
+  files: src/datagrant/revoke.py
+  acceptance: '`datagrant revoke` and `datagrant sweep` drop expired roles/views idempotently; fail-closed.'
+  size: M
+  depends_on:
+  - P-2
+  status: planned
+- id: P-4
+  milestone: M2
+  title: Grant state store
+  why: Track active grants without storing data values.
+  files: src/datagrant/state.py
+  acceptance: Local SQLite/JSON state; no row data persisted.
+  size: S
+  depends_on:
+  - P-2
+  status: planned
+- id: K-1
+  milestone: M3
+  title: Masking policy model
+  why: Columns need a mask choice per sensitivity.
+  files: src/datagrant/masking.py
+  acceptance: 'Per-column mask: none, redact, hash, partial, Presidio-detected.'
+  size: M
+  depends_on:
+  - P-2
+  status: planned
+- id: K-2
+  milestone: M3
+  title: Presidio integration (optional extra)
+  why: Detect PII in free-text columns.
+  files: pyproject [presidio] extra, src/datagrant/presidio_mask.py
+  acceptance: Works when extra installed; clear error otherwise; fictional data tests.
+  size: L
+  depends_on:
+  - K-1
+  status: planned
+- id: K-3
+  milestone: M3
+  title: Masked view generation
+  why: Apply masks inside Postgres views.
+  files: src/datagrant/grant.py
+  acceptance: Unmasked values never reachable through the granted role (tested).
+  size: M
+  depends_on:
+  - K-1
+  status: planned
+- id: R-1
+  milestone: M4
+  title: Receipt schema
+  why: Auditors need a stable format.
+  files: schema/receipt.schema.json
+  acceptance: 'Fields: grant id, requester, purpose, columns, row filter, start/end, revoke time, hash
+    chain.'
+  size: S
+  depends_on:
+  - P-3
+  status: planned
+- id: R-2
+  milestone: M4
+  title: Ed25519 signing and verify
+  why: Receipts must be verifiable.
+  files: src/datagrant/receipt.py
+  acceptance: '`datagrant receipt verify` detects any edit; keys never logged.'
+  size: M
+  depends_on:
+  - R-1
+  status: planned
+- id: R-3
+  milestone: M4
+  title: Postgres audit correlation
+  why: Show queries actually run during the grant.
+  files: src/datagrant/audit.py
+  acceptance: Optional pgaudit/log ingestion summarizes query counts per grant.
+  size: M
+  depends_on:
+  - R-2
+  status: planned
+- id: O-1
+  milestone: M5
+  title: Operations runbook
+  why: Operators need deploy, rotate, sweep and incident steps.
+  files: aidlc-docs/operations/*
+  acceptance: Runbook reviewed; sweep scheduling example (cron/CI).
+  size: M
+  depends_on:
+  - R-2
+  status: planned
+- id: O-2
+  milestone: M5
+  title: Threat model and security review
+  why: Regulated-data tool must be reviewed.
+  files: docs/threat-model.md
+  acceptance: STRIDE table; findings fixed or tracked.
+  size: M
+  depends_on:
+  - O-1
+  status: planned
+- id: O-3
+  milestone: M5
+  title: CLI and schema freeze
+  why: Stable contract for v1.
+  files: docs/cli.md, CHANGELOG.md
+  acceptance: All commands, exit codes, schemas documented and frozen.
+  size: S
+  depends_on:
+  - O-2
+  status: planned
+- id: O-4
+  milestone: M5
+  title: Packaging and reproducible build
+  why: Installable release.
+  files: pyproject.toml, .github/workflows/release.yml
+  acceptance: Build sdist/wheel in CI with hash-locked deps; publishing set up by maintainer.
+  size: M
+  depends_on:
+  - O-3
+  status: planned
+- id: V-1
+  milestone: M6
+  title: Fresh-install end-to-end test
+  why: Prove it works for a new user.
+  files: tests/e2e/
+  acceptance: pip install from built wheel; request, use, revoke, verify receipt on Postgres.
+  size: M
+  depends_on:
+  - O-4
+  status: planned
+- id: V-2
+  milestone: M6
+  title: Final docs and AI-DLC audit close-out
+  why: Every stage approved and logged.
+  files: aidlc-docs/audit.md, README.md
+  acceptance: All gates show approval; README status updated.
+  size: S
+  depends_on:
+  - V-1
+  status: planned
+- id: V-3
+  milestone: M6
+  title: Release v1.0.0
+  why: Ship.
+  files: CHANGELOG.md
+  acceptance: Release checklist passed; maintainer tags and publishes.
+  size: S
+  depends_on:
+  - V-2
+  status: planned
