@@ -1,0 +1,23 @@
+# Example datagrant policy. Fictional names only.
+version: 1
+approval: auto            # auto | two-person
+max_duration: 8h          # policy-wide cap
+groups:
+  ml-team: [alice, bob]
+  analysts: [carol]
+datasets:
+  - name: clinic
+    database: clinicdb
+    tables:
+      - name: public.patients
+        allowed_groups: [ml-team]
+        max_duration: 4h
+        columns:
+          patient_id: hash
+          birth_year: passthrough
+          zip: partial
+          diagnosis_code: passthrough
+          full_name: redact
+        row_filters:
+          - "region = 'west'"
+        require_row_filter: true
