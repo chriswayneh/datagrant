@@ -6,11 +6,11 @@
 | Inception | Vision | ✅ Approved 2026-11-02 |
 | Inception | Requirements + application design | ✅ Approved 2026-11-02 |
 | Inception | User stories | ✅ Approved 2026-11-02 |
-| Inception | Units of work | Not started |
+| Inception | Units of work + execution plan | ✅ Approved 2026-11-02 |
 | Construction | Functional design | Not started |
 | Construction | NFR requirements / design | Not started |
 | Construction | Code generation | Not started |
 | Construction | Build and test | Not started |
 | Operations | Runbook / deployment | Not started |
 
-**Current stage:** Inception approved 2026-11-02. **Next:** units of work / execution plan, then Construction.
+**Current stage:** Inception approved 2026-11-02. **Next:** Construction, unit U1 (policy loader).

@@ -6,7 +6,7 @@ These rules apply to every contributor, human or automated. They follow the [AWS
 
 - Do not write any code yet.
 - Review the repository structure and the project goal ([vision](aidlc-docs/inception/vision.md), [requirements](aidlc-docs/inception/requirements.md)).
-- Produce a [application design document](aidlc-docs/inception/application-design.md) and an [execution plan](aidlc-docs/inception/execution-plan.md).
+- Produce an [application design document](aidlc-docs/inception/application-design.md) and an [execution plan](aidlc-docs/inception/execution-plan.md).
 - Wait for the maintainer's explicit approval, recorded in [`aidlc-docs/audit.md`](aidlc-docs/audit.md), before starting Construction.
 
 ## 2. Phase 2: Construction

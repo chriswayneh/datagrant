@@ -1,8 +1,33 @@
-# execution-plan (template)
+# Execution plan
 
-**Status:** Not started (task `I-1`). No code until approved.
+**Status:** Approved 2026-11-02 with Inception (task `I-1`). Construction follows AGENTS.md: one unit per PR, tests in each.
 
-## Content
+## Stages
+| Stage | Applies? | Notes |
+| --- | --- | --- |
+| Workspace detection | ✅ Done | Greenfield |
+| Reverse engineering | ⏭ Skip | No existing code to analyze |
+| Requirements / user stories | ✅ Done | requirements.md, user-stories.md |
+| Application design | ✅ Done | application-design.md |
+| Units of work | ✅ Done | Table below (also units-of-work.md) |
+| Functional design | ✅ Per unit | Short section in each PR / construction/functional-design.md |
+| NFR requirements / design | ✅ Light | Security guardrails from AGENTS.md; no perf/scale design for a CLI |
+| Infrastructure design | ⏭ Skip | No hosted service; Postgres only via CI service container |
+| Code generation + build/test | ✅ Per unit | Unit tests + real-Postgres integration tests in CI |
+| Operations | ✅ Light | Runbook for sweep scheduling and key handling |
 
-## Approval
-Record maintainer approval in ../audit.md before Construction.
+## Construction units (PR order)
+| # | Unit | Depends on | Done when |
+| --- | --- | --- | --- |
+| U1 | Policy loader + evaluator (`policy.py`) | — | YAML schema validated; deny-by-default; max duration; explain denials; tests |
+| U2 | Grant engine: Postgres view + expiring role, grant state table (`pg/grant.py`, `pg/state.py`) | U1 | Transactional create; quoted identifiers; validated row filter; dry-run SQL; integration tests |
+| U3 | Masking (`pg/mask.py`) | U2 | redact/hash(pgcrypto HMAC)/partial/null; raw values unreachable via grant role |
+| U4 | Expiry, revoke, sweep (`revoke.py`) | U2 | Sessions terminated, view+role dropped, idempotent, fail-closed exit codes |
+| U5 | Signed receipts (`receipt.py`, `keygen`) | U2 | ed25519 sign/verify, canonical JSON, key file 0600 + env override, tamper test |
+| U6 | CLI wiring + optional two-person approve | U1–U5 | `request/approve/revoke/sweep/list/receipt verify`; one-time password printed once |
+| U7 | One-command demo | U6 | Script seeds fictional data in local Postgres and walks request→query→expire→verify |
+| U8 | Docs | U7 | README quickstart, policy reference, security notes, runbook |
+
+## Risks
+- RLS bypass via view owner (mitigated in U2/U3 tests).
+- Revoke failures (fail closed, retried by sweep).
