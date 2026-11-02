@@ -14,6 +14,8 @@ from typing import Any
 
 import yaml
 
+from datagrant.rowfilter import RowFilterError, parse_row_filter
+
 MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null"})
 APPROVAL_MODES = frozenset({"auto", "two-person"})
 _DURATION_RE = re.compile(r"^(\d{1,6})([mhd])$")
@@ -138,6 +140,16 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
                 f"{where}.columns.{col}: unknown mask {mask!r} (one of {sorted(MASK_TYPES)})"
             )
     filters = _str_list(raw.get("row_filters", []), f"{where}.row_filters")
+    for k, f in enumerate(filters):
+        try:
+            _, used = parse_row_filter(f)
+        except RowFilterError as exc:
+            raise PolicyError(f"{where}.row_filters[{k}]: {exc}") from None
+        outside = sorted(used - set(cols))
+        if outside:
+            raise PolicyError(
+                f"{where}.row_filters[{k}]: references columns not listed in columns: {outside}"
+            )
     require = raw.get("require_row_filter", False)
     if not isinstance(require, bool):
         raise PolicyError(f"{where}.require_row_filter: expected true/false")
@@ -233,7 +245,7 @@ def load_policy(path: str | Path) -> Policy:
     if len(raw) > MAX_POLICY_BYTES:
         raise PolicyError(f"policy file {p} is larger than {MAX_POLICY_BYTES} bytes")
     try:
-        data = yaml.load(raw, Loader=_StrictLoader)  # nosec B506 - _StrictLoader subclasses SafeLoader
+        data = yaml.load(raw, Loader=_StrictLoader)  # nosec B506
         return parse_policy(data, hashlib.sha256(raw).hexdigest())
     except yaml.YAMLError as exc:
         raise PolicyError(f"policy file {p} is not valid YAML: {exc}") from exc
