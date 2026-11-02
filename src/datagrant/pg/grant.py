@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import psycopg
 from psycopg import sql
 
+from datagrant.keys import HashKey
+from datagrant.pg.mask import MaskError, TableCatalog, column_expr
 from datagrant.pg.scram import scram_verifier
 from datagrant.policy import Decision, Request
 from datagrant.rowfilter import parse_row_filter
@@ -35,6 +37,7 @@ class GrantPlan:
     expires_at: datetime
     database: str
     statements: tuple[sql.Composed, ...]
+    hash_key: HashKey | None = field(default=None, repr=False)
 
 
 STATE_DDL: tuple[sql.Composed, ...] = (
@@ -50,6 +53,10 @@ STATE_DDL: tuple[sql.Composed, ...] = (
         " approval text NOT NULL, policy_sha256 text NOT NULL,"
         " created_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,"
         " status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked','expired')))"
+    ).format(sql.Identifier(STATE_SCHEMA)),
+    sql.SQL(
+        "CREATE TABLE IF NOT EXISTS {}.hash_keys (id text PRIMARY KEY, key bytea NOT NULL,"
+        " created_at timestamptz NOT NULL DEFAULT now())"
     ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
@@ -78,21 +85,14 @@ def ensure_state(conn: psycopg.Connection) -> list[str]:
     return preflight(conn)
 
 
-def _column_expr(col: str, mask: str) -> sql.Composable:
-    # U3 replaces this hook with real masking; until then fail closed.
-    if mask == "passthrough":
-        return sql.Identifier(col)
-    if mask == "null":
-        return sql.SQL("NULL::text AS {}").format(sql.Identifier(col))
-    raise GrantError(f"mask {mask!r} on column {col!r} is not implemented yet (U3)")
-
-
 def build_plan(
     decision: Decision,
     req: Request,
     *,
     database: str,
     password: str,
+    catalog: TableCatalog,
+    hash_key: HashKey | None = None,
     grant_id: str | None = None,
     now: datetime | None = None,
 ) -> GrantPlan:
@@ -111,7 +111,16 @@ def build_plan(
     schema, table = req.table.split(".", 1)
     role, view = f"dg_{gid}", f"g_{gid}"
     role_id, view_id = sql.Identifier(role), sql.Identifier(VIEW_SCHEMA, view)
-    cols = sql.SQL(", ").join(_column_expr(c, decision.masks[c]) for c in req.columns)
+    needs_key = any(decision.masks[c] == "hash" for c in req.columns)
+    if needs_key and hash_key is None:
+        raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
+    key_id = hash_key.key_id if hash_key is not None else None
+    try:
+        cols = sql.SQL(", ").join(
+            column_expr(c, decision.masks[c], catalog, hash_key_id=key_id) for c in req.columns
+        )
+    except MaskError as exc:
+        raise GrantError(str(exc)) from None
     select = sql.SQL("SELECT {} FROM {}").format(cols, sql.Identifier(schema, table))
     if req.row_filter is not None:
         cond, _ = parse_row_filter(req.row_filter)
@@ -151,7 +160,15 @@ def build_plan(
             ),
         ),
     )
-    return GrantPlan(gid, role, f"{VIEW_SCHEMA}.{view}", expires, database, stmts)
+    return GrantPlan(
+        gid,
+        role,
+        f"{VIEW_SCHEMA}.{view}",
+        expires,
+        database,
+        stmts,
+        hash_key if needs_key else None,
+    )
 
 
 def new_password() -> str:
@@ -163,10 +180,20 @@ def apply_plan(conn: psycopg.Connection, plan: GrantPlan) -> None:
     """Execute a plan atomically; any failure rolls everything back."""
     try:
         with conn.transaction():
+            # Resolve every unqualified name to built-ins only (CVE-2018-1058 class).
+            conn.execute(sql.SQL("SET LOCAL search_path = pg_catalog, pg_temp"))
             current = conn.execute(sql.SQL("SELECT current_database()")).fetchone()
             if current != (plan.database,):
                 raise GrantError(
                     f"connected to database {current!r} but dataset is in {plan.database!r}"
+                )
+            if plan.hash_key is not None:
+                # Bound parameters: the key is not part of any statement text or view definition.
+                conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.hash_keys (id, key) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING"
+                    ).format(sql.Identifier(STATE_SCHEMA)),
+                    (plan.hash_key.key_id, plan.hash_key.derived),
                 )
             for stmt in plan.statements:
                 conn.execute(stmt)

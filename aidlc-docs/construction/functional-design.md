@@ -36,7 +36,26 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 - **Preflight:** `preflight(conn)` warns when `PUBLIC` can `CONNECT` to any other database, create `TEMP` tables in the current one, or `CREATE` in schema `public`.
 - **Admin hardening (recommended, done by the DBA):** for each database grant roles must not reach, `REVOKE CONNECT, TEMP ON DATABASE <db> FROM PUBLIC` (then grant `CONNECT` explicitly to real users/groups); in the dataset database `REVOKE TEMP ON DATABASE <db> FROM PUBLIC` and `REVOKE CREATE ON SCHEMA public FROM PUBLIC`. Integration test verifies a grant role cannot connect to a second database after hardening. See ../operations/runbook.md.
 - **Row filters:** policy filters may reference only columns listed in the table's `columns` (so filter columns are visible to the grantee) and must parse under a small grammar (`col op literal`, `IS [NOT] NULL`, AND/OR, parentheses; ≤1000 chars, depth ≤16) at policy load; re-emitted as composed SQL. Request must match an allowlisted filter exactly (U1).
-- **Masks:** U3 hook. U2 supports `passthrough` and `null` (`NULL::text`); any other mask fails closed with `GrantError`.
+- **Masks:** see U3.
 - **Apply:** `apply_plan(conn, plan)` first checks `current_database()` equals the dataset's `database` (refuses on mismatch), then runs all statements in one transaction; any error rolls back and raises `GrantError` (SQLSTATE only, no data).
 - **Not in U2:** revocation/sweep (U4), receipts (U5), CLI (U6), two-person approval (refused for now).
 - **Known limits:** view runs with the admin owner's privileges (base-table RLS not applied to grantee); `VALID UNTIL` blocks new logins only — live sessions are ended by sweep (U4).
+
+## U3 — Masking
+
+**Status:** In progress (approved 2026-11-02 5:43 PM CT; see ../audit.md). Modules: `src/datagrant/pg/mask.py`, `src/datagrant/keys.py`.
+
+- **Catalog:** `inspect_table(conn, "schema.table")` reads column types (`pg_attribute`/`pg_type`) and the pgcrypto schema (`pg_extension`). Unknown columns fail closed.
+- **Expressions** (all `psycopg.sql`, each aliased to the original column name):
+
+| Mask | Grantee sees | SQL shape |
+| --- | --- | --- |
+| `passthrough` | raw value | `"col"` |
+| `null` | typed NULL (column keeps its type) | `CAST(NULL AS "schema"."type")` |
+| `redact` | `[REDACTED]` for every row (text) | constant |
+| `partial` | `*` for all but the last 4 chars if length ≥ 8; all `*` otherwise; NULL stays NULL (length is revealed) | `repeat('*', …) \|\| right(v, 4)` |
+| `hash` | hex HMAC-SHA256 of the value as text; NULL stays NULL | `encode(<pgcrypto>.hmac(convert_to(v,'UTF8'), (SELECT key FROM datagrant.hash_keys WHERE id = '<key id>'), 'sha256'), 'hex')` |
+
+- **Hash key:** local file (`~/.config/datagrant/hash.key`, or path in `$DATAGRANT_HASH_KEY`), ≥32 bytes hex, must be `0600` on POSIX. datagrant derives a key (HMAC-SHA256 with a fixed label) and stores only the derived key in `datagrant.hash_keys` (no PUBLIC access), inserted with bound parameters. Views reference it by key id via a subquery that runs with the view owner's rights, so the key is never in a view definition or statement text, and the grantee cannot read it. Same key ⇒ same hash across grants (joinable); new key ⇒ new hashes.
+- **Fail closed:** hash mask without pgcrypto in the database, or without a key file → `GrantError`, nothing created.
+- **Known limits:** (1) the derived key sits in `datagrant.hash_keys`, readable by superusers/the datagrant admin role; (2) with `log_statement = all` or `log_min_duration_statement`, Postgres logs bound parameters, which would include the derived key on first insert — keep statement logging off for the admin role (`ALTER ROLE <admin> SET log_statement = 'none'`); (3) the grantee needs `EXECUTE` on pgcrypto `hmac` (PUBLIC by default); (4) hashing low-entropy values is only as strong as the key's secrecy; (5) `partial` and `redact` change the column type to text.
