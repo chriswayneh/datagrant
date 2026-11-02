@@ -39,16 +39,33 @@ def hash_key_path() -> Path:
 
 def load_hash_key(path: str | Path | None = None) -> HashKey:
     p = Path(path) if path is not None else hash_key_path()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
-        st = p.stat()
+        fd = os.open(p, flags)
+    except OSError as exc:
+        if p.is_dir():  # Windows cannot open a directory at all
+            raise KeyFileError(f"hash key {p} is not a regular file") from None
+        raise KeyFileError(f"cannot read hash key {p}: {exc.strerror}") from None
+    try:
+        # Check the opened file itself (no stat-then-open race, no symlink follow).
+        st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise KeyFileError(f"hash key {p} is not a regular file")
         if os.name == "posix" and st.st_mode & 0o077:
             raise KeyFileError(f"hash key {p} must not be readable by group/others (chmod 600)")
-        with p.open("rb") as fh:
-            raw = fh.read(_MAX_FILE_BYTES + 1)
+        chunks: list[bytes] = []
+        remaining = _MAX_FILE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
     except OSError as exc:
         raise KeyFileError(f"cannot read hash key {p}: {exc.strerror}") from None
+    finally:
+        os.close(fd)
     if len(raw) > _MAX_FILE_BYTES:
         raise KeyFileError(f"hash key {p} is too large")
     try:

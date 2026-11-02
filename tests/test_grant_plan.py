@@ -50,7 +50,7 @@ def test_plan_sql() -> None:
         dec(),
         req(),
         database="clinicdb",
-        password="pw",
+        password="Zq9-never-in-sql-Xk",
         catalog=CAT,
         grant_id="abcdef012345",
         now=NOW,
@@ -61,13 +61,15 @@ def test_plan_sql() -> None:
     text = [s.as_string(None) for s in plan.statements]
     assert text[0].startswith('CREATE ROLE "dg_abcdef012345" LOGIN NOINHERIT')
     assert "'2026-11-03T01:00:00+00:00'" in text[0]
-    assert "'pw'" not in text[0] and "SCRAM-SHA-256$4096:" in text[0]
+    assert "Zq9-never-in-sql-Xk" not in text[0] and "SCRAM-SHA-256$4096:" in text[0]
     assert text[1] == (
         'CREATE VIEW "datagrant_views"."g_abcdef012345" WITH (security_barrier = true) AS '
         'SELECT "id", CAST(NULL AS "pg_catalog"."text") AS "zip" FROM "public"."patients" WHERE "region" = \'west\''
     )
     assert text[4] == 'GRANT SELECT ON "datagrant_views"."g_abcdef012345" TO "dg_abcdef012345"'
-    assert all("pw" not in t for t in text)
+    # The SCRAM verifier is random base64, so a short password can appear in it by
+    # chance; use a distinctive password that cannot.
+    assert all("Zq9-never-in-sql-Xk" not in t for t in text)
 
 
 def test_plan_without_filter_and_random_id() -> None:

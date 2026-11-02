@@ -253,3 +253,21 @@ def test_hash_without_pgcrypto_fails_closed(admin: psycopg.Connection) -> None:
     finally:
         admin.execute("CREATE EXTENSION pgcrypto")
     assert admin.execute("SELECT count(*) FROM datagrant.grants").fetchone() == (0,)
+
+
+def test_view_ignores_shadow_functions_on_search_path(admin: psycopg.Connection) -> None:
+    # CVE-2018-1058 class: a lookalike in a schema on the admin's path must not be bound.
+    admin.execute("CREATE SCHEMA IF NOT EXISTS dg_evil")
+    admin.execute(
+        "CREATE OR REPLACE FUNCTION dg_evil.length(text) RETURNS integer"
+        " LANGUAGE sql AS 'SELECT 99'"
+    )
+    admin.execute("SET search_path = dg_evil, public, pg_catalog")
+    try:
+        plan, pw = _grant(admin, hash_key=KEY_A, columns=MASKED)
+    finally:
+        admin.execute("RESET search_path")
+        admin.execute("DROP SCHEMA dg_evil CASCADE")
+    with _login(plan.role, pw) as c:
+        rows = sorted(c.execute(f"SELECT {', '.join(MASKED)} FROM {plan.view}").fetchall())
+    assert [r[3] for r in rows] == ["*********1234", "**"]

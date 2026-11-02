@@ -56,3 +56,21 @@ def test_missing_and_directory(tmp_path: Path) -> None:
         load_hash_key(tmp_path / "missing")
     with pytest.raises(KeyFileError, match="not a regular file"):
         load_hash_key(tmp_path)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="needs O_NOFOLLOW")
+def test_symlink_not_followed(tmp_path: Path) -> None:
+    target = write(tmp_path, HEX)
+    link = tmp_path / "link.key"
+    link.symlink_to(target)
+    with pytest.raises(KeyFileError, match="cannot read"):
+        load_hash_key(link)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+def test_mode_checked_on_opened_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    p = write(tmp_path, HEX, 0o644)
+    # Path-based stat must not be what decides: checks run on the opened fd.
+    monkeypatch.setattr(Path, "stat", lambda self, **kw: os.stat(os.devnull))
+    with pytest.raises(KeyFileError, match="group/others"):
+        load_hash_key(p)

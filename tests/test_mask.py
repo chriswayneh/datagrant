@@ -23,17 +23,23 @@ def test_null_is_typed() -> None:
 
 
 def test_redact() -> None:
-    assert r("ssn", "redact") == "CAST('[REDACTED]' AS text) AS \"ssn\""
+    assert r("ssn", "redact") == "CAST('[REDACTED]' AS pg_catalog.text) AS \"ssn\""
 
 
 def test_partial() -> None:
     out = r("dob", "partial")
-    assert 'CAST("dob" AS text)' in out and "right(" in out and out.endswith('AS "dob"')
+    assert (
+        'CAST("dob" AS pg_catalog.text)' in out
+        and "pg_catalog.right(" in out
+        and out.endswith('AS "dob"')
+    )
 
 
 def test_hash_uses_key_id_not_key() -> None:
     out = r("ssn", "hash", hash_key_id="abc")
-    assert out.startswith('encode("ext"."hmac"(convert_to(CAST("ssn" AS text)')
+    assert out.startswith(
+        'pg_catalog.encode("ext"."hmac"(pg_catalog.convert_to(CAST("ssn" AS pg_catalog.text)'
+    )
     assert '"datagrant"."hash_keys"' in out and "k.id = 'abc'" in out
 
 

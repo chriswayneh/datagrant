@@ -3,6 +3,7 @@
 Every expression is composed with psycopg.sql; types and the pgcrypto schema
 come from the catalog. The hash key is never embedded in SQL: the view reads it
 via a scalar subquery on datagrant.hash_keys, which only the view owner can read.
+Built-in functions are schema-qualified to pg_catalog (CVE-2018-1058 class).
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ def column_expr(
     if ctype is None:
         raise MaskError(f"column {col!r} does not exist in the table")
     ident = sql.Identifier(col)
-    as_text = sql.SQL("CAST({} AS text)").format(ident)
+    as_text = sql.SQL("CAST({} AS pg_catalog.text)").format(ident)
     if mask == "passthrough":
         return ident
     if mask == "null":
@@ -72,11 +73,13 @@ def column_expr(
             sql.Identifier(ctype.schema, ctype.name)
         )
     elif mask == "redact":
-        expr = sql.SQL("CAST({} AS text)").format(sql.Literal(REDACTED))
+        expr = sql.SQL("CAST({} AS pg_catalog.text)").format(sql.Literal(REDACTED))
     elif mask == "partial":
         expr = sql.SQL(
-            "CASE WHEN length({v}) >= {min} THEN repeat('*', length({v}) - {keep}) || right({v}, {keep})"
-            " ELSE repeat('*', length({v})) END"
+            "CASE WHEN pg_catalog.length({v}) >= {min}"
+            " THEN pg_catalog.repeat('*', pg_catalog.length({v}) - {keep}) OPERATOR(pg_catalog.||)"
+            " pg_catalog.right({v}, {keep})"
+            " ELSE pg_catalog.repeat('*', pg_catalog.length({v})) END"
         ).format(v=as_text, min=sql.Literal(PARTIAL_MIN_LEN), keep=sql.Literal(PARTIAL_KEEP))
     elif mask == "hash":
         if catalog.pgcrypto_schema is None:
@@ -87,7 +90,7 @@ def column_expr(
         if hash_key_id is None:
             raise MaskError("hash masking needs a hash key")
         expr = sql.SQL(
-            "encode({hmac}(convert_to({v}, 'UTF8'),"
+            "pg_catalog.encode({hmac}(pg_catalog.convert_to({v}, 'UTF8'),"
             " (SELECT k.key FROM {keys} k WHERE k.id = {kid}), 'sha256'), 'hex')"
         ).format(
             hmac=sql.Identifier(catalog.pgcrypto_schema, "hmac"),

@@ -180,6 +180,8 @@ def apply_plan(conn: psycopg.Connection, plan: GrantPlan) -> None:
     """Execute a plan atomically; any failure rolls everything back."""
     try:
         with conn.transaction():
+            # Resolve every unqualified name to built-ins only (CVE-2018-1058 class).
+            conn.execute(sql.SQL("SET LOCAL search_path = pg_catalog, pg_temp"))
             current = conn.execute(sql.SQL("SELECT current_database()")).fetchone()
             if current != (plan.database,):
                 raise GrantError(
