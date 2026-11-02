@@ -233,7 +233,7 @@ def load_policy(path: str | Path) -> Policy:
     if len(raw) > MAX_POLICY_BYTES:
         raise PolicyError(f"policy file {p} is larger than {MAX_POLICY_BYTES} bytes")
     try:
-        data = yaml.load(raw, Loader=_StrictLoader)  # SafeLoader subclass
+        data = yaml.load(raw, Loader=_StrictLoader)  # nosec B506 - _StrictLoader subclasses SafeLoader
         return parse_policy(data, hashlib.sha256(raw).hexdigest())
     except yaml.YAMLError as exc:
         raise PolicyError(f"policy file {p} is not valid YAML: {exc}") from exc

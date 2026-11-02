@@ -4,7 +4,7 @@
 
 **Status:** In progress (Construction start approved 2026-11-02 5:26 PM CT; see ../audit.md). Module: `src/datagrant/policy.py`. Example: `examples/policy.yaml`.
 
-### Policy schema (version 1, YAML, `yaml.safe_load`, ≤1 MB)
+### Policy schema (version 1, YAML via a strict SafeLoader subclass, ≤1 MB; rejects anchors/aliases, duplicate keys, and deep nesting)
 | Key | Type | Notes |
 | --- | --- | --- |
 | `version` | int | Must be `1` |
