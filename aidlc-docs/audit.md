@@ -11,3 +11,4 @@ Append-only. Never edit past entries. Format: date (UTC), stage, actor, action, 
 | 2026-11-02 17:20 CT | Inception | Chris Hickman (maintainer), relayed via Grok Bot | Approved execution plan (units U1–U8) | **Execution plan approved; Inception gate I-1 closed** |
 | 2026-11-02 17:26 CT | Construction | Chris Hickman (maintainer), relayed via Grok Bot | Approved start of Construction unit U1 (policy loader) | **U1 started** |
 | 2026-11-02 17:35 CT | Construction | Chris Hickman (maintainer), relayed via Grok Bot | Approved start of Construction unit U2 (grant engine: Postgres view + expiring role + grant state) | **U2 started** |
+| 2026-11-02 17:43 CT | Construction | Chris Hickman (maintainer), relayed via Grok Bot | Approved start of Construction unit U3 (masking: redact, typed null, partial, pgcrypto HMAC hash) | **U3 started** |
