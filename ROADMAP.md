@@ -28,7 +28,7 @@ Repo skeleton, CI, Inception artifacts approved.
 
 | ID | Task | Size | Depends on |
 | --- | --- | :---: | --- |
-| `I-1` | Approve Inception vision and requirements | S | — |
+| `I-1` | Technical design document and execution plan; approve Inception | S | — |
 | `I-2` | User stories and personas | S | I-1 |
 | `I-3` | Units of work | S | I-2 |
 | `I-4` | Release v0.1.0 scaffolding | S | I-3 |

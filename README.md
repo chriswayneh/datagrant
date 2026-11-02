@@ -45,6 +45,7 @@ datagrant follows the [AWS AI-DLC](https://github.com/awslabs/aidlc-workflows) w
 
 - [ROADMAP.md](ROADMAP.md): milestones v0.1.0 to v1.0.0
 - [roadmap/issues.yml](roadmap/issues.yml): every task with acceptance criteria
+- [AGENTS.md](AGENTS.md): working rules (phases and security guardrails)
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md)
 
 ## License
