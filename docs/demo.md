@@ -36,7 +36,7 @@ DEMO OK
 One-time passwords are printed as `<shown once to the requester>` in the demo log. The demo uses them internally to log in.
 
 ## Without Docker (existing Postgres)
-Point the demo at any Postgres 13+ where the role can create roles and the `pgcrypto` extension (superuser is simplest). It writes only schema `dg_demo` (dropped at the end) and datagrant's own `datagrant` / `datagrant_views` state. Use a scratch database.
+Point the demo at any Postgres 13+ where the role can create roles and the `pgcrypto` extension (superuser is simplest). **Warning:** against an existing DSN the demo runs `DROP SCHEMA dg_demo CASCADE`, both at the start (before seeding) and at the end. It also leaves datagrant's state schemas (`datagrant`, `datagrant_views`) and the `pgcrypto` extension in place. Use a scratch database.
 
 ```bash
 DATAGRANT_DEMO_DSN=postgresql://admin:PASSWORD@localhost:5432/scratch ./scripts/demo.sh
