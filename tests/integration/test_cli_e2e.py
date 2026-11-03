@@ -271,3 +271,28 @@ def test_no_apply_changes_nothing(env: dict[str, Path]) -> None:
     assert outs[4][1]["would_revoke"] == [live["grant_id"]]
     assert outs[7][0] == EXIT_FAILED and outs[7][1]["already_exist"]  # keys exist: refused
     assert run("sweep", "--apply", "--dry-run")[0] == 2
+
+
+def test_custom_key_paths_end_to_end(
+    env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sk, hk = tmp_path / "custom" / "s.key", tmp_path / "custom" / "h.key"
+    keys = ["--signing-key", str(sk), "--hash-key", str(hk)]
+    assert run("keys", "init", "--apply", *keys)[0] == EXIT_OK
+    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "absent.key"))
+    code, g = run(
+        *keys,
+        "request",
+        "--apply",
+        "--policy",
+        str(env["auto"]),
+        "--as-user",
+        "alice",
+        "--duration",
+        "1h",
+        *REQ,
+    )
+    assert code == EXIT_OK and g["status"] == "granted"
+    code, v = run("receipts", "verify", "--signing-key", str(sk))
+    assert code == EXIT_OK and v["count"] == 1
+    assert run("revoke", "--apply", g["grant_id"], "--signing-key", str(sk))[0] == EXIT_OK

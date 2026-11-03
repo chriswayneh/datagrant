@@ -83,6 +83,7 @@ datagrant receipts verify --expect-head <recorded head>
 ```
 Every changing command (keys init, request, approve, revoke, sweep, preflight) is a **dry run unless `--apply`** is given: it prints the plan and changes nothing, and a dry run never creates or prints a password. `--dry-run` is accepted as a no-op alias, and `--apply --dry-run` together is a usage error.
 Exit codes: 0 ok, 1 denied/failed, 2 usage, 3 receipt not written, 4 revoke failed. Alert on 3 and 4 from the sweep timer.
+Key paths resolve as `--signing-key`/`--hash-key` > env vars > `keys init --dir` > `~/.config/datagrant/`. Pass the same flags (or env) to every command. A flag that doesn't apply to a command is rejected (exit 2).
 Identity is the OS user; `--as-user` is not authentication. For real two-person control, run datagrant behind a service that authenticates users and holds the admin DSN.
 
 ## Approval

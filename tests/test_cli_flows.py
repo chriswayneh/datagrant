@@ -267,3 +267,88 @@ def test_keys_init_dry_run(tmp_path: Path) -> None:
     out: list[str] = []
     assert cli.main(["keys", "init", "--dir", str(tmp_path / "k")], out.append) == 0
     assert "would create" in out[0] and not (tmp_path / "k").exists()
+
+
+@pytest.mark.parametrize("pos", ["global", "sub"])
+def test_keys_init_honours_signing_and_hash_key_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pos: str
+) -> None:
+    monkeypatch.delenv("DATAGRANT_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("DATAGRANT_HASH_KEY", raising=False)
+    sk, hk = tmp_path / "x" / "my.sign", tmp_path / "y" / "my.hash"
+    flags = ["--signing-key", str(sk), "--hash-key", str(hk), "--json"]
+    argv = (
+        [*flags, "keys", "init", "--apply"]
+        if pos == "global"
+        else ["keys", "init", "--apply", *flags]
+    )
+    out: list[str] = []
+    assert cli.main([*argv, "--dir", str(tmp_path / "d")], out.append) == 0
+    d = json.loads(out[0])
+    assert d["signing_key"] == str(sk) and d["hash_key"] == str(hk)  # explicit beats --dir
+    assert sk.exists() and hk.exists() and not (tmp_path / "d").exists()
+    exp = (
+        ["--signing-key", str(sk), "keys", "export-pubkey"]
+        if pos == "global"
+        else ["keys", "export-pubkey", "--signing-key", str(sk)]
+    )
+    out2: list[str] = []
+    assert cli.main(exp, out2.append) == 0 and out2 == [d["public_key"]]
+
+
+def test_key_path_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datagrant.keys import resolve_key_path
+
+    monkeypatch.delenv("DATAGRANT_SIGNING_KEY", raising=False)
+    assert resolve_key_path("signing", None, tmp_path) == tmp_path / "signing.key"
+    assert resolve_key_path("signing").name == "signing.key"
+    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "env.key"))
+    assert resolve_key_path("signing", None, tmp_path) == tmp_path / "env.key"  # env > --dir
+    assert resolve_key_path("signing", tmp_path / "f.key", tmp_path) == tmp_path / "f.key"
+    out: list[str] = []
+    assert cli.main(["--json", "keys", "init", "--dir", str(tmp_path / "d")], out.append) == 0
+    assert json.loads(out[0])["would_create"][1] == str(tmp_path / "env.key")
+
+
+def test_request_uses_signing_key_flag(
+    setup: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sk, hk = tmp_path / "alt" / "s.key", tmp_path / "alt" / "h.key"
+    assert (
+        cli.main(
+            ["keys", "init", "--apply", "--signing-key", str(sk), "--hash-key", str(hk)],
+            lambda s: None,
+        )
+        == 0
+    )
+    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "nope.key"))
+    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "nope.hash"))
+    pol = str(setup["tmp"] / "auto.yaml")
+    assert run("request", "--apply", "--policy", pol, *REQ)[0] == 1  # env keys missing
+    code, _ = run(
+        "--signing-key", str(sk), "--hash-key", str(hk), "request", "--apply", "--policy", pol, *REQ
+    )
+    assert code == 0
+    _, sink, _ = setup["applied"][-1]
+    from datagrant.keys import load_signing_key
+
+    assert sink.key.key_id == load_signing_key(sk).key_id
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--dsn", "x", "policy", "check", "f"],
+        ["--receipt-log", "x", "keys", "init"],
+        ["--hash-key", "x", "revoke", "abc"],
+        ["--signing-key", "x", "grant", "list"],
+        ["--dsn", "x", "receipts", "verify"],
+    ],
+)
+def test_global_flag_that_does_not_apply_is_usage_error(argv: list[str]) -> None:
+    assert cli.main(argv, lambda s: None) == cli.EXIT_USAGE
+
+
+def test_subcommands_do_not_advertise_unused_flags(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["policy", "check", "--dsn", "x", "f"]) == cli.EXIT_USAGE
+    assert cli.main(["grant", "list", "--signing-key", "x"]) == cli.EXIT_USAGE

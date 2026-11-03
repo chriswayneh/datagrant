@@ -35,6 +35,7 @@ from datagrant.keys import (
     load_hash_key,
     load_public_key,
     load_signing_key,
+    resolve_key_path,
 )
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_RECEIPT, EXIT_REVOKE_FAILED = 0, 1, 2, 3, 4
@@ -115,7 +116,7 @@ def _policy(args: argparse.Namespace) -> Any:
 def _sink(args: argparse.Namespace) -> Any:
     from datagrant.pg.grant import ReceiptSink
 
-    key = load_signing_key(args.signing_key) if args.signing_key else load_signing_key()
+    key = load_signing_key(resolve_key_path("signing", args.signing_key))
     log = Path(args.receipt_log) if args.receipt_log else receipt.default_log_path()
     return ReceiptSink(log, key)
 
@@ -137,11 +138,9 @@ def _conn_info(args: argparse.Namespace, plan: Any) -> dict[str, Any]:
 
 def cmd_keys_init(ctx: Ctx) -> int:
     if not ctx.args.apply:
-        from datagrant.keys import hash_key_path, signing_key_path
-
-        d = ctx.args.dir
-        hp = Path(d) / "hash.key" if d else hash_key_path()
-        sp = Path(d) / "signing.key" if d else signing_key_path()
+        a = ctx.args
+        hp = resolve_key_path("hash", a.hash_key, a.dir)
+        sp = resolve_key_path("signing", a.signing_key, a.dir)
         exists = [str(x) for x in (hp, sp) if x.exists() or x.is_symlink()]
         ctx.emit(
             {"dry_run": True, "would_create": [str(hp), str(sp)], "already_exist": exists},
@@ -150,7 +149,8 @@ def cmd_keys_init(ctx: Ctx) -> int:
             + "\nre-run with --apply to create them",
         )
         return EXIT_FAILED if exists else EXIT_OK
-    hp, sp, pub = init_keys(ctx.args.dir)
+    a = ctx.args
+    hp, sp, pub = init_keys(a.dir, hash_path=a.hash_key, signing_path=a.signing_key)
     ctx.emit(
         {"hash_key": str(hp), "signing_key": str(sp), "public_key": pub},
         f"created {hp}\ncreated {sp}\npublic key: {pub}\nBack up both files (see runbook).",
@@ -160,7 +160,7 @@ def cmd_keys_init(ctx: Ctx) -> int:
 
 def cmd_keys_export(ctx: Ctx) -> int:
     a = ctx.args
-    key = load_signing_key(a.signing_key) if a.signing_key else load_signing_key()
+    key = load_signing_key(resolve_key_path("signing", a.signing_key))
     ctx.emit({"public_key": key.public_hex(), "key_id": key.key_id}, key.public_hex())
     return EXIT_OK
 
@@ -224,7 +224,9 @@ def cmd_request(ctx: Ctx) -> int:
         )
         return EXIT_FAILED
     two_person = decision.approval == "two-person"
-    hash_key = load_hash_key() if _needs_hash(decision, cols) else None
+    hash_key = (
+        load_hash_key(resolve_key_path("hash", a.hash_key)) if _needs_hash(decision, cols) else None
+    )
     with _connect(a) as conn:
         catalog = inspect_table(conn, req.table)
         if not a.apply:
@@ -339,7 +341,11 @@ def cmd_approve(ctx: Ctx) -> int:
             )
             return EXIT_FAILED
         cols = pending.request.columns
-        hash_key = load_hash_key() if _needs_hash(decision, cols) else None
+        hash_key = (
+            load_hash_key(resolve_key_path("hash", a.hash_key))
+            if _needs_hash(decision, cols)
+            else None
+        )
         if not a.apply:
             plan = build_plan(
                 decision,
@@ -558,7 +564,7 @@ def cmd_receipts_verify(ctx: Ctx) -> int:
         text = Path(a.pubkey).read_text() if Path(a.pubkey).is_file() else a.pubkey
         pub = load_public_key(text)
     else:
-        key = load_signing_key(a.signing_key) if a.signing_key else load_signing_key()
+        key = load_signing_key(resolve_key_path("signing", a.signing_key))
         pub = key.private.public_key()
     log = Path(a.receipt_log) if a.receipt_log else receipt.default_log_path()
     res = receipt.verify(log, pub, expect_head=a.expect_head)
@@ -594,20 +600,40 @@ def cmd_preflight(ctx: Ctx) -> int:
 # ---- parser ---------------------------------------------------------------
 
 
-def build_parser() -> argparse.ArgumentParser:
-    def _common(suppress: bool) -> argparse.ArgumentParser:
-        # Subcommands use SUPPRESS so a flag given before the subcommand is not reset.
-        d: dict[str, Any] = {"default": argparse.SUPPRESS} if suppress else {}
-        c = argparse.ArgumentParser(add_help=False)
-        c.add_argument("--json", action="store_true", help="machine-readable output", **d)
-        c.add_argument("--dsn", help=f"admin connection string (default ${DSN_ENV})", **d)
-        c.add_argument(
-            "--signing-key", help="signing key file (default $DATAGRANT_SIGNING_KEY)", **d
-        )
-        c.add_argument("--receipt-log", help="receipt log (default $DATAGRANT_RECEIPT_LOG)", **d)
-        return c
+_GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log")
+_REVOKING = ("json", "dsn", "signing_key", "receipt_log")
 
-    common = _common(True)
+
+def build_parser() -> argparse.ArgumentParser:
+    # Each option lives in its own parent so a subcommand only advertises what it uses.
+    # Subcommand copies use SUPPRESS so a value given before the subcommand is kept.
+    sup: dict[str, Any] = {"default": argparse.SUPPRESS}
+    opts: dict[str, tuple[tuple[str, ...], dict[str, Any]]] = {
+        "json": (("--json",), {"action": "store_true", "help": "machine-readable output"}),
+        "dsn": (("--dsn",), {"help": f"admin connection string (default ${DSN_ENV})"}),
+        "signing_key": (
+            ("--signing-key",),
+            {"help": "signing key file (beats $DATAGRANT_SIGNING_KEY and --dir)"},
+        ),
+        "hash_key": (
+            ("--hash-key",),
+            {"help": "hash key file (beats $DATAGRANT_HASH_KEY and --dir)"},
+        ),
+        "receipt_log": (
+            ("--receipt-log",),
+            {"help": "receipt log (default $DATAGRANT_RECEIPT_LOG)"},
+        ),
+    }
+
+    def only(*names: str) -> list[argparse.ArgumentParser]:
+        out = []
+        for n in names:
+            c = argparse.ArgumentParser(add_help=False)
+            flags, kw = opts[n]
+            c.add_argument(*flags, **kw, **sup)
+            out.append(c)
+        return out
+
     ident = argparse.ArgumentParser(add_help=False)
     ident.add_argument(
         "--as-user",
@@ -626,27 +652,37 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="datagrant",
         description="Just-in-time, expiring, masked access to regulated data, with receipts.",
-        parents=[_common(False)],
     )
+    for flags, kw in opts.values():
+        p.add_argument(*flags, **kw)
     p.add_argument("--version", action="version", version=f"datagrant {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     keys = sub.add_parser("keys", help="create or export keys").add_subparsers(
         dest="sub", required=True
     )
-    k = keys.add_parser("init", parents=[common, apply], help="create hash + signing keys (0600)")
-    k.add_argument("--dir", help="directory (default: env paths or ~/.config/datagrant)")
+    k = keys.add_parser(
+        "init",
+        parents=[*only("json", "signing_key", "hash_key"), apply],
+        help="create hash + signing keys (0600)",
+    )
+    k.add_argument(
+        "--dir",
+        help="directory for both keys; --signing-key/--hash-key and the env vars win over it",
+    )
     k.set_defaults(fn=cmd_keys_init)
     keys.add_parser(
-        "export-pubkey", parents=[common], help="print the receipt public key"
+        "export-pubkey", parents=only("json", "signing_key"), help="print the receipt public key"
     ).set_defaults(fn=cmd_keys_export)
 
     pc = sub.add_parser("policy", help="policy tools").add_subparsers(dest="sub", required=True)
-    c = pc.add_parser("check", parents=[common], help="validate a policy file")
+    c = pc.add_parser("check", parents=only("json"), help="validate a policy file")
     c.add_argument("file")
     c.set_defaults(fn=cmd_policy_check)
 
-    r = sub.add_parser("request", parents=[common, ident, pol, apply], help="request access")
+    r = sub.add_parser(
+        "request", parents=[*only(*_GRANTING), ident, pol, apply], help="request access"
+    )
     r.add_argument("--dataset", required=True)
     r.add_argument("--table", required=True, help="schema.table")
     r.add_argument("--columns", required=True, help="comma-separated")
@@ -657,36 +693,61 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(fn=cmd_request)
 
     ap = sub.add_parser(
-        "approve", parents=[common, ident, pol, apply], help="approve a pending request"
+        "approve", parents=[*only(*_GRANTING), ident, pol, apply], help="approve a pending request"
     )
     ap.add_argument("request_id")
     ap.set_defaults(fn=cmd_approve)
 
     g = sub.add_parser("grant", help="inspect grants").add_subparsers(dest="sub", required=True)
-    gl = g.add_parser("list", parents=[common], help="list active grants")
+    gl = g.add_parser("list", parents=only("json", "dsn"), help="list active grants")
     gl.add_argument("--all", action="store_true", help="include revoked/expired")
     gl.set_defaults(fn=cmd_grant_list)
-    gs = g.add_parser("status", parents=[common], help="show one grant")
+    gs = g.add_parser("status", parents=only("json", "dsn"), help="show one grant")
     gs.add_argument("grant_id")
     gs.set_defaults(fn=cmd_grant_status)
 
-    rv = sub.add_parser("revoke", parents=[common, apply], help="revoke a grant now")
+    rv = sub.add_parser("revoke", parents=[*only(*_REVOKING), apply], help="revoke a grant now")
     rv.add_argument("grant_id")
     rv.set_defaults(fn=cmd_revoke)
     sub.add_parser(
-        "sweep", parents=[common, apply], help="revoke expired grants (run on a schedule)"
+        "sweep",
+        parents=[*only(*_REVOKING), apply],
+        help="revoke expired grants (run on a schedule)",
     ).set_defaults(fn=cmd_sweep)
 
     rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(dest="sub", required=True)
-    v = rc.add_parser("verify", parents=[common], help="verify signatures and the hash chain")
+    v = rc.add_parser(
+        "verify",
+        parents=only("json", "signing_key", "receipt_log"),
+        help="verify signatures and the hash chain",
+    )
     v.add_argument("--pubkey", help="public key hex, or a file containing it")
     v.add_argument("--expect-head", help="head hash recorded earlier (detects truncation)")
     v.set_defaults(fn=cmd_receipts_verify)
 
     sub.add_parser(
-        "preflight", parents=[common, apply], help="create state; warn on PUBLIC defaults"
+        "preflight",
+        parents=[*only("json", "dsn"), apply],
+        help="create state; warn on PUBLIC defaults",
     ).set_defaults(fn=cmd_preflight)
     return p
+
+
+def _accepts(args: argparse.Namespace) -> set[str]:
+    fn = args.fn
+    table: dict[Any, tuple[str, ...]] = {
+        cmd_keys_init: ("signing_key", "hash_key"),
+        cmd_keys_export: ("signing_key",),
+        cmd_request: _GRANTING,
+        cmd_approve: _GRANTING,
+        cmd_revoke: _REVOKING,
+        cmd_sweep: _REVOKING,
+        cmd_receipts_verify: ("signing_key", "receipt_log"),
+        cmd_grant_list: ("dsn",),
+        cmd_grant_status: ("dsn",),
+        cmd_preflight: ("dsn",),
+    }
+    return set(table.get(fn, ()))
 
 
 def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) -> int:
@@ -701,6 +762,16 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse: 0 for --help/--version, 2 for usage errors
         return int(exc.code or 0)
+    unused = [
+        f"--{n.replace('_', '-')}"
+        for n in ("dsn", "signing_key", "hash_key", "receipt_log")
+        if getattr(args, n, None) is not None and n not in _accepts(args)
+    ]
+    if unused:
+        print(
+            f"datagrant: error: {', '.join(unused)} does not apply to this command", file=sys.stderr
+        )
+        return EXIT_USAGE
     if getattr(args, "apply", False) and getattr(args, "dry_run", False):
         print("datagrant: error: --apply and --dry-run conflict", file=sys.stderr)
         return EXIT_USAGE
