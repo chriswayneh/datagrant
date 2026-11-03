@@ -51,4 +51,4 @@ python scripts/demo.py
 
 To use Docker on Windows, start the container yourself with `docker compose -f scripts/demo-compose.yml up -d --wait` (set `DATAGRANT_DEMO_PG_PASSWORD` first), run the line above, then `docker compose -f scripts/demo-compose.yml down -v`.
 
-CI runs the demo on every push (`demo` job) against the CI Postgres service and checks the markers.
+CI runs the demo on every push twice: `demo` against the CI Postgres service, and `demo-compose` through `make demo` (Docker compose), which also checks that teardown left no containers or volumes.

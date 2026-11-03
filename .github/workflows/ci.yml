@@ -73,3 +73,34 @@ jobs:
           done
           grep -q '^DEMO OK$' demo.log
           ! grep -q 'SCRAM-SHA-256' demo.log
+  demo-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install -e .
+      - name: make demo (docker compose path)
+        shell: bash
+        run: |
+          unset DATAGRANT_DEMO_DSN
+          make demo | tee demo.log
+      - name: assert demo markers
+        shell: bash
+        run: |
+          for m in masked-rows-ok two-person-ok revoke-ok sweep-ok receipts-ok; do
+            grep -q "DEMO MARKER: $m" demo.log || { echo "missing marker $m"; exit 1; }
+          done
+          grep -q '^DEMO OK$' demo.log
+          ! grep -q 'SCRAM-SHA-256' demo.log
+      - name: assert teardown left nothing
+        shell: bash
+        run: |
+          left_c=$(docker ps -a -q --filter label=com.docker.compose.project=datagrant-demo)
+          left_v=$(docker volume ls -q --filter label=com.docker.compose.project=datagrant-demo)
+          echo "containers: [$left_c] volumes: [$left_v]"
+          [ -z "$left_c" ] && [ -z "$left_v" ]
+          ! docker volume ls -q | grep -q '^datagrant-demo_'
