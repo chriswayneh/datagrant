@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>datagrant: temporary, masked access to PHI and PII in Postgres</title>
+<meta name="description" content="Temporary, masked access to PHI and PII in Postgres, with signed access receipts.">
+<meta name="color-scheme" content="light dark">
+<style>
+:root{--bg:#0b1020;--bg2:#121933;--card:#151d3b;--line:#26305a;--text:#e7eaf6;--muted:#9aa3c7;--accent:#5b8cff;--accent2:#34d1b6;--term:#0a0e1a;--shadow:0 10px 30px rgba(0,0,0,.35)}
+@media (prefers-color-scheme:light){:root{--bg:#f7f8fc;--bg2:#eef1fa;--card:#fff;--line:#dfe3f0;--text:#141a33;--muted:#58607e;--accent:#2f5fe0;--accent2:#0f9d86;--shadow:0 10px 30px rgba(20,26,51,.08)}}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+a{color:var(--accent)}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+nav{display:flex;justify-content:space-between;align-items:center;padding:20px 0}
+.logo{font-weight:800;font-size:1.25rem;color:var(--text);text-decoration:none;display:flex;gap:10px;align-items:center}
+.mark{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+nav .links a{color:var(--muted);text-decoration:none;margin-left:22px;font-size:.95rem}
+nav .links a:hover{color:var(--text)}
+.hero{padding:72px 0 64px;text-align:center;background:radial-gradient(800px 400px at 50% 0,color-mix(in srgb,var(--accent) 22%,transparent),transparent)}
+.pill{display:inline-block;border:1px solid var(--line);color:var(--muted);border-radius:999px;padding:4px 14px;font-size:.85rem;margin-bottom:22px}
+h1{font-size:clamp(2rem,5vw,3.4rem);line-height:1.15;margin:0 auto 18px;max-width:880px;letter-spacing:-.02em}
+h1 span{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{font-size:1.15rem;color:var(--muted);max-width:720px;margin:0 auto 32px}
+.btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;padding:13px 24px;border-radius:10px;font-weight:600;text-decoration:none;border:1px solid var(--line);color:var(--text);background:var(--card)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn:hover{transform:translateY(-1px)}
+section{padding:72px 0}section.alt{background:var(--bg2)}
+h2{font-size:clamp(1.6rem,3.5vw,2.2rem);margin:0 0 10px;letter-spacing:-.01em;text-align:center}
+.sub{color:var(--muted);text-align:center;max-width:680px;margin:0 auto 44px}
+.steps{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;counter-reset:s}
+.step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 18px;box-shadow:var(--shadow);position:relative}
+.step::before{counter-increment:s;content:counter(s);display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:700;margin-bottom:14px}
+.step h3{margin:0 0 6px;font-size:1.05rem}.step p{margin:0;color:var(--muted);font-size:.93rem}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px;box-shadow:var(--shadow)}
+.card .ic{font-size:1.5rem;margin-bottom:8px}.card h3{margin:0 0 6px;font-size:1.08rem}.card p{margin:0;color:var(--muted);font-size:.95rem}
+.term{background:var(--term);border:1px solid #232b4d;border-radius:14px;box-shadow:var(--shadow);overflow:hidden;max-width:900px;margin:0 auto}
+.bar{display:flex;gap:8px;padding:12px 16px;background:#141a2e;align-items:center}
+.bar i{width:12px;height:12px;border-radius:50%;display:block}.bar i:nth-child(1){background:#ff5f57}.bar i:nth-child(2){background:#febc2e}.bar i:nth-child(3){background:#28c840}
+.bar span{color:#7d86ad;font-size:.85rem;margin-left:8px}
+.term pre{margin:0;padding:22px;color:#d6dcf5;font-size:.88rem;overflow-x:auto;line-height:1.75}
+.p{color:#34d1b6}.c{color:#6b7499}.f{color:#ffcb6b}
+.note{text-align:center;color:var(--muted);margin-top:20px;font-size:.95rem}
+.who{display:grid;grid-template-columns:repeat(2,1fr);max-width:820px;margin:0 auto;gap:18px}
+.limits{max-width:820px;margin:44px auto 0;border-left:3px solid var(--accent2);padding:6px 20px;color:var(--muted)}
+footer{border-top:1px solid var(--line);padding:36px 0;color:var(--muted);font-size:.92rem}
+footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:16px}
+footer a{color:var(--muted);margin-right:18px;text-decoration:none}footer a:hover{color:var(--text)}
+@media (max-width:960px){.steps{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:600px){.steps,.grid,.who{grid-template-columns:1fr}nav .links a:not(.gh){display:none}.hero{padding:48px 0}section{padding:56px 0}.term pre{font-size:.78rem;padding:16px}}
+</style>
+</head>
+<body>
+<header class="hero">
+<div class="wrap">
+<nav><a class="logo" href="#"><span class="mark"></span>datagrant</a>
+<div class="links"><a href="#how">How it works</a><a href="#features">Features</a><a href="#demo">Demo</a><a href="#start">Get started</a><a class="gh" href="https://github.com/chriswayneh/datagrant">GitHub</a></div></nav>
+<div style="padding-top:40px">
+<span class="pill">v0.1.0 released · MIT license · Open source</span>
+<h1>Temporary, masked access to <span>PHI and PII in Postgres</span>, with signed access receipts</h1>
+<p class="lead">A command line tool that gives developers short, limited access to sensitive data. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.</p>
+<div class="btns"><a class="btn primary" href="#start">Get started</a><a class="btn" href="https://github.com/chriswayneh/datagrant">View on GitHub</a></div>
+</div></div>
+</header>
+
+<section id="how"><div class="wrap">
+<h2>How it works</h2>
+<p class="sub">Ask for specific columns and rows, for a set number of hours, with a reason. The policy decides, access ends on its own, and every step leaves a receipt.</p>
+<div class="steps">
+<div class="step"><h3>Request</h3><p>Name the table, columns, row filter, duration, and purpose. A deny-by-default policy checks it.</p></div>
+<div class="step"><h3>Two-person approve</h3><p>When the policy requires it, someone else in an approver group must approve the request.</p></div>
+<div class="step"><h3>Masked, time-limited access</h3><p>A masked view and a login role with an expiry. The developer connects with a one-time password.</p></div>
+<div class="step"><h3>Auto-expiry</h3><p>A scheduled sweep revokes expired grants. Revoking locks the role out and closes open sessions.</p></div>
+<div class="step"><h3>Signed receipt</h3><p>Every grant, revoke, and expiry is written to a signed, hash-chained receipt log you can verify.</p></div>
+</div></div></section>
+
+<section id="features"><div class="wrap">
+<h2>Features</h2>
+<p class="sub">Narrow access becomes the easy option instead of the slow one.</p>
+<div class="grid">
+<div class="card"><div class="ic">🎯</div><h3>Column and row limits</h3><p>Only columns listed in the policy can be requested, and tables can require a row filter.</p></div>
+<div class="card"><div class="ic">🎭</div><h3>Five masking modes</h3><p>Passthrough, redact, keyed HMAC hash, partial, or NULL, set per column.</p></div>
+<div class="card"><div class="ic">⏱️</div><h3>Access that ends itself</h3><p>Grants have a maximum duration set by policy, and the sweep cleans up anything expired.</p></div>
+<div class="card"><div class="ic">👥</div><h3>Two-person control</h3><p>Set approval to two-person so a second person in an approver group signs off.</p></div>
+<div class="card"><div class="ic">🧾</div><h3>Verifiable receipts</h3><p>Signed, hash-chained records of who saw what. Check the whole chain with one command.</p></div>
+<div class="card"><div class="ic">🛡️</div><h3>Safe by default</h3><p>Every command that changes something is a dry run unless you add <code>--apply</code>.</p></div>
+</div></div></section>
+
+<section id="demo" class="alt"><div class="wrap">
+<h2>Demo</h2>
+<p class="sub">Real output from the project's CI demo run: masked rows, two-person approval, revoke, sweep and receipt verification.</p>
+<img src="assets/demo.gif" alt="datagrant demo output ending in DEMO OK" style="display:block;width:100%;max-width:960px;margin:0 auto;border-radius:14px;border:1px solid var(--line);box-shadow:var(--shadow)">
+<div class="term" style="margin-top:28px"><div class="bar"><i></i><i></i><i></i><span>run it yourself</span></div>
+<pre><span class="c"># Needs Python 3.11 or later and Docker with the compose plugin</span>
+<span class="p">$</span> git clone https://github.com/chriswayneh/datagrant &amp;&amp; cd datagrant
+<span class="p">$</span> pip install -e .
+<span class="p">$</span> make demo        <span class="c"># temporary Postgres 16 with fake patient data; tears down on exit</span></pre></div>
+<p class="note">Each step prints a <code>DEMO MARKER</code> line, and a successful run ends with <code>DEMO OK</code>. See the <a href="https://github.com/chriswayneh/datagrant/blob/main/docs/demo.md">demo guide</a>.</p>
+</div></section>
+
+<section id="start" class="alt"><div class="wrap">
+<h2>Get started</h2>
+<p class="sub">Requires Python 3.11 or later and Postgres (tested on version 16). Try the demo, or point it at your own database.</p>
+<div class="term"><div class="bar"><i></i><i></i><i></i><span>terminal</span></div>
+<pre><span class="c"># Install from GitHub</span>
+<span class="p">$</span> pip install git+https://github.com/chriswayneh/datagrant.git
+
+<span class="c"># Against your database</span>
+<span class="p">$</span> datagrant keys init <span class="f">--apply</span>
+<span class="p">$</span> datagrant policy check policy.yaml
+<span class="p">$</span> datagrant preflight <span class="f">--apply</span>
+<span class="p">$</span> datagrant request --dataset clinic --table public.patients \
+    --columns patient_id,zip --row-filter "region = 'west'" \
+    --duration 2h --purpose "debug model drift" <span class="f">--apply</span>
+<span class="p">$</span> datagrant sweep <span class="f">--apply</span>      <span class="c"># run every minute from cron or systemd</span>
+<span class="p">$</span> datagrant receipts verify</pre></div>
+<p class="note">The demo ends with <code>DEMO OK</code>. Read the <a href="https://github.com/chriswayneh/datagrant/blob/main/docs/demo.md">demo guide</a> and the <a href="https://github.com/chriswayneh/datagrant/blob/main/docs/cli.md">CLI reference</a>.</p>
+</div></section>
+
+<section><div class="wrap">
+<h2>Who it's for</h2>
+<p class="sub">Teams that need people to work with sensitive data without handing out broad, permanent access.</p>
+<div class="who">
+<div class="card"><h3>AI and data developers</h3><p>Get the columns and rows you need for a task, for a few hours, without waiting on a hand-built setup.</p></div>
+<div class="card"><h3>Security and compliance teams</h3><p>Support the HIPAA "minimum necessary" rule and data minimization for PII, with records you can verify.</p></div>
+</div>
+<div class="limits"><strong>Honest limits:</strong> datagrant narrows and time-boxes access and makes it auditable. It is not an identity provider or a data loss prevention system. Until version 1.0, commands may change. Read the <a href="https://github.com/chriswayneh/datagrant/blob/main/docs/security.md">security model</a> before using real data.</div>
+</div></section>
+
+<footer><div class="wrap">
+<div><strong>datagrant</strong> · MIT license · Personal open source project by Chris Hickman</div>
+<div><a href="https://github.com/chriswayneh/datagrant">Repository</a><a href="https://github.com/chriswayneh/datagrant/tree/main/docs">Docs</a><a href="https://github.com/chriswayneh/datagrant/releases/tag/v0.1.0">Releases</a><a href="https://github.com/chriswayneh/datagrant/blob/main/LICENSE">License</a></div>
+</div></footer>
+</body></html>
