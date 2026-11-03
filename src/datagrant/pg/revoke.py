@@ -1,10 +1,12 @@
 """Revoke grants and sweep expired ones (unit U4).
 
-Each grant is revoked in its own transaction under a pinned search_path:
-block new logins, terminate the role's sessions (waiting until they are gone),
+Each grant is revoked in short transactions under a pinned search_path:
+first commit a lockout (NOLOGIN, VALID UNTIL 'epoch', PASSWORD NULL) so the
+postmaster refuses new logins, then terminate the role's sessions (waiting
+until they are gone), then in a final transaction re-terminate stragglers,
 revoke privileges, drop the view, drop anything the role owns, drop the role,
 then mark the state row. Any failure rolls the cleanup back, the error is
-recorded on the row (status stays 'active'), and the grant is retried by the
+recorded on the row (status stays 'active', the role stays locked out), and the grant is retried by the
 next sweep. A grant is never marked revoked unless the role and view are gone.
 """
 
@@ -64,7 +66,11 @@ def _terminate_sessions(conn: psycopg.Connection, role: str) -> int:
         conn.execute(sql.SQL("SELECT pg_catalog.pg_stat_clear_snapshot()"))
 
 
-def _cleanup(conn: psycopg.Connection, grant_id: str, reason: Reason) -> RevokeResult:
+def _lockout(conn: psycopg.Connection, grant_id: str) -> tuple[str, str, bool] | None:
+    """Commit a lockout first so the postmaster refuses new logins before we kill sessions.
+
+    Returns (role, view, role_exists), or None if the grant is no longer active.
+    """
     with conn.transaction():
         conn.execute(_SAFE_PATH)
         row = conn.execute(_LOCK_ROW, (grant_id,)).fetchone()
@@ -72,14 +78,36 @@ def _cleanup(conn: psycopg.Connection, grant_id: str, reason: Reason) -> RevokeR
             raise GrantError(f"unknown grant {grant_id}")
         role, view, status = row
         if status != "active":
-            return RevokeResult(grant_id, "noop")
-        role_id = sql.Identifier(role)
-        view_id = sql.Identifier(*view.split(".", 1))
+            return None
         exists = conn.execute(_ROLE_EXISTS, (role,)).fetchone() is not None
-        n = 0
         if exists:
-            conn.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(role_id))
+            conn.execute(
+                sql.SQL("ALTER ROLE {} NOLOGIN VALID UNTIL 'epoch' PASSWORD NULL").format(
+                    sql.Identifier(role)
+                )
+            )
+    return role, view, exists
+
+
+def _cleanup(conn: psycopg.Connection, grant_id: str, reason: Reason) -> RevokeResult:
+    locked = _lockout(conn, grant_id)  # committed: logins now refused
+    if locked is None:
+        return RevokeResult(grant_id, "noop")
+    role, view, exists = locked
+    role_id = sql.Identifier(role)
+    view_id = sql.Identifier(*view.split(".", 1))
+    n = 0
+    if exists:
+        with conn.transaction():
+            conn.execute(_SAFE_PATH)
             n = _terminate_sessions(conn, role)
+    with conn.transaction():
+        conn.execute(_SAFE_PATH)
+        row = conn.execute(_LOCK_ROW, (grant_id,)).fetchone()
+        if row is None or row[2] != "active":
+            return RevokeResult(grant_id, "noop", n)  # a concurrent revoke finished it
+        if exists:
+            n += _terminate_sessions(conn, role)  # stragglers that slipped in before lockout
         conn.execute(sql.SQL("DROP VIEW IF EXISTS {}").format(view_id))
         if exists:
             # Objects the role may own (it should own none) go back to the admin, then

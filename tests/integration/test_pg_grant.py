@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -344,3 +346,43 @@ def test_failure_is_recorded_not_marked_revoked(admin: psycopg.Connection) -> No
 def test_revoke_unknown_grant(admin: psycopg.Connection) -> None:
     with pytest.raises(GrantError, match="unknown grant"):
         revoke(admin, "000000000000")
+
+
+def test_revoke_wins_against_reconnect_loop(admin: psycopg.Connection) -> None:
+    plan, pw = _grant(admin)  # not expired: manual revoke
+    stop = threading.Event()
+    stats = {"ok": 0, "fail": 0}
+
+    def loop() -> None:
+        while not stop.is_set():
+            try:
+                with _login(plan.role, pw) as c:
+                    stats["ok"] += 1
+                    c.execute("SELECT pg_sleep(0.01)")
+            except psycopg.Error:
+                stats["fail"] += 1
+
+    threads = [threading.Thread(target=loop) for _ in range(3)]
+    for t in threads:
+        t.start()
+    try:
+        deadline = time.monotonic() + 5
+        while stats["ok"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert stats["ok"] > 0  # the loop really was logged in
+        res = revoke(admin, plan.grant_id)
+        assert res.outcome == "revoked", res.error
+        fails_before = stats["fail"]
+        time.sleep(0.3)
+        assert stats["fail"] > fails_before  # reconnects keep failing
+    finally:
+        stop.set()
+        for t in threads:
+            t.join()
+    left = admin.execute(
+        "SELECT count(*) FROM pg_stat_activity WHERE usename = %s", (plan.role,)
+    ).fetchone()
+    assert left == (0,)
+    assert not _role_exists(admin, plan.role)
+    with pytest.raises(psycopg.OperationalError):
+        _login(plan.role, pw)

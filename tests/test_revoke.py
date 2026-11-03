@@ -79,7 +79,7 @@ def _handler(
 def test_revoke_order_and_safe_path() -> None:
     c = FakeConn(_handler(terminate=[(7, True)], counts=[1, 0]))
     res = rv.revoke(c, "abc")  # type: ignore[arg-type]
-    assert res == rv.RevokeResult("abc", "revoked", 1)
+    assert res == rv.RevokeResult("abc", "revoked", 2)  # first pass + straggler pass
     body = [q for q in c.log if q not in ("BEGIN", "COMMIT")]
     assert body[0] == "SET LOCAL search_path = pg_catalog, pg_temp"
     order = [
@@ -95,6 +95,10 @@ def test_revoke_order_and_safe_path() -> None:
     assert idx == sorted(idx)
     assert "'manual'" not in "".join(body)  # values are bound, not inlined
     assert c.log[-1] == "COMMIT"
+    lock = next(i for i, q in enumerate(c.log) if "NOLOGIN" in q)
+    term = next(i for i, q in enumerate(c.log) if "pg_terminate_backend" in q)
+    assert "COMMIT" in c.log[lock:term]  # lockout committed before any termination
+    assert "VALID UNTIL 'epoch' PASSWORD NULL" in c.log[lock]
 
 
 def test_noop_when_not_active() -> None:
@@ -154,5 +158,23 @@ def test_sweep_revokes_each_due_grant_separately() -> None:
     c = FakeConn(_handler())
     out = rv.sweep(c)  # type: ignore[arg-type]
     assert [r.grant_id for r in out] == ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]
-    assert c.log.count("BEGIN") == 3 and all(r.outcome == "revoked" for r in out)
+    assert (
+        c.log.count("BEGIN") == 1 + 2 * 3
+    )  # list + (lockout, terminate, drop) each and all(r.outcome == "revoked" for r in out)
     assert any("'expired'" not in q and "expires_at <= pg_catalog.now()" in q for q in c.log)
+
+
+def test_concurrent_revoke_between_phases_is_noop() -> None:
+    calls = {"n": 0}
+    base = _handler()
+
+    def h(text: str, params: Any) -> list[tuple[Any, ...]]:
+        if "FOR UPDATE" in text:
+            calls["n"] += 1
+            st = "active" if calls["n"] == 1 else "revoked"
+            return [("dg_abc", "datagrant_views.g_abc", st)]
+        return base(text, params)
+
+    c = FakeConn(h)
+    assert rv.revoke(c, "abc").outcome == "noop"  # type: ignore[arg-type]
+    assert not any("DROP" in q for q in c.log)
