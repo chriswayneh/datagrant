@@ -17,6 +17,7 @@ import json
 import os
 import socket
 import stat
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -146,16 +147,16 @@ def sign_line(body: Mapping[str, Any], key: SigningKey) -> bytes:
 
 @contextmanager
 def _locked(fd: int) -> Iterator[None]:
-    try:
+    if sys.platform == "win32":  # no flock: single writer assumed (documented)
+        yield
+    else:
         import fcntl
-    except ImportError:  # Windows: single writer assumed (documented)
-        yield
-        return
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    try:
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _last_line(fd: int, size: int) -> bytes | None:
