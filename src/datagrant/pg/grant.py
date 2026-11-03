@@ -259,10 +259,12 @@ def apply_plan(
         if plan.facts is None:
             raise ReceiptError("plan has no receipt facts")
         receipt.append(receipts.log, "issued", plan.facts, receipts.key, host=receipts.host)
-    except ReceiptError as exc:
+    except BaseException as exc:  # no receipt, no access - whatever went wrong
         from datagrant.pg.revoke import revoke  # local: revoke imports this module
 
         res = revoke(conn, plan.grant_id, "manual")
+        if not isinstance(exc, Exception):
+            raise  # KeyboardInterrupt/SystemExit: re-raise as is, after revoking
         raise GrantError(
             f"grant {plan.grant_id}: receipt not written ({exc}); grant revoked: {res.outcome}"
         ) from exc

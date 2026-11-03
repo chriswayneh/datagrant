@@ -455,3 +455,28 @@ def test_revoke_receipt_failure_still_revokes(admin: psycopg.Connection, sink) -
     res = revoke(admin, plan.grant_id, receipts=sink)
     assert res.outcome == "revoked" and "newline" in (res.receipt_error or "")
     assert not _role_exists(admin, plan.role)
+
+
+def test_receipt_parent_unusable_revokes_grant(admin: psycopg.Connection, sink, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    bad = ReceiptSink(blocker / "sub" / "r.jsonl", sink.key)
+    with pytest.raises(GrantError, match="grant revoked: revoked"):
+        _grant(admin, receipts=bad)
+    row = admin.execute("SELECT role_name, status FROM datagrant.grants").fetchone()
+    assert row is not None and row[1] == "revoked" and not _role_exists(admin, row[0])
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("signer broke"), KeyboardInterrupt()])
+def test_any_receipt_exception_revokes_grant(admin, sink, monkeypatch, exc) -> None:  # type: ignore[no-untyped-def]
+    from datagrant import receipt as receipt_mod
+
+    def boom(*a, **k):  # type: ignore[no-untyped-def]
+        raise exc
+
+    monkeypatch.setattr(receipt_mod, "append", boom)
+    expected = GrantError if isinstance(exc, Exception) else KeyboardInterrupt
+    with pytest.raises(expected):
+        _grant(admin, receipts=sink)
+    row = admin.execute("SELECT role_name, status FROM datagrant.grants").fetchone()
+    assert row is not None and row[1] == "revoked" and not _role_exists(admin, row[0])

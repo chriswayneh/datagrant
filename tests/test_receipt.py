@@ -216,3 +216,37 @@ def test_default_log_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert receipt.default_log_path() == tmp_path / "x.jsonl"
     monkeypatch.delenv("DATAGRANT_RECEIPT_LOG")
     assert receipt.default_log_path().name == "receipts.jsonl"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b'{"receipt":1,"sig":"00"}',
+        b'{"receipt":{},"sig":0}',
+        b'{"receipt":{},"sig":null}',
+        b'{"receipt":{},"sig":["00"]}',
+        b'{"receipt":[],"sig":"00"}',
+        b'{"receipt":"x","sig":"00"}',
+        b'{"receipt":{},"sig":"zz"}',
+        b'{"receipt":{"seq":1.5},"sig":"00"}',
+        b'{"receipt":{}}',
+        b"[1,2]",
+        b"1",
+        b'"s"',
+        b"null",
+        b"[" * 5000 + b"]" * 5000,
+        b"\xff\xfe",
+    ],
+)
+def test_verify_type_confusion_never_crashes(tmp_path: Path, key, line: bytes) -> None:  # type: ignore[no-untyped-def]
+    log = tmp_path / "r.jsonl"
+    log.write_bytes(line + b"\n")
+    res = verify(log, key.private.public_key())
+    assert not res.ok and res.line == 1 and "not" in (res.error or "")
+
+
+def test_append_missing_parent_dir_is_receipt_error(tmp_path: Path, key) -> None:  # type: ignore[no-untyped-def]
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with pytest.raises(ReceiptError, match="cannot open receipt log"):
+        receipt.append(blocker / "sub" / "r.jsonl", "issued", FACTS, key)

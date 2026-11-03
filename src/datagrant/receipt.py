@@ -193,7 +193,6 @@ def append(
 ) -> dict[str, Any]:
     """Sign and append one receipt (0600 file, O_APPEND, no symlinks). Returns the body."""
     p = Path(log)
-    p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = (
         os.O_RDWR
         | os.O_APPEND
@@ -202,6 +201,7 @@ def append(
         | getattr(os, "O_BINARY", 0)
     )
     try:
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(p, flags, 0o600)
     except OSError as exc:
         raise ReceiptError(f"cannot open receipt log {p}: {exc.strerror}") from None
@@ -284,10 +284,15 @@ def verify(
                 return fail("line too long", lineno)
             try:
                 obj = json.loads(line)
-                body, sig = obj["receipt"], bytes.fromhex(obj["sig"])
-                if set(obj) != {"receipt", "sig"} or canonical(obj) != line:
+                if not isinstance(obj, dict) or set(obj) != {"receipt", "sig"}:
+                    return fail("line is not a valid receipt", lineno)
+                body, sig_hex = obj["receipt"], obj["sig"]
+                if not isinstance(body, dict) or not isinstance(sig_hex, str):
+                    return fail("line is not a valid receipt", lineno)
+                sig = bytes.fromhex(sig_hex)
+                if canonical(obj) != line:
                     return fail("line is not canonical JSON", lineno)
-            except (ValueError, KeyError, TypeError, ReceiptError):
+            except (ValueError, KeyError, TypeError, RecursionError, ReceiptError):
                 return fail("line is not a valid receipt", lineno)
             if body.get("key_id") != kid:
                 return fail(f"signed by a different key ({body.get('key_id')!r})", lineno)
