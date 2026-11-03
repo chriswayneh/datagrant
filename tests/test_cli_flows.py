@@ -74,7 +74,7 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
     monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
     monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
-    assert cli.main(["keys", "init"], lambda s: None) == 0
+    assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
     conn = FakeConn()
     state: dict[str, Any] = {"conn": conn, "applied": []}
     monkeypatch.setattr(cli, "_connect", lambda a: conn)
@@ -113,9 +113,9 @@ REQ = (
 
 def test_request_auto_dry_run_and_text(setup: dict[str, Any]) -> None:
     pol = str(setup["tmp"] / "auto.yaml")
-    code, d = run("request", "--policy", pol, "--dry-run", *REQ)
-    assert code == 0 and d["dry_run"] and "<redacted>" in d["sql"][0] and not setup["applied"]
     code, d = run("request", "--policy", pol, *REQ)
+    assert code == 0 and d["dry_run"] and "<redacted>" in d["sql"][0] and not setup["applied"]
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
     assert code == 0 and d["status"] == "granted" and len(d["password"]) > 20
     assert d["connection"] == {
         "host": "db.example",
@@ -126,7 +126,7 @@ def test_request_auto_dry_run_and_text(setup: dict[str, Any]) -> None:
     plan, sink, _ = setup["applied"][0]
     assert sink is not None and plan.hash_key is not None
     out: list[str] = []
-    assert cli.main(["request", "--policy", pol, *REQ], out.append) == 0
+    assert cli.main(["request", "--apply", "--policy", pol, *REQ], out.append) == 0
     assert "one-time password (shown once, not stored)" in out[0]
 
 
@@ -152,14 +152,14 @@ def test_request_two_person_and_approve(
 
     monkeypatch.setattr(rq, "create_request", create)
     monkeypatch.setattr(rq, "get_request", lambda c, rid: stored["p"])
-    code, d = run("request", "--policy", pol, *REQ)
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
     assert code == 0 and d["status"] == "pending" and d["password"]
     assert stored["p"].verifier.startswith("SCRAM-SHA-256$") and d["password"] not in json.dumps(
         stored["p"].verifier
     )
-    code, d = run("approve", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "alice")
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "alice")
     assert code == 1 and d["approved"] is False
-    code, d = run("approve", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
     assert code == 0 and d["status"] == "granted" and "password" not in d
     plan, _, kw = setup["applied"][0]
     assert kw == {"request_id": "aaaaaaaaaaaa", "approver": "carol"}
@@ -168,13 +168,13 @@ def test_request_two_person_and_approve(
     stored["p"] = PendingRequest(
         "aaaaaaaaaaaa", stored["p"].request, "", None, T, T, "approved", "carol", "x"
     )
-    assert run("approve", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")[0] == 1
+    assert run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")[0] == 1
     # policy tightened after the request: approval re-checks and refuses
     req = Request("alice", "clinic", "public.p", ("id", "nope"), timedelta(hours=1), "x")
     stored["p"] = PendingRequest(
         "aaaaaaaaaaaa", req, "", "SCRAM-SHA-256$x", T, T, "pending", None, None
     )
-    code, d = run("approve", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
     assert code == 1 and any("no longer allowed" in r for r in d["reasons"])
 
 
@@ -212,20 +212,20 @@ def test_grant_list_status_revoke_sweep_preflight(
     monkeypatch.setattr(rv, "sweep", lambda c, sink: [results["r"]])
     monkeypatch.setattr(rq, "expire_requests", lambda c: ["req1"])
     out = []
-    assert cli.main(["revoke", "abc"], out.append) == 0 and "2 session(s)" in out[0]
+    assert cli.main(["revoke", "--apply", "abc"], out.append) == 0 and "2 session(s)" in out[0]
     results["r"] = rv.RevokeResult("abc", "failed", error="nope")
-    assert run("revoke", "abc")[0] == cli.EXIT_REVOKE_FAILED
+    assert run("revoke", "--apply", "abc")[0] == cli.EXIT_REVOKE_FAILED
     out = []
-    assert cli.main(["sweep"], out.append) == cli.EXIT_REVOKE_FAILED
+    assert cli.main(["sweep", "--apply"], out.append) == cli.EXIT_REVOKE_FAILED
     assert "request req1: expired" in out[0]
     results["r"] = rv.RevokeResult("abc", "revoked", receipt_error="disk")
-    code, d = run("sweep")
+    code, d = run("sweep", "--apply")
     assert code == cli.EXIT_RECEIPT and d["expired_requests"] == ["req1"]
     out = []
-    assert cli.main(["revoke", "abc"], out.append) == cli.EXIT_RECEIPT
+    assert cli.main(["revoke", "--apply", "abc"], out.append) == cli.EXIT_RECEIPT
     assert "receipt not written: disk" in out[0]
     out = []
-    assert cli.main(["preflight"], out.append) == 0 and out[0].startswith("WARNING:")
+    assert cli.main(["preflight", "--apply"], out.append) == 0 and out[0].startswith("WARNING:")
 
 
 def test_unexpected_error_is_redacted(
@@ -235,6 +235,35 @@ def test_unexpected_error_is_redacted(
         raise RuntimeError("failed for postgresql://admin:pw9secret@db.example/clinicdb")
 
     monkeypatch.setattr(g, "ensure_state", boom)
-    assert cli.main(["preflight"]) == 1
+    assert cli.main(["preflight", "--apply"]) == 1
     err = capsys.readouterr().err
     assert "pw9secret" not in err and "RuntimeError" in err
+
+
+def test_dry_run_default_never_makes_password(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_pw() -> str:
+        raise AssertionError("dry run must not generate a password")
+
+    monkeypatch.setattr(g, "new_password", no_pw)
+    monkeypatch.setattr(
+        rq,
+        "create_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not store a request")),
+    )
+    for mode in ("auto", "two-person"):
+        out: list[str] = []
+        assert (
+            cli.main(["request", "--policy", str(setup["tmp"] / f"{mode}.yaml"), *REQ], out.append)
+            == 0
+        )
+        assert out[0].startswith("dry run:") and "PASSWORD '<redacted>'" in out[0]
+        assert "SCRAM" not in out[0] and "password (shown once" not in out[0]
+    assert not setup["applied"]
+
+
+def test_keys_init_dry_run(tmp_path: Path) -> None:
+    out: list[str] = []
+    assert cli.main(["keys", "init", "--dir", str(tmp_path / "k")], out.append) == 0
+    assert "would create" in out[0] and not (tmp_path / "k").exists()

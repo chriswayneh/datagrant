@@ -43,15 +43,15 @@ ruff check . && mypy src && pytest -q
 
 ```bash
 export DATAGRANT_DSN=postgresql://admin@localhost/clinicdb DATAGRANT_POLICY=examples/policy.yaml
-datagrant keys init
+datagrant keys init --apply
 datagrant policy check examples/policy.yaml
 datagrant request --dataset clinic --table public.patients --columns patient_id,zip \
-  --row-filter "region = 'west'" --duration 2h --purpose "debug model" --dry-run
-datagrant request ... (same, without --dry-run)   # prints connection info + one-time password
-datagrant revoke <grant-id>; datagrant sweep; datagrant receipts verify
+  --row-filter "region = 'west'" --duration 2h --purpose "debug model"          # dry run: shows the plan, changes nothing
+datagrant request ... --apply    # creates the grant; prints connection info + one-time password
+datagrant revoke <grant-id> --apply; datagrant sweep --apply; datagrant receipts verify
 ```
 
-Add `--json` for machine-readable output. Full docs arrive with v0.1.0.
+Commands that change anything are dry runs unless you add `--apply`. Add `--json` for machine-readable output. Full docs arrive with v0.1.0.
 
 ## How this project is built
 

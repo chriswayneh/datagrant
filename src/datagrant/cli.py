@@ -4,6 +4,11 @@ Exit codes: 0 ok, 1 denied/failed, 2 usage, 3 receipt could not be written
 (access change still happened), 4 revoke failed (grant still active; retried
 by the next sweep).
 
+Every command that changes something (keys init, request, approve, revoke,
+sweep, preflight) is a dry run unless ``--apply`` is given: it prints what
+would change and changes nothing. A dry run never generates or prints a
+password or verifier. ``--dry-run`` is accepted as a no-op alias.
+
 Identity is the OS user (getpass.getuser()). ``--as-user`` overrides it for
 automation and tests. Neither is authentication: anyone who can run datagrant
 with the admin DSN can claim any name. Real separation of duties needs the
@@ -34,6 +39,7 @@ from datagrant.keys import (
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_RECEIPT, EXIT_REVOKE_FAILED = 0, 1, 2, 3, 4
 DSN_ENV = "DATAGRANT_DSN"
+REDACTED = "<redacted>"
 POLICY_ENV = "DATAGRANT_POLICY"
 
 
@@ -130,6 +136,20 @@ def _conn_info(args: argparse.Namespace, plan: Any) -> dict[str, Any]:
 
 
 def cmd_keys_init(ctx: Ctx) -> int:
+    if not ctx.args.apply:
+        from datagrant.keys import hash_key_path, signing_key_path
+
+        d = ctx.args.dir
+        hp = Path(d) / "hash.key" if d else hash_key_path()
+        sp = Path(d) / "signing.key" if d else signing_key_path()
+        exists = [str(x) for x in (hp, sp) if x.exists() or x.is_symlink()]
+        ctx.emit(
+            {"dry_run": True, "would_create": [str(hp), str(sp)], "already_exist": exists},
+            f"dry run: would create {hp} and {sp} (0600)"
+            + (f"\nrefused with --apply: already exist: {', '.join(exists)}" if exists else "")
+            + "\nre-run with --apply to create them",
+        )
+        return EXIT_FAILED if exists else EXIT_OK
     hp, sp, pub = init_keys(ctx.args.dir)
     ctx.emit(
         {"hash_key": str(hp), "signing_key": str(sp), "public_key": pub},
@@ -207,19 +227,28 @@ def cmd_request(ctx: Ctx) -> int:
     hash_key = load_hash_key() if _needs_hash(decision, cols) else None
     with _connect(a) as conn:
         catalog = inspect_table(conn, req.table)
-        if a.dry_run:
+        if not a.apply:
+            # No password is generated in a dry run; the verifier slot is a placeholder.
             plan = build_plan(
                 decision,
                 req,
                 database=policy.datasets[req.dataset].database,
-                password=new_password(),
+                password="",  # nosec B106 - dry run: no password exists
+                verifier=REDACTED,
                 catalog=catalog,
                 hash_key=hash_key,
                 approvers=("<approver>",) if two_person else (),
             )
+            sqls = _redacted_sql(plan)
+            what = (
+                "store a pending request for another person to approve; on approval run"
+                if two_person
+                else "run"
+            )
             ctx.emit(
-                {"dry_run": True, "approval": decision.approval, "sql": _redacted_sql(plan)},
-                "\n".join(s + ";" for s in _redacted_sql(plan)),
+                {"dry_run": True, "approval": decision.approval, "sql": sqls},
+                f"dry run: allowed by policy; with --apply datagrant would {what}:\n"
+                + "\n".join(x + ";" for x in sqls),
             )
             return EXIT_OK
         sink = _sink(a)  # no signing key, no grant
@@ -294,7 +323,8 @@ def cmd_approve(ctx: Ctx) -> int:
     policy = _policy(a)
     approver, source = _identity(a)
     with _connect(a) as conn:
-        ensure_state(conn)
+        if a.apply:
+            ensure_state(conn)
         pending = get_request(conn, a.request_id)
         if pending.status != "pending" or pending.verifier is None:
             raise CliError(f"request {pending.id} is {pending.status}, not pending")
@@ -310,6 +340,24 @@ def cmd_approve(ctx: Ctx) -> int:
             return EXIT_FAILED
         cols = pending.request.columns
         hash_key = load_hash_key() if _needs_hash(decision, cols) else None
+        if not a.apply:
+            plan = build_plan(
+                decision,
+                pending.request,
+                database=policy.datasets[pending.request.dataset].database,
+                password="",  # nosec B106 - dry run: no password exists
+                verifier=REDACTED,
+                catalog=inspect_table(conn, pending.request.table),
+                hash_key=hash_key,
+                approvers=(approver,),
+            )
+            sqls = _redacted_sql(plan)
+            ctx.emit(
+                {"dry_run": True, "request_id": pending.id, "approver": approver, "sql": sqls},
+                f"dry run: {approver} may approve request {pending.id}; with --apply:\n"
+                + "\n".join(x + ";" for x in sqls),
+            )
+            return EXIT_OK
         sink = _sink(a)
         plan = build_plan(
             decision,
@@ -354,10 +402,8 @@ def _grant_rows(conn: Any, where: str, params: tuple[Any, ...]) -> list[dict[str
 
 
 def cmd_grant_list(ctx: Ctx) -> int:
-    from datagrant.pg.grant import ensure_state
 
     with _connect(ctx.args) as conn:
-        ensure_state(conn)
         rows = _grant_rows(conn, "" if ctx.args.all else "WHERE status = 'active'", ())
     text = (
         "\n".join(
@@ -373,10 +419,8 @@ def cmd_grant_list(ctx: Ctx) -> int:
 
 
 def cmd_grant_status(ctx: Ctx) -> int:
-    from datagrant.pg.grant import ensure_state
 
     with _connect(ctx.args) as conn:
-        ensure_state(conn)
         rows = _grant_rows(conn, "WHERE id = %s", (ctx.args.grant_id,))
     if not rows:
         raise CliError(f"unknown grant {ctx.args.grant_id}")
@@ -414,6 +458,32 @@ def cmd_revoke(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state
     from datagrant.pg.revoke import revoke
 
+    if not ctx.args.apply:
+        with _connect(ctx.args) as conn:
+            rows = _grant_rows(conn, "WHERE id = %s", (ctx.args.grant_id,))
+            if not rows:
+                raise CliError(f"unknown grant {ctx.args.grant_id}")
+            role = f"dg_{ctx.args.grant_id}"
+            n = conn.execute(
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename = %s", (role,)
+            ).fetchone()[0]
+        active = rows[0]["status"] == "active"
+        ctx.emit(
+            {
+                "dry_run": True,
+                "grant_id": ctx.args.grant_id,
+                "status": rows[0]["status"],
+                "would_revoke": active,
+                "open_sessions": n,
+            },
+            f"dry run: grant {ctx.args.grant_id} is {rows[0]['status']}; "
+            + (
+                f"--apply would lock out {role}, end {n} session(s), drop its view and role"
+                if active
+                else "nothing to do"
+            ),
+        )
+        return EXIT_OK
     sink, key_problem = _revoke_receipts(ctx)
     with _connect(ctx.args) as conn:
         ensure_state(conn)
@@ -435,6 +505,28 @@ def cmd_sweep(ctx: Ctx) -> int:
     from datagrant.pg.requests import expire_requests
     from datagrant.pg.revoke import sweep
 
+    if not ctx.args.apply:
+        with _connect(ctx.args) as conn:
+            due = [
+                r["id"]
+                for r in _grant_rows(
+                    conn, "WHERE status = 'active' AND expires_at <= pg_catalog.now()", ()
+                )
+            ]
+            stale = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM datagrant.requests WHERE status = 'pending'"
+                    " AND expires_at <= pg_catalog.now() ORDER BY id"
+                ).fetchall()
+            ]
+        ctx.emit(
+            {"dry_run": True, "would_revoke": due, "would_expire_requests": stale},
+            "dry run: --apply would "
+            + (f"revoke expired grants {', '.join(due)}" if due else "revoke no grants")
+            + (f" and expire requests {', '.join(stale)}" if stale else ""),
+        )
+        return EXIT_OK
     sink, key_problem = _revoke_receipts(ctx)
     with _connect(ctx.args) as conn:
         ensure_state(conn)
@@ -486,10 +578,12 @@ def cmd_receipts_verify(ctx: Ctx) -> int:
 
 
 def cmd_preflight(ctx: Ctx) -> int:
-    from datagrant.pg.grant import ensure_state
+    from datagrant.pg.grant import ensure_state, preflight
 
     with _connect(ctx.args) as conn:
-        warnings = ensure_state(conn)
+        warnings = ensure_state(conn) if ctx.args.apply else preflight(conn)
+    if not ctx.args.apply:
+        warnings = [*warnings, "dry run: state schemas not created/updated; use --apply"]
     ctx.emit(
         {"warnings": warnings},
         "\n".join(f"WARNING: {w}" for w in warnings) or "preflight OK: no warnings",
@@ -519,6 +613,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--as-user",
         help="act as this name instead of the OS user. NOT authentication: for automation/tests",
     )
+    apply = argparse.ArgumentParser(add_help=False)
+    apply.add_argument(
+        "--apply", action="store_true", help="make the change (default is a dry run)"
+    )
+    apply.add_argument(
+        "--dry-run", action="store_true", help="no-op: dry run is already the default"
+    )
     pol = argparse.ArgumentParser(add_help=False)
     pol.add_argument("--policy", help=f"policy YAML (default ${POLICY_ENV})")
 
@@ -533,7 +634,7 @@ def build_parser() -> argparse.ArgumentParser:
     keys = sub.add_parser("keys", help="create or export keys").add_subparsers(
         dest="sub", required=True
     )
-    k = keys.add_parser("init", parents=[common], help="create hash + signing keys (0600)")
+    k = keys.add_parser("init", parents=[common, apply], help="create hash + signing keys (0600)")
     k.add_argument("--dir", help="directory (default: env paths or ~/.config/datagrant)")
     k.set_defaults(fn=cmd_keys_init)
     keys.add_parser(
@@ -545,18 +646,19 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("file")
     c.set_defaults(fn=cmd_policy_check)
 
-    r = sub.add_parser("request", parents=[common, ident, pol], help="request access")
+    r = sub.add_parser("request", parents=[common, ident, pol, apply], help="request access")
     r.add_argument("--dataset", required=True)
     r.add_argument("--table", required=True, help="schema.table")
     r.add_argument("--columns", required=True, help="comma-separated")
     r.add_argument("--row-filter")
     r.add_argument("--duration", required=True, help="e.g. 30m, 2h")
     r.add_argument("--purpose", required=True)
-    r.add_argument("--dry-run", action="store_true", help="show plan SQL (no secrets), no changes")
     r.add_argument("--pending-ttl", default="24h", help="two-person: how long a request waits")
     r.set_defaults(fn=cmd_request)
 
-    ap = sub.add_parser("approve", parents=[common, ident, pol], help="approve a pending request")
+    ap = sub.add_parser(
+        "approve", parents=[common, ident, pol, apply], help="approve a pending request"
+    )
     ap.add_argument("request_id")
     ap.set_defaults(fn=cmd_approve)
 
@@ -568,11 +670,11 @@ def build_parser() -> argparse.ArgumentParser:
     gs.add_argument("grant_id")
     gs.set_defaults(fn=cmd_grant_status)
 
-    rv = sub.add_parser("revoke", parents=[common], help="revoke a grant now")
+    rv = sub.add_parser("revoke", parents=[common, apply], help="revoke a grant now")
     rv.add_argument("grant_id")
     rv.set_defaults(fn=cmd_revoke)
     sub.add_parser(
-        "sweep", parents=[common], help="revoke expired grants (run on a schedule)"
+        "sweep", parents=[common, apply], help="revoke expired grants (run on a schedule)"
     ).set_defaults(fn=cmd_sweep)
 
     rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(dest="sub", required=True)
@@ -582,7 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.set_defaults(fn=cmd_receipts_verify)
 
     sub.add_parser(
-        "preflight", parents=[common], help="create state; warn on PUBLIC defaults"
+        "preflight", parents=[common, apply], help="create state; warn on PUBLIC defaults"
     ).set_defaults(fn=cmd_preflight)
     return p
 
@@ -599,6 +701,9 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse: 0 for --help/--version, 2 for usage errors
         return int(exc.code or 0)
+    if getattr(args, "apply", False) and getattr(args, "dry_run", False):
+        print("datagrant: error: --apply and --dry-run conflict", file=sys.stderr)
+        return EXIT_USAGE
     ctx = Ctx(args, out)
     dsn = getattr(args, "dsn", None) or os.environ.get(DSN_ENV)
     try:

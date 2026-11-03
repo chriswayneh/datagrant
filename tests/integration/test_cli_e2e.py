@@ -61,7 +61,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, P
         conn.execute(
             "INSERT INTO public.dg_cli VALUES (1,'a','west'),(2,'b','east'),(3,'c','west')"
         )
-        assert run("keys", "init")[0] == EXIT_OK
+        assert run("keys", "init", "--apply")[0] == EXIT_OK
         yield paths
         for role, view in conn.execute(
             "SELECT role_name, view_name FROM datagrant.grants"
@@ -94,13 +94,13 @@ def login(conn_info: dict[str, Any], password: str) -> psycopg.Connection:
 
 def test_auto_request_login_revoke(env: dict[str, Path]) -> None:
     pol = str(env["auto"])
-    assert run("preflight")[0] == EXIT_OK
-    code, dry = run(
-        "request", "--policy", pol, "--as-user", "alice", "--duration", "1h", "--dry-run", *REQ
-    )
+    assert run("preflight", "--apply")[0] == EXIT_OK
+    code, dry = run("request", "--policy", pol, "--as-user", "alice", "--duration", "1h", *REQ)
     assert code == EXIT_OK and "PASSWORD '<redacted>'" in dry["sql"][0]
     assert "SCRAM" not in json.dumps(dry)
-    code, g = run("request", "--policy", pol, "--as-user", "alice", "--duration", "1h", *REQ)
+    code, g = run(
+        "request", "--apply", "--policy", pol, "--as-user", "alice", "--duration", "1h", *REQ
+    )
     assert code == EXIT_OK and g["status"] == "granted" and g["identity_source"] == "flag"
     with login(g["connection"], g["password"]) as c:
         rows = c.execute(f"SELECT id FROM {g['view']} ORDER BY id").fetchall()
@@ -110,33 +110,36 @@ def test_auto_request_login_revoke(env: dict[str, Path]) -> None:
     assert run("grant", "status", g["grant_id"])[1]["status"] == "active"
     log = Path(os.environ["DATAGRANT_RECEIPT_LOG"]).read_text()
     assert g["password"] not in log
-    code, r = run("revoke", g["grant_id"])
+    code, r = run("revoke", "--apply", g["grant_id"])
     assert code == EXIT_OK and r["outcome"] == "revoked"
     with pytest.raises(psycopg.OperationalError):
         login(g["connection"], g["password"])
-    assert run("revoke", g["grant_id"])[1]["outcome"] == "noop"
+    assert run("revoke", "--apply", g["grant_id"])[1]["outcome"] == "noop"
     assert run("grant", "status", "000000000000")[0] == EXIT_FAILED
 
 
 def test_two_person_flow_and_sweep_and_verify(env: dict[str, Path]) -> None:
     pol = str(env["two-person"])
-    code, p = run("request", "--policy", pol, "--as-user", "alice", "--duration", "1h", *REQ)
+    code, p = run(
+        "request", "--apply", "--policy", pol, "--as-user", "alice", "--duration", "1h", *REQ
+    )
     assert code == EXIT_OK and p["status"] == "pending"
     rid, pw = p["request_id"], p["password"]
-    code, rej = run("approve", rid, "--policy", pol, "--as-user", "alice")
+    code, rej = run("approve", "--apply", rid, "--policy", pol, "--as-user", "alice")
     assert code == EXIT_FAILED and any("different person" in x for x in rej["reasons"])
-    code, rej = run("approve", rid, "--policy", pol, "--as-user", "bob")
+    code, rej = run("approve", "--apply", rid, "--policy", pol, "--as-user", "bob")
     assert code == EXIT_FAILED and any("approver group" in x for x in rej["reasons"])
-    code, g = run("approve", rid, "--policy", pol, "--as-user", "carol")
+    code, g = run("approve", "--apply", rid, "--policy", pol, "--as-user", "carol")
     assert code == EXIT_OK and g["status"] == "granted" and "password" not in g
     with login(g["connection"], pw) as c:
         assert c.execute(f"SELECT count(*) FROM {g['view']}").fetchone() == (2,)
-    assert run("approve", rid, "--policy", pol, "--as-user", "carol")[0] == EXIT_FAILED
+    assert run("approve", "--apply", rid, "--policy", pol, "--as-user", "carol")[0] == EXIT_FAILED
     assert run("grant", "status", g["grant_id"])[1]["approvers"] == ["carol"]
 
     # a pending request that times out is expired by sweep
     code, p2 = run(
         "request",
+        "--apply",
         "--policy",
         pol,
         "--as-user",
@@ -154,9 +157,11 @@ def test_two_person_flow_and_sweep_and_verify(env: dict[str, Path]) -> None:
             "UPDATE datagrant.requests SET expires_at = now() - interval '1 second' WHERE id = %s",
             (p2["request_id"],),
         )
-    code, sw = run("sweep")
+    code, sw = run("sweep", "--apply")
     assert code == EXIT_OK and sw["expired_requests"] == [p2["request_id"]]
-    assert run("approve", p2["request_id"], "--policy", pol, "--as-user", "carol")[0] == 1
+    assert (
+        run("approve", "--apply", p2["request_id"], "--policy", pol, "--as-user", "carol")[0] == 1
+    )
 
     # expire the live grant by moving its expiry into the past, then sweep
     assert DSN
@@ -165,9 +170,9 @@ def test_two_person_flow_and_sweep_and_verify(env: dict[str, Path]) -> None:
             "UPDATE datagrant.grants SET expires_at = now() - interval '1 minute' WHERE id = %s",
             (g["grant_id"],),
         )
-    code, sw = run("sweep")
+    code, sw = run("sweep", "--apply")
     assert code == EXIT_OK and [r["outcome"] for r in sw["results"]] == ["revoked"]
-    assert run("sweep")[1]["results"] == []
+    assert run("sweep", "--apply")[1]["results"] == []
 
     code, v = run("receipts", "verify")
     assert code == EXIT_OK and v["ok"] and v["count"] == 2  # issued + expired
@@ -187,13 +192,82 @@ def test_revoke_without_signing_key_still_revokes(
     env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     code, g = run(
-        "request", "--policy", str(env["auto"]), "--as-user", "alice", "--duration", "1h", *REQ
+        "request",
+        "--apply",
+        "--policy",
+        str(env["auto"]),
+        "--as-user",
+        "alice",
+        "--duration",
+        "1h",
+        *REQ,
     )
     assert code == EXIT_OK
     monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "missing.key"))
-    code, r = run("revoke", g["grant_id"])
+    code, r = run("revoke", "--apply", g["grant_id"])
     assert code == 3 and r["outcome"] == "revoked" and r["key_problem"]
     code, _ = run(
-        "request", "--policy", str(env["auto"]), "--as-user", "alice", "--duration", "1h", *REQ
+        "request",
+        "--apply",
+        "--policy",
+        str(env["auto"]),
+        "--as-user",
+        "alice",
+        "--duration",
+        "1h",
+        *REQ,
     )
     assert code == EXIT_FAILED  # no signing key, no grant
+
+
+def _snapshot(dsn: str) -> tuple:
+    with psycopg.connect(dsn, autocommit=True) as c:
+        return tuple(
+            c.execute(q).fetchall()
+            for q in (
+                "SELECT id, status, revoked_at FROM datagrant.grants ORDER BY id",
+                "SELECT id, status, approver FROM datagrant.requests ORDER BY id",
+                "SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname LIKE 'dg\\_%' ORDER BY 1",
+                (
+                    "SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = 'datagrant_views' ORDER BY 1"
+                ),
+            )
+        )
+
+
+def test_no_apply_changes_nothing(env: dict[str, Path]) -> None:
+    assert DSN
+    auto, two = str(env["auto"]), str(env["two-person"])
+    assert run("preflight", "--apply")[0] == EXIT_OK
+    _, live = run(
+        "request", "--apply", "--policy", auto, "--as-user", "alice", "--duration", "1h", *REQ
+    )
+    _code, pend = run(
+        "request", "--apply", "--policy", two, "--as-user", "alice", "--duration", "1h", *REQ
+    )
+    with psycopg.connect(DSN, autocommit=True) as admin:  # one grant due for sweep
+        admin.execute(
+            "UPDATE datagrant.grants SET expires_at = now() - interval '1 minute' WHERE id = %s",
+            (live["grant_id"],),
+        )
+    log = Path(os.environ["DATAGRANT_RECEIPT_LOG"])
+    before, log_before = _snapshot(DSN), log.read_bytes()
+    outs = [
+        run("request", "--policy", auto, "--as-user", "alice", "--duration", "1h", *REQ),
+        run("request", "--policy", two, "--as-user", "bob", "--duration", "1h", *REQ),
+        run("approve", pend["request_id"], "--policy", two, "--as-user", "carol"),
+        run("revoke", live["grant_id"]),
+        run("sweep"),
+        run("sweep", "--dry-run"),
+        run("preflight"),
+        run("keys", "init"),
+    ]
+    assert [c for c, _ in outs[:6]] == [EXIT_OK] * 6
+    assert _snapshot(DSN) == before and log.read_bytes() == log_before
+    text = json.dumps([o for _, o in outs])
+    assert "password" not in text and "SCRAM" not in text
+    assert outs[3][1]["would_revoke"] is True
+    assert outs[4][1]["would_revoke"] == [live["grant_id"]]
+    assert outs[7][0] == EXIT_FAILED and outs[7][1]["already_exist"]  # keys exist: refused
+    assert run("sweep", "--apply", "--dry-run")[0] == 2

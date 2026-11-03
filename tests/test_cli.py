@@ -23,7 +23,7 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_usage_errors_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == EXIT_USAGE
-    assert main(["request", "--dataset", "x"]) == EXIT_USAGE
+    assert main(["request", "--apply", "--dataset", "x"]) == EXIT_USAGE
     assert main(["bogus"]) == EXIT_USAGE
     assert main(["--help"]) == EXIT_OK
 
@@ -40,7 +40,7 @@ def test_policy_check_ok_and_bad(tmp_path: Path, capsys: pytest.CaptureFixture[s
 def test_missing_dsn_and_policy_are_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATAGRANT_DSN", raising=False)
     monkeypatch.delenv("DATAGRANT_POLICY", raising=False)
-    assert main(["sweep"]) == EXIT_USAGE
+    assert main(["sweep", "--apply"]) == EXIT_USAGE
     base = [
         "request",
         "--dataset",
@@ -115,7 +115,7 @@ def test_redact(text: str, dsn: str | None) -> None:
 
 def test_connect_error_is_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     dsn = "postgresql://admin:hunter2zz@127.0.0.1:1/db?connect_timeout=1"
-    assert main(["sweep", "--dsn", dsn]) == EXIT_FAILED
+    assert main(["sweep", "--apply", "--dsn", dsn]) == EXIT_FAILED
     err = capsys.readouterr().err
     assert "cannot connect" in err and "hunter2zz" not in err
 
@@ -128,10 +128,10 @@ def test_json_error_output() -> None:
 def test_keys_init_export_and_verify_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
     monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
-    code, out = run(["keys", "init", "--json"])
+    code, out = run(["keys", "init", "--apply", "--json"])
     pub = json.loads(out[0])["public_key"]
     assert code == EXIT_OK
-    assert run(["keys", "init"])[0] == EXIT_FAILED  # refuses overwrite
+    assert run(["keys", "init", "--apply"])[0] == EXIT_FAILED  # refuses overwrite
     code, out = run(["keys", "export-pubkey"])
     assert code == EXIT_OK and out == [pub]
     log = tmp_path / "r.jsonl"

@@ -35,7 +35,7 @@ Run it every minute or few minutes.
 cron (`crontab -e` for the datagrant service user):
 
 ```cron
-* * * * * DATAGRANT_DSN=postgresql:///clinicdb datagrant sweep >> /var/log/datagrant-sweep.log 2>&1
+* * * * * DATAGRANT_DSN=postgresql:///clinicdb datagrant sweep --apply >> /var/log/datagrant-sweep.log 2>&1
 ```
 
 systemd timer:
@@ -46,7 +46,7 @@ systemd timer:
 Type=oneshot
 User=datagrant
 Environment=DATAGRANT_DSN=postgresql:///clinicdb
-ExecStart=/usr/local/bin/datagrant sweep
+ExecStart=/usr/local/bin/datagrant sweep --apply
 
 # /etc/systemd/system/datagrant-sweep.timer
 [Timer]
@@ -73,14 +73,15 @@ Create keys once (refuses to overwrite): `datagrant.keys.init_keys()`, wired to 
 ```bash
 export DATAGRANT_DSN='postgresql://datagrant_admin@db/clinicdb'   # password via ~/.pgpass, not the DSN
 export DATAGRANT_POLICY=/etc/datagrant/policy.yaml
-datagrant keys init && datagrant keys export-pubkey   # give the public key to auditors
-datagrant preflight                                   # creates state, warns on PUBLIC defaults
+datagrant keys init --apply && datagrant keys export-pubkey   # give the public key to auditors
+datagrant preflight --apply                           # creates state, warns on PUBLIC defaults
 datagrant request --dataset clinic --table public.patients --columns patient_id,zip \
-  --row-filter "region = 'west'" --duration 2h --purpose "model eval"
-datagrant approve <request-id>                        # two-person mode, a different person
-datagrant grant list ; datagrant revoke <grant-id> ; datagrant sweep
+  --row-filter "region = 'west'" --duration 2h --purpose "model eval" --apply
+datagrant approve <request-id> --apply                # two-person mode, a different person
+datagrant grant list ; datagrant revoke <grant-id> --apply ; datagrant sweep --apply
 datagrant receipts verify --expect-head <recorded head>
 ```
+Every changing command (keys init, request, approve, revoke, sweep, preflight) is a **dry run unless `--apply`** is given: it prints the plan and changes nothing, and a dry run never creates or prints a password. `--dry-run` is accepted as a no-op alias, and `--apply --dry-run` together is a usage error.
 Exit codes: 0 ok, 1 denied/failed, 2 usage, 3 receipt not written, 4 revoke failed. Alert on 3 and 4 from the sweep timer.
 Identity is the OS user; `--as-user` is not authentication. For real two-person control, run datagrant behind a service that authenticates users and holds the admin DSN.
 
