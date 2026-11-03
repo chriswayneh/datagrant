@@ -1,6 +1,6 @@
 # Functional design
 
-## U1 — Policy loader and evaluator
+## U1: Policy loader and evaluator
 
 **Status:** In progress (Construction start approved 2026-11-02 5:26 PM CT; see ../audit.md). Module: `src/datagrant/policy.py`. Example: `examples/policy.yaml`.
 
@@ -25,23 +25,23 @@ Deny by default; all failing checks are reported: dataset/table exists, requeste
 ### Out of U1
 SQL generation, filter parsing (filters are matched against an allowlist only; U2 validates/quotes them), CLI wiring (U6).
 
-## U2 — Grant engine (Postgres view + expiring role + grant state)
+## U2: Grant engine (Postgres view + expiring role + grant state)
 
 **Status:** In progress (approved 2026-11-02 5:35 PM CT; see ../audit.md). Modules: `src/datagrant/rowfilter.py`, `src/datagrant/pg/{grant,scram}.py`.
 
 - **Setup:** `ensure_state(conn)` creates schemas `datagrant` (state) and `datagrant_views` (grant views), both `REVOKE ALL … FROM PUBLIC`, and table `datagrant.grants` (id, role, view, dataset, table, requester, purpose, columns, row filter, approval, policy SHA-256, created/expires, status). No passwords or data values stored. Returns `preflight(conn)` warnings.
 - **Plan (pure):** `build_plan(decision, request, database=…, password=…)` → `CREATE ROLE dg_<12hex> LOGIN NOINHERIT … PASSWORD <SCRAM verifier> VALID UNTIL <expiry>`; `CREATE VIEW datagrant_views.g_<id> WITH (security_barrier) AS SELECT <allowed cols> FROM schema.table [WHERE filter]`; revoke PUBLIC; grant schema USAGE + SELECT on the view only; insert state row. Every name/value via `psycopg.sql.Identifier`/`Literal`.
 - **Password:** `new_password()` (256-bit, URL-safe) is returned once to the caller; only a client-computed SCRAM-SHA-256 verifier is sent, so plaintext never appears in server logs.
-- **What a grant role gets — exactly:** explicitly, `USAGE` on schema `datagrant_views` and `SELECT` on its one view; nothing on base tables or `datagrant.*`. Implicitly, whatever Postgres grants to `PUBLIC`: by default `CONNECT` and `TEMP` on every database, `EXECUTE` on functions, read access to system catalogs, and (Postgres ≤14 only) `CREATE` on schema `public`. datagrant does not change these server-wide defaults.
+- **What a grant role gets, exactly:** explicitly, `USAGE` on schema `datagrant_views` and `SELECT` on its one view; nothing on base tables or `datagrant.*`. Implicitly, whatever Postgres grants to `PUBLIC`: by default `CONNECT` and `TEMP` on every database, `EXECUTE` on functions, read access to system catalogs, and (Postgres ≤14 only) `CREATE` on schema `public`. datagrant does not change these server-wide defaults.
 - **Preflight:** `preflight(conn)` warns when `PUBLIC` can `CONNECT` to any other database, create `TEMP` tables in the current one, or `CREATE` in schema `public`.
 - **Admin hardening (recommended, done by the DBA):** for each database grant roles must not reach, `REVOKE CONNECT, TEMP ON DATABASE <db> FROM PUBLIC` (then grant `CONNECT` explicitly to real users/groups); in the dataset database `REVOKE TEMP ON DATABASE <db> FROM PUBLIC` and `REVOKE CREATE ON SCHEMA public FROM PUBLIC`. Integration test verifies a grant role cannot connect to a second database after hardening. See ../operations/runbook.md.
 - **Row filters:** policy filters may reference only columns listed in the table's `columns` (so filter columns are visible to the grantee) and must parse under a small grammar (`col op literal`, `IS [NOT] NULL`, AND/OR, parentheses; ≤1000 chars, depth ≤16) at policy load; re-emitted as composed SQL. Request must match an allowlisted filter exactly (U1).
 - **Masks:** see U3.
 - **Apply:** `apply_plan(conn, plan)` first checks `current_database()` equals the dataset's `database` (refuses on mismatch), then runs all statements in one transaction; any error rolls back and raises `GrantError` (SQLSTATE only, no data).
 - **Not in U2:** revocation/sweep (U4), receipts (U5), CLI (U6), two-person approval (refused for now).
-- **Known limits:** view runs with the admin owner's privileges (base-table RLS not applied to grantee); `VALID UNTIL` blocks new logins only — live sessions are ended by sweep (U4).
+- **Known limits:** view runs with the admin owner's privileges (base-table RLS not applied to grantee); `VALID UNTIL` blocks new logins only; live sessions are ended by sweep (U4).
 
-## U3 — Masking
+## U3: Masking
 
 **Status:** In progress (approved 2026-11-02 5:43 PM CT; see ../audit.md). Modules: `src/datagrant/pg/mask.py`, `src/datagrant/keys.py`.
 
@@ -58,9 +58,9 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 
 - **Hash key:** local file (`~/.config/datagrant/hash.key`, or path in `$DATAGRANT_HASH_KEY`), ≥32 bytes hex, must be `0600` on POSIX. datagrant derives a key (HMAC-SHA256 with a fixed label) and stores only the derived key in `datagrant.hash_keys` (no PUBLIC access), inserted with bound parameters. Views reference it by key id via a subquery that runs with the view owner's rights, so the key is never in a view definition or statement text, and the grantee cannot read it. Same key ⇒ same hash across grants (joinable); new key ⇒ new hashes.
 - **Fail closed:** hash mask without pgcrypto in the database, or without a key file → `GrantError`, nothing created.
-- **Known limits:** (1) the derived key sits in `datagrant.hash_keys`, readable by superusers/the datagrant admin role; (2) with `log_statement = all` or `log_min_duration_statement`, Postgres logs bound parameters, which would include the derived key on first insert — keep statement logging off for the admin role (`ALTER ROLE <admin> SET log_statement = 'none'`); (3) the grantee needs `EXECUTE` on pgcrypto `hmac` (PUBLIC by default); (4) hashing low-entropy values is only as strong as the key's secrecy; (5) `partial` and `redact` change the column type to text.
+- **Known limits:** (1) the derived key sits in `datagrant.hash_keys`, readable by superusers/the datagrant admin role; (2) with `log_statement = all` or `log_min_duration_statement`, Postgres logs bound parameters, which would include the derived key on first insert, so keep statement logging off for the admin role (`ALTER ROLE <admin> SET log_statement = 'none'`); (3) the grantee needs `EXECUTE` on pgcrypto `hmac` (PUBLIC by default); (4) hashing low-entropy values is only as strong as the key's secrecy; (5) `partial` and `redact` change the column type to text.
 
-## U4 — Expiry, revoke, sweep (`pg/revoke.py`)
+## U4: Expiry, revoke, sweep (`pg/revoke.py`)
 
 - **`revoke(conn, grant_id, reason="manual")`**, three short transactions, each under `SET LOCAL search_path = pg_catalog, pg_temp`:
   1. **Lockout (committed first):** lock the `datagrant.grants` row (`FOR UPDATE`); if not `active`, no-op. Otherwise `ALTER ROLE … NOLOGIN VALID UNTIL 'epoch' PASSWORD NULL` and commit, so the postmaster refuses new logins before any session is killed. (Inside an uncommitted transaction, a reconnect loop could keep logging in; Red Team M1.)
@@ -72,7 +72,7 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 - **Admin permissions:** terminating another role's backends needs superuser or membership in `pg_signal_backend`. Without it revoke fails closed (reported, retried).
 - **Known limits:** `DROP OWNED` covers only the current database; if a grant role was given objects or privileges in another database, `DROP ROLE` fails and is reported. Receipts for revoke/expire events come in U5.
 
-## U5 — Signed access receipts (`receipt.py`, `keys.py`)
+## U5: Signed access receipts (`receipt.py`, `keys.py`)
 
 - **Keys:** `init_keys(dir=None)` creates `hash.key` (32 random bytes, hex) and `signing.key` (ed25519 32-byte seed, hex), each `O_CREAT|O_EXCL` mode 0600 in a 0700 directory. It refuses to overwrite either key. Paths come from `$DATAGRANT_HASH_KEY` / `$DATAGRANT_SIGNING_KEY` (file paths) or `~/.config/datagrant/`. Both keys are read through the same hardened reader (`O_NOFOLLOW`, `fstat` on the fd, owner-only, ≤1 KB). Key id = first 16 hex chars of SHA-256 of the raw public key. The public key is exported as 64 hex chars (`SigningKey.public_hex()`).
 - **Receipt line:** canonical JSON (sorted keys, no whitespace, UTF-8; floats/NaN rejected; any key named password/key/secret/hash_key/derived/private_key rejected) of `{"receipt": body, "sig": ed25519(canonical(body))}`.
@@ -82,7 +82,7 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 - **Hooks:** `apply_plan(conn, plan, receipts=ReceiptSink(...))` writes `issued` after commit. `revoke`/`sweep(…, receipts=…)` write `revoked`/`expired`, or `revoke_failed` on every failed attempt (so a stuck grant produces one per sweep). No-ops write nothing. Facts for revoke receipts come from `datagrant.grants` (new columns `masks`, `policy_version`, `approvers`).
 - **Fail-safe decisions:** *No receipt, no access.* If the `issued` receipt can't be written, the grant is revoked at once and `GrantError` is raised. A revoke never depends on its receipt: access is removed first, and a receipt write failure is returned as `RevokeResult.receipt_error` (U6 exits non-zero; state in `datagrant.grants` still records it).
 
-## U6 — CLI and two-person approval (`cli.py`, `pg/requests.py`)
+## U6: CLI and two-person approval (`cli.py`, `pg/requests.py`)
 
 - **Commands:** `keys init | export-pubkey`, `policy check <file>`, `request`, `approve <request-id>`, `grant list [--all] | status <id>`, `revoke <id>`, `sweep`, `receipts verify [--pubkey] [--expect-head]`, `preflight`. `--json` works on every command, before or after the subcommand.
 - **Dry run by default (QE):** `keys init`, `request`, `approve`, `revoke`, `sweep` and `preflight` change nothing unless `--apply` is given. Without it they print what would happen and exit 0:
@@ -105,7 +105,7 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 - **`sweep`:** revokes expired grants (U4) and marks pending requests past their TTL `expired`, clearing their verifiers.
 - **`revoke`/`sweep` without a signing key:** they still revoke and exit 3 (removing access never waits on a key).
 
-## U7 — One-command demo (`scripts/demo.sh`, `scripts/demo.py`, `docs/demo.md`)
+## U7: One-command demo (`scripts/demo.sh`, `scripts/demo.py`, `docs/demo.md`)
 
 - `make demo` → `scripts/demo.sh`: a random Postgres password is generated at runtime, `postgres:16` (digest-pinned) is bound to 127.0.0.1 only, and `trap … EXIT` runs `docker compose down -v`. `make demo-down` does the same teardown by hand.
 - `DATAGRANT_DEMO_DSN` skips Docker and uses an existing Postgres. This is how CI (`demo` job) and local testing run it. Windows runs `python scripts/demo.py` directly.

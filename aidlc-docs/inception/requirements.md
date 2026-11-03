@@ -3,10 +3,10 @@
 **Status:** Approved by Chris Hickman, 2026-11-02 (task `I-1`).
 
 ## Users
-- **AI/ML developer** — needs a narrow, temporary slice of regulated data (PHI/PII) to build, debug, or evaluate a model or pipeline.
-- **Data owner / approver** — writes the policy that says who may see what, for how long, and how it is masked.
-- **Security / compliance reviewer** — needs evidence of who had access to what, why, and when it ended.
-- **DBA / platform engineer** — runs datagrant against Postgres and the expiry sweep.
+- **AI/ML developer**: needs a narrow, temporary slice of regulated data (PHI/PII) to build, debug, or evaluate a model or pipeline.
+- **Data owner / approver**: writes the policy that says who may see what, for how long, and how it is masked.
+- **Security / compliance reviewer**: needs evidence of who had access to what, why, and when it ended.
+- **DBA / platform engineer**: runs datagrant against Postgres and the expiry sweep.
 
 ## Problem
 Developers on regulated data usually get standing, over-broad read access (or full production copies) because fine-grained, time-boxed access is slow to set up by hand. That creates HIPAA minimum-necessary and PII-exposure risk, and leaves weak audit evidence. datagrant makes the narrow, expiring, masked grant the easy path, from a CLI, with a verifiable receipt.
@@ -39,12 +39,12 @@ Developers on regulated data usually get standing, over-broad read access (or fu
 - Supports the HIPAA **minimum necessary** standard and access-control/audit expectations of the Security Rule; datagrant alone does **not** make a system HIPAA compliant.
 - Masked ≠ de-identified: hashed or partial values may still be PHI under HIPAA (Safe Harbor/Expert Determination are out of scope).
 - Receipts are evidence of grants, not of every query; per-query audit relies on Postgres logging/pgAudit if enabled.
-- Grant views run with owner privileges; base-table RLS policies may be bypassed — documented and tested.
+- Grant views run with owner privileges; base-table RLS policies may be bypassed. This is documented and tested.
 
 ## Out of scope (v1)
 - Databases other than Postgres; GUI/web UI; long-running server/daemon.
 - Multi-party approval workflows, SSO/IdP integration, ticketing integration.
-- Automatic PII discovery (e.g. Presidio) — candidate for later.
+- Automatic PII discovery (e.g. Presidio) is a candidate for later.
 - Data copies/exports, synthetic data generation, query-level DLP.
 
 See [open-questions.md](open-questions.md).
