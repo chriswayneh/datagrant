@@ -9,7 +9,7 @@ description = "Just-in-time, expiring, masked access to regulated data (PHI/PII)
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0.1,<7", "psycopg>=3.2,<4"]
+dependencies = ["PyYAML>=6.0.1,<7", "psycopg>=3.2,<4", "cryptography>=44,<51"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov>=7", "ruff>=0.4", "mypy>=1.8", "types-PyYAML>=6.0", "psycopg[binary]>=3.2,<4", "bandit>=1.7"]

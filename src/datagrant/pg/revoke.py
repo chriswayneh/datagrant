@@ -12,14 +12,17 @@ next sweep. A grant is never marked revoked unless the role and view are gone.
 
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import psycopg
 from psycopg import sql
 
-from datagrant.pg.grant import STATE_SCHEMA, GrantError
+from datagrant import receipt
+from datagrant.pg.grant import STATE_SCHEMA, GrantError, ReceiptSink
+from datagrant.receipt import GrantFacts
 
 Reason = Literal["expired", "manual"]
 Outcome = Literal["revoked", "noop", "failed"]
@@ -49,6 +52,7 @@ class RevokeResult:
     outcome: Outcome
     sessions_terminated: int = 0
     error: str | None = None
+    receipt_error: str | None = None
 
 
 def _terminate_sessions(conn: psycopg.Connection, role: str) -> int:
@@ -149,8 +153,42 @@ def _record_failure(conn: psycopg.Connection, grant_id: str, error: str) -> None
         pass  # the original failure is still reported to the caller
 
 
-def revoke(conn: psycopg.Connection, grant_id: str, reason: Reason = "manual") -> RevokeResult:
-    """Revoke one grant. Idempotent: an already revoked/expired grant is a no-op."""
+_FACTS = sql.SQL(
+    "SELECT requester, dataset, table_name, columns, masks, row_filter, purpose, created_at,"
+    " expires_at, policy_sha256, policy_version, approval, approvers"
+    " FROM {}.grants WHERE id = %s AND status = 'active'"
+).format(sql.Identifier(STATE_SCHEMA))
+
+
+def _load_facts(conn: psycopg.Connection, grant_id: str) -> GrantFacts | None:
+    with conn.transaction():
+        conn.execute(_SAFE_PATH)
+        r = conn.execute(_FACTS, (grant_id,)).fetchone()
+    if r is None:
+        return None
+    try:
+        masks = json.loads(r[4]) if r[4] else {}
+    except ValueError:
+        masks = {}
+    return GrantFacts(
+        grant_id,
+        r[0],
+        r[1],
+        r[2],
+        tuple(r[3]),
+        masks,
+        r[5],
+        r[6],
+        r[7],
+        r[8],
+        r[9],
+        r[10] or 1,
+        r[11],
+        tuple(r[12] or ()),
+    )
+
+
+def _attempt(conn: psycopg.Connection, grant_id: str, reason: Reason) -> RevokeResult:
     try:
         return _cleanup(conn, grant_id, reason)
     except (psycopg.Error, GrantError) as exc:
@@ -161,9 +199,42 @@ def revoke(conn: psycopg.Connection, grant_id: str, reason: Reason = "manual") -
         return RevokeResult(grant_id, "failed", error=msg)
 
 
-def sweep(conn: psycopg.Connection) -> list[RevokeResult]:
+def revoke(
+    conn: psycopg.Connection,
+    grant_id: str,
+    reason: Reason = "manual",
+    receipts: ReceiptSink | None = None,
+) -> RevokeResult:
+    """Revoke one grant. Idempotent: an already revoked/expired grant is a no-op.
+
+    With ``receipts``, a ``revoked``/``expired`` (or ``revoke_failed``) receipt is
+    written. Access removal never depends on the receipt: a receipt write
+    failure is returned in ``receipt_error`` after the revoke itself.
+    """
+    facts = _load_facts(conn, grant_id) if receipts is not None else None
+    res = _attempt(conn, grant_id, reason)
+    if receipts is None or facts is None or res.outcome == "noop":
+        return res
+    if res.outcome == "revoked":
+        event: receipt.Event = "expired" if reason == "expired" else "revoked"
+        details: dict[str, object] = {
+            "reason": reason,
+            "sessions_terminated": res.sessions_terminated,
+        }
+    else:
+        event, details = "revoke_failed", {"reason": reason, "error": res.error or ""}
+    try:
+        receipt.append(
+            receipts.log, event, facts, receipts.key, host=receipts.host, details=details
+        )
+    except receipt.ReceiptError as exc:
+        return replace(res, receipt_error=str(exc))
+    return res
+
+
+def sweep(conn: psycopg.Connection, receipts: ReceiptSink | None = None) -> list[RevokeResult]:
     """Revoke every active grant past expiry, one transaction per grant."""
     with conn.transaction():
         conn.execute(_SAFE_PATH)
         due = [r[0] for r in conn.execute(_DUE).fetchall()]
-    return [revoke(conn, gid, "expired") for gid in due]
+    return [revoke(conn, gid, "expired", receipts) for gid in due]
