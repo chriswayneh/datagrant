@@ -39,6 +39,10 @@ datagrant --version
 ruff check . && mypy src && pytest -q
 ```
 
+## Try it
+
+`make demo` runs the full flow (request, masked query, two-person approval, revoke, sweep, receipt verification) against a throwaway Docker Postgres with fake data. See [docs/demo.md](docs/demo.md), including how to run it without Docker.
+
 ## Usage (preview)
 
 ```bash

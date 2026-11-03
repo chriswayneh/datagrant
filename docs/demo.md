@@ -1,0 +1,54 @@
+# datagrant demo
+
+One command walks the whole flow against a throwaway Postgres, using synthetic, obviously fake patient data.
+
+```bash
+pip install -e .
+make demo          # or ./scripts/demo.sh ; needs Docker with the compose plugin
+make demo-down     # only needed if a run was interrupted; the demo tears down on exit
+```
+
+## What happens
+1. `scripts/demo.sh` generates a random Postgres password and starts `postgres:16` (digest-pinned) from `scripts/demo-compose.yml`, bound to `127.0.0.1:55439` only. A `trap` runs `docker compose down -v` on exit, removing the containers and the volume.
+2. `scripts/demo.py` creates a temp dir for keys, receipts and two policy files (auto and two-person), then:
+   1. seeds `dg_demo.patients` (8 rows such as `Fake Patient 001`, SSN `000-00-0001` (never issued), phone `555-01xx-…` (fictional range)) and prints the raw admin view;
+   2. runs `keys init --apply`, `policy check` and `preflight --apply`;
+   3. runs `request` with no flag: a dry run showing plan SQL with `PASSWORD '<redacted>'` and no password;
+   4. runs `request --apply` (auto): alice connects and sees 4 west rows with name redacted, SSN HMAC-hashed, phone partial and birth date NULL; reading the raw table is refused;
+   5. two-person: the request goes pending; alice approving her own request is refused (exit 1); carol approves; alice logs in with the password she got at request time;
+   6. `revoke --apply` while alice's session is open: the session is terminated;
+   7. the second grant's expiry is fast-forwarded (a demo shortcut), then `sweep` (dry run) and `sweep --apply`;
+   8. `receipts verify` passes (4 receipts: issued ×2, revoked, expired), then again with `--expect-head <head>`.
+3. On exit the temp dir (keys, receipts) and schema `dg_demo` are removed.
+
+Expected output ends with:
+
+```text
+DEMO MARKER: masked-rows-ok
+DEMO MARKER: two-person-ok
+DEMO MARKER: revoke-ok
+DEMO MARKER: sweep-ok
+DEMO MARKER: receipts-ok
+
+DEMO OK
+```
+
+One-time passwords are printed as `<shown once to the requester>` in the demo log. The demo uses them internally to log in.
+
+## Without Docker (existing Postgres)
+Point the demo at any Postgres 13+ where the role can create roles and the `pgcrypto` extension (superuser is simplest). It writes only schema `dg_demo` (dropped at the end) and datagrant's own `datagrant` / `datagrant_views` state. Use a scratch database.
+
+```bash
+DATAGRANT_DEMO_DSN=postgresql://admin:PASSWORD@localhost:5432/scratch ./scripts/demo.sh
+```
+
+Windows (PowerShell):
+
+```powershell
+$env:DATAGRANT_DEMO_DSN = "postgresql://admin:PASSWORD@localhost:5432/scratch"
+python scripts/demo.py
+```
+
+To use Docker on Windows, start the container yourself with `docker compose -f scripts/demo-compose.yml up -d --wait` (set `DATAGRANT_DEMO_PG_PASSWORD` first), run the line above, then `docker compose -f scripts/demo-compose.yml down -v`.
+
+CI runs the demo on every push (`demo` job) against the CI Postgres service and checks the markers.

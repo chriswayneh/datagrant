@@ -43,3 +43,33 @@ jobs:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
       - run: pytest -q tests/integration
+  demo:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16@sha256:5db6dac2ef5dcff512f4f00a009c3c332b9f2f28f24277175bf3e4a3d02ef83a  # postgres:16 index digest, pinned 2026-11-02
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATAGRANT_DEMO_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install -e .
+      - name: run the demo end to end (existing Postgres, no compose)
+        shell: bash   # -eo pipefail: a failing demo fails the step
+        run: ./scripts/demo.sh | tee demo.log
+      - name: assert demo markers
+        run: |
+          for m in masked-rows-ok two-person-ok revoke-ok sweep-ok receipts-ok; do
+            grep -q "DEMO MARKER: $m" demo.log || { echo "missing marker $m"; exit 1; }
+          done
+          grep -q '^DEMO OK$' demo.log
+          ! grep -q 'SCRAM-SHA-256' demo.log
