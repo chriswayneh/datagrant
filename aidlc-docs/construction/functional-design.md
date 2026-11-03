@@ -104,3 +104,10 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 - **`approve`:** loads the current policy and re-evaluates the stored request (a tightened policy refuses it). The approver must differ from the requester and be in a policy `approvers` group (a new top-level key, required for `two-person`). One transaction creates the role with the stored verifier and claims the request (`pending → approved`, only if not expired), so only one approval can win. The verifier is then cleared. The grant row and the `issued` receipt record `approvers: [approver]`.
 - **`sweep`:** revokes expired grants (U4) and marks pending requests past their TTL `expired`, clearing their verifiers.
 - **`revoke`/`sweep` without a signing key:** they still revoke and exit 3 (removing access never waits on a key).
+
+## U7 — One-command demo (`scripts/demo.sh`, `scripts/demo.py`, `docs/demo.md`)
+
+- `make demo` → `scripts/demo.sh`: a random Postgres password is generated at runtime, `postgres:16` (digest-pinned) is bound to 127.0.0.1 only, and `trap … EXIT` runs `docker compose down -v`. `make demo-down` does the same teardown by hand.
+- `DATAGRANT_DEMO_DSN` skips Docker and uses an existing Postgres. This is how CI (`demo` job) and local testing run it. Windows runs `python scripts/demo.py` directly.
+- `scripts/demo.py` drives the real CLI in-process with `--json`: it seeds synthetic data, then runs keys, policy check, dry run, auto grant with masked rows, two-person approval, revoke with a live session, sweep and receipt verification. It prints `DEMO MARKER:` lines and `DEMO OK`, and exits non-zero on any unexpected result. Keys and receipts live in a temp dir that is deleted on exit, and schema `dg_demo` is dropped.
+- Demo shortcut: the sweep step moves one grant's `expires_at` into the past instead of waiting.
