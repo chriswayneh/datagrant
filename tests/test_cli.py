@@ -168,3 +168,35 @@ def test_identity_default_is_os_user(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli.getpass, "getuser", lambda: "osuser")
     assert cli._identity(argparse.Namespace(as_user=None)) == ("osuser", "os")
     assert cli._identity(argparse.Namespace(as_user="bob")) == ("bob", "flag")
+
+
+def test_verify_text_without_line_number(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
+    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
+    assert run(["keys", "init", "--apply"])[0] == EXIT_OK
+    code, out = run(["receipts", "verify", "--receipt-log", str(tmp_path / "missing.jsonl")])
+    assert code == EXIT_FAILED and out[0].startswith("FAILED: cannot read log")
+    assert "None" not in out[0]
+    code, out = run(["--json", "receipts", "verify", "--receipt-log", str(tmp_path / "m")])
+    assert json.loads(out[0])["line"] is None
+    log = tmp_path / "r.jsonl"
+    log.write_bytes(b"")
+    code, out = run(["receipts", "verify", "--receipt-log", str(log), "--expect-head", "1" * 64])
+    assert code == EXIT_FAILED and out[0].startswith("FAILED: head hash differs")
+    assert "None" not in out[0]
+
+
+@pytest.mark.parametrize("apply", [True, False])
+def test_keys_init_refuses_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, apply: bool
+) -> None:
+    same = tmp_path / "k" / "one.key"
+    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(same))
+    argv = ["keys", "init", "--signing-key", str(same)] + (["--apply"] if apply else [])
+    assert run(argv)[0] == EXIT_USAGE
+    assert not (tmp_path / "k").exists()  # nothing written
+    from datagrant.keys import KeyFileError, init_keys
+
+    with pytest.raises(KeyFileError, match="different files"):
+        init_keys(hash_path=same, signing_path=same)
+    assert not (tmp_path / "k").exists()

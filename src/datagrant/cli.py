@@ -137,6 +137,11 @@ def _conn_info(args: argparse.Namespace, plan: Any) -> dict[str, Any]:
 
 
 def cmd_keys_init(ctx: Ctx) -> int:
+    a = ctx.args
+    hp0 = resolve_key_path("hash", a.hash_key, a.dir)
+    sp0 = resolve_key_path("signing", a.signing_key, a.dir)
+    if hp0.absolute() == sp0.absolute() or (hp0.exists() and sp0.exists() and hp0.samefile(sp0)):
+        raise CliError(f"hash key and signing key resolve to the same file {sp0}", EXIT_USAGE)
     if not ctx.args.apply:
         a = ctx.args
         hp = resolve_key_path("hash", a.hash_key, a.dir)
@@ -431,7 +436,7 @@ def cmd_grant_status(ctx: Ctx) -> int:
     if not rows:
         raise CliError(f"unknown grant {ctx.args.grant_id}")
     r = rows[0]
-    ctx.emit(r, "\n".join(f"{k}: {v}" for k, v in r.items()))
+    ctx.emit(r, "\n".join(f"{k}: {'-' if v is None else v}" for k, v in r.items()))
     return EXIT_OK
 
 
@@ -578,7 +583,9 @@ def cmd_receipts_verify(ctx: Ctx) -> int:
         },
         f"OK: {res.count} receipt(s), head {res.head_sha256}"
         if res.ok
-        else f"FAILED at line {res.line}: {res.error} ({res.count} good receipt(s) before it)",
+        else "FAILED"
+        + (f" at line {res.line}" if res.line is not None else "")
+        + f": {res.error} ({res.count} good receipt(s) before it)",
     )
     return EXIT_OK if res.ok else EXIT_FAILED
 

@@ -188,6 +188,8 @@ def init_keys(
     """
     hp = resolve_key_path("hash", hash_path, directory)
     sp = resolve_key_path("signing", signing_path, directory)
+    if hp.absolute() == sp.absolute():
+        raise KeyFileError(f"hash key and signing key must be different files ({sp})")
     for existing in (hp, sp):
         if existing.exists() or existing.is_symlink():
             raise KeyFileError(f"{existing} already exists; refusing to overwrite a key")

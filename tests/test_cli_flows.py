@@ -202,6 +202,9 @@ def test_grant_list_status_revoke_sweep_preflight(
     out: list[str] = []
     assert cli.main(["grant", "list"], out.append) == 0 and "ERROR: boom" in out[0]
     assert run("grant", "status", "abc")[1]["requester"] == "alice"
+    out = []
+    assert cli.main(["grant", "status", "abc"], out.append) == 0
+    assert "revoked_at: -" in out[0] and "None" not in out[0]
     setup["conn"].rows = []
     assert run("grant", "status", "abc")[0] == 1
     out = []
