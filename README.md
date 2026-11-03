@@ -2,6 +2,7 @@
 
 # datagrant
 
+[![release](https://img.shields.io/github/v/release/chriswayneh/datagrant?style=flat&label=release)](https://github.com/chriswayneh/datagrant/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/chriswayneh/datagrant/actions/workflows/ci.yml/badge.svg)](https://github.com/chriswayneh/datagrant/actions/workflows/ci.yml)
 
@@ -9,7 +10,7 @@
 
 An open-source command-line tool that gives developers time-boxed, column- and row-limited, masked access to PHI/PII in Postgres, revokes it automatically, and writes a signed record of who saw what.
 
-**Status:** v0.1.0 is feature-complete on `main` and not yet released. Pre-1.0: interfaces may change. Use fictional or test data until you have reviewed the [security model](docs/security.md). See the [roadmap](ROADMAP.md).
+**Status:** [v0.1.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.1.0) is released. Pre-1.0: interfaces may change. Use fictional or test data until you have reviewed the [security model](docs/security.md). See the [roadmap](ROADMAP.md).
 
 </div>
 
