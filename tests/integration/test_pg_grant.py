@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -22,6 +24,7 @@ from datagrant.pg.grant import (
     preflight,
 )
 from datagrant.pg.mask import inspect_table
+from datagrant.pg.revoke import revoke, sweep
 from datagrant.policy import Request, evaluate, parse_policy
 
 DSN = os.environ.get("DATAGRANT_TEST_DSN")
@@ -82,8 +85,9 @@ def admin() -> Iterator[psycopg.Connection]:
         rows = conn.execute("SELECT role_name, view_name FROM datagrant.grants").fetchall()
         for role, view in rows:
             conn.execute(sql.SQL("DROP VIEW IF EXISTS {}").format(sql.Identifier(*view.split("."))))
-            conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
-            conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+            if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
+                conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
         conn.execute("TRUNCATE datagrant.grants, datagrant.hash_keys")
         conn.execute("DROP TABLE public.dg_patients")
 
@@ -271,3 +275,114 @@ def test_view_ignores_shadow_functions_on_search_path(admin: psycopg.Connection)
     with _login(plan.role, pw) as c:
         rows = sorted(c.execute(f"SELECT {', '.join(MASKED)} FROM {plan.view}").fetchall())
     assert [r[3] for r in rows] == ["*********1234", "**"]
+
+
+# --- U4: revoke and sweep ---
+
+
+def _role_exists(c: psycopg.Connection, role: str) -> bool:
+    return c.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is not None
+
+
+def _view_exists(c: psycopg.Connection, view: str) -> bool:
+    return c.execute("SELECT to_regclass(%s)", (view,)).fetchone() != (None,)
+
+
+def _state(c: psycopg.Connection, gid: str) -> tuple:
+    row = c.execute(
+        "SELECT status, revoke_reason, revoked_at IS NOT NULL, last_error FROM datagrant.grants"
+        " WHERE id = %s",
+        (gid,),
+    ).fetchone()
+    assert row is not None
+    return row
+
+
+def test_revoke_kills_session_and_drops_everything(admin: psycopg.Connection) -> None:
+    plan, pw = _grant(admin)
+    session = _login(plan.role, pw)
+    session.execute(f"SELECT * FROM {plan.view}")
+    res = revoke(admin, plan.grant_id)
+    assert res.outcome == "revoked" and res.sessions_terminated == 1
+    with pytest.raises(psycopg.OperationalError):
+        session.execute("SELECT 1")
+    session.close()
+    assert not _role_exists(admin, plan.role)
+    assert not _view_exists(admin, plan.view)
+    assert _state(admin, plan.grant_id) == ("revoked", "manual", True, None)
+    assert revoke(admin, plan.grant_id).outcome == "noop"  # idempotent
+
+
+def test_sweep_only_expired(admin: psycopg.Connection) -> None:
+    old, _ = _grant(admin, now=datetime.now(UTC) - timedelta(hours=2))
+    live, live_pw = _grant(admin)
+    results = sweep(admin)
+    assert [(r.grant_id, r.outcome) for r in results] == [(old.grant_id, "revoked")]
+    assert _state(admin, old.grant_id) == ("expired", "expired", True, None)
+    assert not _role_exists(admin, old.role) and not _view_exists(admin, old.view)
+    assert _state(admin, live.grant_id)[0] == "active"
+    with _login(live.role, live_pw) as c:
+        assert c.execute(f"SELECT count(*) FROM {live.view}").fetchone() == (2,)
+    assert sweep(admin) == []  # re-run is a no-op
+
+
+def test_failure_is_recorded_not_marked_revoked(admin: psycopg.Connection) -> None:
+    plan, pw = _grant(admin)
+    admin.execute(f"CREATE VIEW public.dg_dependent AS SELECT * FROM {plan.view}")
+    try:
+        res = revoke(admin, plan.grant_id)
+        assert res.outcome == "failed" and res.error
+        status, reason, revoked, err = _state(admin, plan.grant_id)
+        assert (status, reason, revoked) == ("active", None, False) and err
+        assert _role_exists(admin, plan.role) and _view_exists(admin, plan.view)
+        with pytest.raises(psycopg.OperationalError):
+            _login(plan.role, pw)  # best effort NOLOGIN after failure
+    finally:
+        admin.execute("DROP VIEW public.dg_dependent")
+    assert revoke(admin, plan.grant_id).outcome == "revoked"  # retried successfully
+    assert _state(admin, plan.grant_id)[3] is None
+
+
+def test_revoke_unknown_grant(admin: psycopg.Connection) -> None:
+    with pytest.raises(GrantError, match="unknown grant"):
+        revoke(admin, "000000000000")
+
+
+def test_revoke_wins_against_reconnect_loop(admin: psycopg.Connection) -> None:
+    plan, pw = _grant(admin)  # not expired: manual revoke
+    stop = threading.Event()
+    stats = {"ok": 0, "fail": 0}
+
+    def loop() -> None:
+        while not stop.is_set():
+            try:
+                with _login(plan.role, pw) as c:
+                    stats["ok"] += 1
+                    c.execute("SELECT pg_sleep(0.01)")
+            except psycopg.Error:
+                stats["fail"] += 1
+
+    threads = [threading.Thread(target=loop) for _ in range(3)]
+    for t in threads:
+        t.start()
+    try:
+        deadline = time.monotonic() + 5
+        while stats["ok"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert stats["ok"] > 0  # the loop really was logged in
+        res = revoke(admin, plan.grant_id)
+        assert res.outcome == "revoked", res.error
+        fails_before = stats["fail"]
+        time.sleep(0.3)
+        assert stats["fail"] > fails_before  # reconnects keep failing
+    finally:
+        stop.set()
+        for t in threads:
+            t.join()
+    left = admin.execute(
+        "SELECT count(*) FROM pg_stat_activity WHERE usename = %s", (plan.role,)
+    ).fetchone()
+    assert left == (0,)
+    assert not _role_exists(admin, plan.role)
+    with pytest.raises(psycopg.OperationalError):
+        _login(plan.role, pw)
