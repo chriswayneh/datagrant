@@ -90,6 +90,7 @@ class Decision:
     approval: str
     policy_sha256: str
     masks: dict[str, str] = field(default_factory=dict)
+    policy_version: int = 1
 
 
 def _req(d: dict[str, Any], key: str, typ: type, where: str) -> Any:
@@ -258,7 +259,9 @@ def evaluate(policy: Policy, req: Request) -> Decision:
     reasons: list[str] = []
 
     def deny(*extra: str) -> Decision:
-        return Decision(False, tuple(reasons) + extra, policy.approval, policy.sha256)
+        return Decision(
+            False, tuple(reasons) + extra, policy.approval, policy.sha256, {}, policy.version
+        )
 
     if not req.purpose.strip():
         reasons.append("purpose is required")
@@ -289,4 +292,6 @@ def evaluate(policy: Policy, req: Request) -> Decision:
     if reasons:
         return deny()
     masks = {c: rule.columns[c] for c in req.columns}
-    return Decision(True, ("allowed by policy",), policy.approval, policy.sha256, masks)
+    return Decision(
+        True, ("allowed by policy",), policy.approval, policy.sha256, masks, policy.version
+    )

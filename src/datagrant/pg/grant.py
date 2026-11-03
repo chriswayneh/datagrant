@@ -6,18 +6,22 @@ string-interpolated. Grant creation runs in one transaction (fail closed).
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 import psycopg
 from psycopg import sql
 
-from datagrant.keys import HashKey
+from datagrant import receipt
+from datagrant.keys import HashKey, SigningKey
 from datagrant.pg.mask import MaskError, TableCatalog, column_expr
 from datagrant.pg.scram import scram_verifier
 from datagrant.policy import Decision, Request
+from datagrant.receipt import GrantFacts, ReceiptError
 from datagrant.rowfilter import parse_row_filter
 
 STATE_SCHEMA = "datagrant"
@@ -38,6 +42,16 @@ class GrantPlan:
     database: str
     statements: tuple[sql.Composed, ...]
     hash_key: HashKey | None = field(default=None, repr=False)
+    facts: GrantFacts | None = None
+
+
+@dataclass(frozen=True)
+class ReceiptSink:
+    """Where and with which key grant/revoke events are receipted (U5)."""
+
+    log: Path
+    key: SigningKey
+    host: str | None = None
 
 
 STATE_DDL: tuple[sql.Composed, ...] = (
@@ -64,6 +78,12 @@ STATE_DDL: tuple[sql.Composed, ...] = (
         " ADD COLUMN IF NOT EXISTS revoke_reason text"
         " CHECK (revoke_reason IN ('expired','manual')),"
         " ADD COLUMN IF NOT EXISTS last_error text, ADD COLUMN IF NOT EXISTS last_error_at timestamptz"
+    ).format(sql.Identifier(STATE_SCHEMA)),
+    # U5: facts needed to receipt revoke/expire events.
+    sql.SQL(
+        "ALTER TABLE {}.grants ADD COLUMN IF NOT EXISTS masks text,"
+        " ADD COLUMN IF NOT EXISTS policy_version integer,"
+        " ADD COLUMN IF NOT EXISTS approvers text[] NOT NULL DEFAULT '{{}}'"
     ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
@@ -143,7 +163,8 @@ def build_plan(
         sql.SQL("GRANT SELECT ON {} TO {}").format(view_id, role_id),
         sql.SQL(
             "INSERT INTO {}.grants (id, role_name, view_name, dataset, table_name, requester,"
-            " purpose, columns, row_filter, approval, policy_sha256, created_at, expires_at)"
+            " purpose, columns, row_filter, approval, policy_sha256, created_at, expires_at,"
+            " masks, policy_version)"
             " VALUES ({})"
         ).format(
             sql.Identifier(STATE_SCHEMA),
@@ -163,6 +184,8 @@ def build_plan(
                     decision.policy_sha256,
                     now,
                     expires,
+                    json.dumps({c: decision.masks[c] for c in req.columns}, sort_keys=True),
+                    decision.policy_version,
                 )
             ),
         ),
@@ -175,6 +198,21 @@ def build_plan(
         database,
         stmts,
         hash_key if needs_key else None,
+        GrantFacts(
+            gid,
+            req.requester,
+            req.dataset,
+            req.table,
+            tuple(req.columns),
+            {c: decision.masks[c] for c in req.columns},
+            req.row_filter,
+            req.purpose,
+            now,
+            expires,
+            decision.policy_sha256,
+            decision.policy_version,
+            decision.approval,
+        ),
     )
 
 
@@ -183,8 +221,15 @@ def new_password() -> str:
     return secrets.token_urlsafe(32)
 
 
-def apply_plan(conn: psycopg.Connection, plan: GrantPlan) -> None:
-    """Execute a plan atomically; any failure rolls everything back."""
+def apply_plan(
+    conn: psycopg.Connection, plan: GrantPlan, receipts: ReceiptSink | None = None
+) -> None:
+    """Execute a plan atomically; any failure rolls everything back.
+
+    With ``receipts``, an ``issued`` receipt is written after commit. If that
+    write fails the grant is revoked at once (no receipt, no access) and
+    GrantError is raised.
+    """
     try:
         with conn.transaction():
             # Resolve every unqualified name to built-ins only (CVE-2018-1058 class).
@@ -207,4 +252,19 @@ def apply_plan(conn: psycopg.Connection, plan: GrantPlan) -> None:
     except psycopg.Error as exc:
         raise GrantError(
             f"grant {plan.grant_id} failed and was rolled back: {exc.sqlstate}"
+        ) from exc
+    if receipts is None:
+        return
+    try:
+        if plan.facts is None:
+            raise ReceiptError("plan has no receipt facts")
+        receipt.append(receipts.log, "issued", plan.facts, receipts.key, host=receipts.host)
+    except BaseException as exc:  # no receipt, no access - whatever went wrong
+        from datagrant.pg.revoke import revoke  # local: revoke imports this module
+
+        res = revoke(conn, plan.grant_id, "manual")
+        if not isinstance(exc, Exception):
+            raise  # KeyboardInterrupt/SystemExit: re-raise as is, after revoking
+        raise GrantError(
+            f"grant {plan.grant_id}: receipt not written ({exc}); grant revoked: {res.outcome}"
         ) from exc

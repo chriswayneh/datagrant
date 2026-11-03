@@ -14,9 +14,10 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from datagrant.keys import HashKey
+from datagrant.keys import HashKey, init_keys, load_signing_key
 from datagrant.pg.grant import (
     GrantError,
+    ReceiptSink,
     apply_plan,
     build_plan,
     ensure_state,
@@ -26,6 +27,7 @@ from datagrant.pg.grant import (
 from datagrant.pg.mask import inspect_table
 from datagrant.pg.revoke import revoke, sweep
 from datagrant.policy import Request, evaluate, parse_policy
+from datagrant.receipt import verify
 
 DSN = os.environ.get("DATAGRANT_TEST_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="DATAGRANT_TEST_DSN not set")
@@ -98,6 +100,7 @@ def _grant(
     database: str = "postgres",
     hash_key: HashKey | None = None,
     before_apply: str | None = None,
+    receipts: ReceiptSink | None = None,
     **kw: object,
 ) -> tuple:
     base: dict[str, object] = {
@@ -125,7 +128,7 @@ def _grant(
     )
     if before_apply:
         admin.execute(before_apply)  # simulate the table changing between plan and apply
-    apply_plan(admin, plan)
+    apply_plan(admin, plan, receipts)
     return plan, pw
 
 
@@ -386,3 +389,94 @@ def test_revoke_wins_against_reconnect_loop(admin: psycopg.Connection) -> None:
     assert not _role_exists(admin, plan.role)
     with pytest.raises(psycopg.OperationalError):
         _login(plan.role, pw)
+
+
+# --- U5: receipts ---
+
+
+@pytest.fixture
+def sink(tmp_path):  # type: ignore[no-untyped-def]
+    _, sp, _ = init_keys(tmp_path / "keys")
+    return ReceiptSink(tmp_path / "receipts.jsonl", load_signing_key(sp), host="test-host")
+
+
+def _events(sink: ReceiptSink) -> list[dict]:
+    import json
+
+    return [json.loads(x)["receipt"] for x in sink.log.read_text().splitlines()]
+
+
+def test_receipts_for_issue_revoke_sweep_and_failure(admin: psycopg.Connection, sink) -> None:  # type: ignore[no-untyped-def]
+    plan, pw = _grant(admin, hash_key=KEY_A, columns=MASKED, receipts=sink)
+    old, _ = _grant(admin, now=datetime.now(UTC) - timedelta(hours=2), receipts=sink)
+    stuck, _ = _grant(admin, receipts=sink)
+    assert revoke(admin, plan.grant_id, receipts=sink).receipt_error is None
+    assert [r.outcome for r in sweep(admin, receipts=sink)] == ["revoked"]
+    admin.execute(f"CREATE VIEW public.dg_dependent AS SELECT * FROM {stuck.view}")
+    try:
+        assert revoke(admin, stuck.grant_id, receipts=sink).outcome == "failed"
+    finally:
+        admin.execute("DROP VIEW public.dg_dependent")
+    assert revoke(admin, plan.grant_id, receipts=sink).outcome == "noop"  # no receipt
+    ev = _events(sink)
+    assert [(e["event"], e["grant_id"]) for e in ev] == [
+        ("issued", plan.grant_id),
+        ("issued", old.grant_id),
+        ("issued", stuck.grant_id),
+        ("revoked", plan.grant_id),
+        ("expired", old.grant_id),
+        ("revoke_failed", stuck.grant_id),
+    ]
+    issued = ev[0]
+    assert {c["name"]: c["mask"] for c in issued["columns"]}["ssn"] == "hash"
+    assert issued["row_filter"] == "region = 'west'" and issued["host"] == "test-host"
+    assert issued["policy_sha256"] == "a" * 64 and issued["policy_version"] == 1
+    assert ev[3]["columns"] == issued["columns"]  # revoke receipt rebuilt from the state row
+    assert ev[3]["details"]["reason"] == "manual" and ev[4]["details"]["reason"] == "expired"
+    assert ev[5]["details"]["error"]
+    text = sink.log.read_text()
+    assert pw not in text and KEY_A.derived.hex() not in text
+    res = verify(sink.log, sink.key.private.public_key())
+    assert res.ok and res.count == 6
+
+
+def test_receipt_write_failure_revokes_grant(admin: psycopg.Connection, sink) -> None:  # type: ignore[no-untyped-def]
+    sink.log.mkdir()  # unwritable as a file
+    with pytest.raises(GrantError, match="receipt not written.*grant revoked: revoked"):
+        _grant(admin, receipts=sink)
+    row = admin.execute("SELECT id, role_name, status FROM datagrant.grants").fetchone()
+    assert row is not None and row[2] == "revoked"
+    assert not _role_exists(admin, row[1])
+
+
+def test_revoke_receipt_failure_still_revokes(admin: psycopg.Connection, sink) -> None:  # type: ignore[no-untyped-def]
+    plan, _ = _grant(admin, receipts=sink)
+    sink.log.write_bytes(sink.log.read_bytes() + b"partial")
+    res = revoke(admin, plan.grant_id, receipts=sink)
+    assert res.outcome == "revoked" and "newline" in (res.receipt_error or "")
+    assert not _role_exists(admin, plan.role)
+
+
+def test_receipt_parent_unusable_revokes_grant(admin: psycopg.Connection, sink, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    bad = ReceiptSink(blocker / "sub" / "r.jsonl", sink.key)
+    with pytest.raises(GrantError, match="grant revoked: revoked"):
+        _grant(admin, receipts=bad)
+    row = admin.execute("SELECT role_name, status FROM datagrant.grants").fetchone()
+    assert row is not None and row[1] == "revoked" and not _role_exists(admin, row[0])
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("signer broke"), KeyboardInterrupt()])
+def test_any_receipt_exception_revokes_grant(admin, sink, monkeypatch, exc) -> None:  # type: ignore[no-untyped-def]
+    from datagrant import receipt as receipt_mod
+
+    def boom(*a, **k):  # type: ignore[no-untyped-def]
+        raise exc
+
+    monkeypatch.setattr(receipt_mod, "append", boom)
+    expected = GrantError if isinstance(exc, Exception) else KeyboardInterrupt
+    with pytest.raises(expected):
+        _grant(admin, receipts=sink)
+    row = admin.execute("SELECT role_name, status FROM datagrant.grants").fetchone()
+    assert row is not None and row[1] == "revoked" and not _role_exists(admin, row[0])
