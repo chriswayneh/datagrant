@@ -1,42 +1,58 @@
 <div align="center">
 
-# datagrant
+<img src="docs/assets/banner.svg" alt="datagrant: Temporary, masked access to PHI and PII in Postgres, with signed access receipts" width="100%">
 
 [![release](https://img.shields.io/github/v/release/chriswayneh/datagrant?style=flat&label=release)](https://github.com/chriswayneh/datagrant/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/chriswayneh/datagrant/actions/workflows/ci.yml/badge.svg)](https://github.com/chriswayneh/datagrant/actions/workflows/ci.yml)
 
-### Temporary, masked access to sensitive data, with signed receipts.
+**Temporary, masked access to PHI and PII in Postgres, with signed access receipts.**
 
-An open source command line tool that gives developers short, limited access to PHI and PII in Postgres. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
-
-**Status:** [v0.1.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.1.0) is released. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md). See the [roadmap](ROADMAP.md).
+[Website](https://chriswayneh.github.io/datagrant/) · [Docs](docs/) · [Releases](https://github.com/chriswayneh/datagrant/releases)
 
 </div>
 
+An open source command line tool that gives developers short, limited access to PHI and PII in Postgres. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
+
+**Status:** [v0.1.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.1.0) is released. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+
 > **A note on this repo:** This GitHub account is my personal playground, where I experiment, learn, and build security tools in the open. Projects here are personal work, not a product or company offering.
 
----
+## Demo
 
-## See it in 60 seconds
+<p align="center"><img src="docs/assets/demo.gif" alt="datagrant demo output: masked rows, two-person approval, revoke, sweep and receipt verification, ending in DEMO OK" width="100%"></p>
+
+Run it yourself. It needs Python 3.11 or later and Docker with the compose plugin:
 
 ```bash
 git clone https://github.com/chriswayneh/datagrant && cd datagrant
 pip install -e .
-make demo        # temporary Postgres in Docker with fake patient data; cleans up after itself
+make demo          # temporary Postgres 16 in Docker with fake patient data
+make demo-down     # only needed if a run was interrupted; the demo tears down on exit
 ```
 
-The demo creates keys, checks a policy, gives alice a one-hour masked view of the west region only, runs a two-person approval, revokes it while she is still connected (her session is closed), sweeps an expired grant, and verifies the signed receipt chain. It ends with `DEMO OK`. No Docker? Point it at a scratch database with `DATAGRANT_DEMO_DSN=...`. See [docs/demo.md](docs/demo.md).
+The demo creates keys, checks a policy, gives alice a one-hour masked view of the west region only, runs a two-person approval, revokes her grant while she is still connected, sweeps an expired grant, and verifies the signed receipt chain. Each step prints a `DEMO MARKER` line, and a successful run ends with `DEMO OK`.
 
-In the grantee's view, the identifying columns are redacted, hashed with a keyed HMAC, partially masked or NULL, and only `west` rows appear. Reading the raw table is denied.
+No Docker? Point it at a scratch database (the demo drops and recreates the `dg_demo` schema):
 
-## The problem
+```bash
+DATAGRANT_DEMO_DSN=postgresql://admin:PASSWORD@localhost:5432/scratch ./scripts/demo.sh
+```
 
-- **AI and data developers often get broad, permanent access** to production tables or full copies, because setting up narrow, temporary access by hand is slow.
-- **That breaks the HIPAA "minimum necessary" rule** and data minimization rules for PII, and the only record of who saw what is usually a ticket.
-- **datagrant makes narrow access the easy option.** Ask for specific columns and rows, for a set number of hours, with a reason. The policy decides, access ends on its own, and every step leaves a receipt you can verify.
+See [docs/demo.md](docs/demo.md) for every step. The GIF above replays real output from the project's CI demo run.
 
-## How it works
+## Features
+
+- ✅ **Column and row limits.** Only columns listed in the policy can be requested, and tables can require a row filter.
+- ✅ **Five masking modes.** Passthrough, redact, keyed HMAC hash, partial or NULL, set per column.
+- ✅ **Access that ends itself.** Postgres login roles with an expiry, plus a sweep that revokes expired grants.
+- ✅ **Revoke closes sessions.** Revoking locks the role out and terminates open connections.
+- ✅ **Two-person approval.** A second person in an approver group must approve, and self-approval is refused.
+- ✅ **Signed, hash-chained receipts.** Verify every signature and the chain with `datagrant receipts verify`.
+- ✅ **Dry run by default.** Every command that changes something is a dry run unless you add `--apply`.
+- ✅ **Deny by default policy.** One YAML file decides who can request what, and for how long.
+
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -53,7 +69,7 @@ flowchart LR
 
 Every command that changes something is a **dry run unless you add `--apply`**.
 
-## Install
+## Quick start
 
 Requires Python 3.11 or later and Postgres (tested on version 16). The `hash` mask also needs the `pgcrypto` extension. datagrant isn't on PyPI yet, so install it from GitHub:
 
@@ -62,7 +78,7 @@ pip install git+https://github.com/chriswayneh/datagrant.git
 datagrant --version
 ```
 
-## Quick start against your database
+Then run it against your database:
 
 ```bash
 export DATAGRANT_DSN='postgresql://datagrant_admin@db.internal/clinicdb'   # password via ~/.pgpass
@@ -77,35 +93,7 @@ datagrant sweep --apply                # run every minute from cron/systemd
 datagrant receipts verify
 ```
 
-To run it in production (admin role, scheduling, keys and backups), see the [runbook](aidlc-docs/operations/runbook.md).
-
-## Policy at a glance
-
-```yaml
-version: 1
-approval: auto                 # or two-person (needs approvers)
-approvers: [security]          # groups allowed to approve two-person requests
-max_duration: 8h
-groups:
-  ml-team: [alice, bob]
-  security: [carol]
-datasets:
-  - name: clinic
-    database: clinicdb
-    tables:
-      - name: public.patients
-        allowed_groups: [ml-team]
-        max_duration: 4h
-        columns:               # only listed columns can be requested
-          patient_id: hash     # passthrough | redact | hash | partial | null
-          zip: partial
-          full_name: redact
-          region: passthrough
-        row_filters: ["region = 'west'"]
-        require_row_filter: true
-```
-
-See the full [policy reference](docs/policy.md).
+See the [policy reference](docs/policy.md) for the policy format and the [runbook](aidlc-docs/operations/runbook.md) for production setup.
 
 ## CLI at a glance
 
@@ -123,7 +111,7 @@ See the full [policy reference](docs/policy.md).
 
 Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error, `3` when a receipt wasn't written, and `4` when a revoke failed. Add `--json` to any command for JSON output. See the full [CLI reference](docs/cli.md).
 
-## Security model and honest limits
+## Limits
 
 datagrant narrows and time-boxes access and makes it auditable. It is not an identity provider or a data loss prevention system. Read [docs/security.md](docs/security.md) before using it with real data. In short:
 
@@ -142,7 +130,11 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 - [Security model](docs/security.md)
 - [Operations](docs/operations.md)
 - [Demo](docs/demo.md)
-- [Changelog](CHANGELOG.md), [roadmap](ROADMAP.md), [security policy](SECURITY.md) and [contributing guide](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md), [roadmap](ROADMAP.md) and [security policy](SECURITY.md)
+
+## Contributing
+
+Issues and pull requests are welcome. Keep changes small and focused, run `ruff check . && mypy src && pytest -q` before opening a PR, and use fictional data only. See the [contributing guide](CONTRIBUTING.md).
 
 ## How this project is built
 
