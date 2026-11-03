@@ -1,4 +1,4 @@
-# Open questions — resolved 2026-11-02 (Chris Hickman)
+# Open questions (resolved 2026-11-02 by Chris Hickman)
 
 1. **Approval in v1:** policy auto-approves; optional two-person `datagrant approve` mode via config. ✅
 2. **Signing key storage:** local file (0600) by default, env var override. ✅

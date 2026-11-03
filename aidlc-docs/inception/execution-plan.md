@@ -19,7 +19,7 @@
 ## Construction units (PR order)
 | # | Unit | Depends on | Done when |
 | --- | --- | --- | --- |
-| U1 | Policy loader + evaluator (`policy.py`) | — | YAML schema validated; deny-by-default; max duration; explain denials; tests |
+| U1 | Policy loader + evaluator (`policy.py`) | None | YAML schema validated; deny-by-default; max duration; explain denials; tests |
 | U2 | Grant engine: Postgres view + expiring role, grant state table (`pg/grant.py`, `pg/state.py`) | U1 | Transactional create; quoted identifiers; validated row filter; dry-run SQL; integration tests |
 | U3 | Masking (`pg/mask.py`) | U2 | redact/hash(pgcrypto HMAC)/partial/null; raw values unreachable via grant role |
 | U4 | Expiry, revoke, sweep (`revoke.py`) | U2 | Sessions terminated, view+role dropped, idempotent, fail-closed exit codes |
