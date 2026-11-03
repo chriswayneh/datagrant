@@ -114,7 +114,7 @@ def test_approval_defaults_to_auto_and_two_person_ok() -> None:
     d = doc()
     del d["approval"]
     assert parse_policy(d).approval == "auto"
-    assert parse_policy(doc(approval="two-person")).approval == "two-person"
+    assert parse_policy(doc(approval="two-person", approvers=["other"])).approval == "two-person"
 
 
 @pytest.mark.parametrize(
@@ -235,7 +235,7 @@ def test_optional_row_filter() -> None:
 
 
 def test_two_person_mode_reported() -> None:
-    d = evaluate(parse_policy(doc(approval="two-person")), req())
+    d = evaluate(parse_policy(doc(approval="two-person", approvers=["other"])), req())
     assert d.allowed and d.approval == "two-person"
 
 
@@ -321,3 +321,14 @@ def test_read_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Path, "open", bad_open)
     with pytest.raises(PolicyError, match="cannot read"):
         load_policy(f)
+
+
+def test_approvers_rules() -> None:
+    with pytest.raises(PolicyError, match="needs at least one approver group"):
+        parse_policy(doc(approval="two-person"))
+    with pytest.raises(PolicyError, match="unknown groups"):
+        parse_policy(doc(approvers=["nope"]))
+    p = parse_policy(doc(approval="two-person", approvers=["other"]))
+    assert p.can_approve("eve", "alice") == []
+    assert any("different person" in r for r in p.can_approve("alice", "alice"))
+    assert any("not in an approver group" in r for r in p.can_approve("bob", "alice"))

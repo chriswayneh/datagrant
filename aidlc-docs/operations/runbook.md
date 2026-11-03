@@ -69,5 +69,20 @@ Create keys once (refuses to overwrite): `datagrant.keys.init_keys()`, wired to 
 - **Rotate the hash key:** only between grants; existing hashed values change. Old rows in `datagrant.hash_keys` can be deleted once no active grant references them.
 - The receipt log (`DATAGRANT_RECEIPT_LOG`, default `~/.config/datagrant/receipts.jsonl`) must stay 0600. Ship it off-host regularly. Never edit it by hand: a partial last line blocks new grants until fixed.
 
+### CLI operation (U6)
+```bash
+export DATAGRANT_DSN='postgresql://datagrant_admin@db/clinicdb'   # password via ~/.pgpass, not the DSN
+export DATAGRANT_POLICY=/etc/datagrant/policy.yaml
+datagrant keys init && datagrant keys export-pubkey   # give the public key to auditors
+datagrant preflight                                   # creates state, warns on PUBLIC defaults
+datagrant request --dataset clinic --table public.patients --columns patient_id,zip \
+  --row-filter "region = 'west'" --duration 2h --purpose "model eval"
+datagrant approve <request-id>                        # two-person mode, a different person
+datagrant grant list ; datagrant revoke <grant-id> ; datagrant sweep
+datagrant receipts verify --expect-head <recorded head>
+```
+Exit codes: 0 ok, 1 denied/failed, 2 usage, 3 receipt not written, 4 revoke failed. Alert on 3 and 4 from the sweep timer.
+Identity is the OS user; `--as-user` is not authentication. For real two-person control, run datagrant behind a service that authenticates users and holds the admin DSN.
+
 ## Approval
 Record approval in ../audit.md.

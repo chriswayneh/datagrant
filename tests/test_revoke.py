@@ -178,3 +178,43 @@ def test_concurrent_revoke_between_phases_is_noop() -> None:
     c = FakeConn(h)
     assert rv.revoke(c, "abc").outcome == "noop"  # type: ignore[arg-type]
     assert not any("DROP" in q for q in c.log)
+
+
+def test_requests_module_sql() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from datagrant.pg import requests as rq
+    from datagrant.policy import Request
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    req = Request("alice", "d", "s.t", ("a",), timedelta(hours=1), "p", None)
+    row = (
+        "r1",
+        "alice",
+        "d",
+        "s.t",
+        ["a"],
+        None,
+        3600,
+        "p",
+        "sha",
+        "V",
+        now,
+        now,
+        "pending",
+        None,
+        None,
+    )
+    c = FakeConn(lambda text, params: [row] if "FROM" in text and "requests" in text else [])
+    p = rq.create_request(c, req, policy_sha256="sha", verifier="V", now=now)  # type: ignore[arg-type]
+    assert p.status == "pending" and p.expires_at == now + rq.DEFAULT_PENDING_TTL
+    with pytest.raises(GrantError, match="ttl"):
+        rq.create_request(c, req, policy_sha256="s", verifier="V", ttl=timedelta(0))  # type: ignore[arg-type]
+    got = rq.get_request(c, "r1")  # type: ignore[arg-type]
+    assert got.request == req and got.verifier == "V"
+    empty = FakeConn(lambda text, params: [])
+    with pytest.raises(GrantError, match="unknown request"):
+        rq.get_request(empty, "x")  # type: ignore[arg-type]
+    exp = FakeConn(lambda text, params: [("b",), ("a",)])
+    assert rq.expire_requests(exp) == ["a", "b"]  # type: ignore[arg-type]
+    assert all("search_path" in q for q in exp.log if q.startswith("SET"))

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,19 @@ STATE_DDL: tuple[sql.Composed, ...] = (
         " ADD COLUMN IF NOT EXISTS policy_version integer,"
         " ADD COLUMN IF NOT EXISTS approvers text[] NOT NULL DEFAULT '{{}}'"
     ).format(sql.Identifier(STATE_SCHEMA)),
+    # U6: pending two-person requests. Holds only the SCRAM verifier (never a password);
+    # it is cleared once the request is approved or expires.
+    sql.SQL(
+        "CREATE TABLE IF NOT EXISTS {}.requests ("
+        " id text PRIMARY KEY, requester text NOT NULL, dataset text NOT NULL,"
+        " table_name text NOT NULL, columns text[] NOT NULL, row_filter text,"
+        " duration_seconds integer NOT NULL, purpose text NOT NULL,"
+        " policy_sha256 text NOT NULL, verifier text,"
+        " created_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,"
+        " status text NOT NULL DEFAULT 'pending'"
+        " CHECK (status IN ('pending','approved','expired')),"
+        " approver text, grant_id text)"
+    ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
 
@@ -122,12 +136,14 @@ def build_plan(
     hash_key: HashKey | None = None,
     grant_id: str | None = None,
     now: datetime | None = None,
+    approvers: Sequence[str] = (),
+    verifier: str | None = None,
 ) -> GrantPlan:
     """Build the SQL for an allowed decision. Pure: no database access."""
     if not decision.allowed:
         raise GrantError("cannot build a grant for a denied decision")
-    if decision.approval != "auto":
-        raise GrantError("two-person approval is not supported yet (U6)")
+    if decision.approval == "two-person" and not approvers:
+        raise GrantError("two-person approval: the grant needs an approver")
     gid = grant_id or secrets.token_hex(6)
     if not _GRANT_ID_RE.match(gid):
         raise GrantError("grant id must be 12 lowercase hex characters")
@@ -156,7 +172,11 @@ def build_plan(
         sql.SQL(
             "CREATE ROLE {} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE"
             " NOREPLICATION PASSWORD {} VALID UNTIL {}"
-        ).format(role_id, sql.Literal(scram_verifier(password)), sql.Literal(expires.isoformat())),
+        ).format(
+            role_id,
+            sql.Literal(verifier or scram_verifier(password)),
+            sql.Literal(expires.isoformat()),
+        ),
         sql.SQL("CREATE VIEW {} WITH (security_barrier = true) AS {}").format(view_id, select),
         sql.SQL("REVOKE ALL ON {} FROM PUBLIC").format(view_id),
         sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(sql.Identifier(VIEW_SCHEMA), role_id),
@@ -164,7 +184,7 @@ def build_plan(
         sql.SQL(
             "INSERT INTO {}.grants (id, role_name, view_name, dataset, table_name, requester,"
             " purpose, columns, row_filter, approval, policy_sha256, created_at, expires_at,"
-            " masks, policy_version)"
+            " masks, policy_version, approvers)"
             " VALUES ({})"
         ).format(
             sql.Identifier(STATE_SCHEMA),
@@ -186,6 +206,7 @@ def build_plan(
                     expires,
                     json.dumps({c: decision.masks[c] for c in req.columns}, sort_keys=True),
                     decision.policy_version,
+                    list(approvers),
                 )
             ),
         ),
@@ -212,6 +233,7 @@ def build_plan(
             decision.policy_sha256,
             decision.policy_version,
             decision.approval,
+            tuple(approvers),
         ),
     )
 
@@ -222,7 +244,12 @@ def new_password() -> str:
 
 
 def apply_plan(
-    conn: psycopg.Connection, plan: GrantPlan, receipts: ReceiptSink | None = None
+    conn: psycopg.Connection,
+    plan: GrantPlan,
+    receipts: ReceiptSink | None = None,
+    *,
+    request_id: str | None = None,
+    approver: str | None = None,
 ) -> None:
     """Execute a plan atomically; any failure rolls everything back.
 
@@ -247,6 +274,18 @@ def apply_plan(
                     ).format(sql.Identifier(STATE_SCHEMA)),
                     (plan.hash_key.key_id, plan.hash_key.derived),
                 )
+            if request_id is not None:
+                # Claim the pending request in the same transaction: exactly one approval wins.
+                claimed = conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
+                        " verifier = NULL WHERE id = %s AND status = 'pending'"
+                        " AND expires_at > pg_catalog.now() RETURNING id"
+                    ).format(sql.Identifier(STATE_SCHEMA)),
+                    (approver, plan.grant_id, request_id),
+                ).fetchone()
+                if claimed is None:
+                    raise GrantError(f"request {request_id} is not pending (or has expired)")
             for stmt in plan.statements:
                 conn.execute(stmt)
     except psycopg.Error as exc:

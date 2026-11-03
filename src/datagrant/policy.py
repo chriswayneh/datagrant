@@ -67,6 +67,16 @@ class Policy:
     groups: dict[str, frozenset[str]]
     datasets: dict[str, Dataset]
     sha256: str
+    approver_groups: frozenset[str] = frozenset()
+
+    def can_approve(self, approver: str, requester: str) -> list[str]:
+        """Reasons the approver may not approve this requester (empty list = allowed)."""
+        reasons = []
+        if approver == requester:
+            reasons.append("approver must be a different person than the requester")
+        if not self.groups_of(approver) & self.approver_groups:
+            reasons.append(f"{approver!r} is not in an approver group")
+        return reasons
 
     def groups_of(self, requester: str) -> frozenset[str]:
         return frozenset(g for g, members in self.groups.items() if requester in members)
@@ -170,7 +180,9 @@ def parse_policy(data: object, sha256: str = "") -> Policy:
     """Validate a decoded policy document and build a Policy."""
     if not isinstance(data, dict):
         raise PolicyError("policy: top level must be a mapping")
-    _check_keys(data, {"version", "approval", "max_duration", "groups", "datasets"}, "policy")
+    _check_keys(
+        data, {"version", "approval", "approvers", "max_duration", "groups", "datasets"}, "policy"
+    )
     version = _req(data, "version", int, "policy")
     if version != 1:
         raise PolicyError(f"policy.version: unsupported version {version} (expected 1)")
@@ -207,7 +219,13 @@ def parse_policy(data: object, sha256: str = "") -> Policy:
         if not tables:
             raise PolicyError(f"{where}.tables: must define at least one table")
         datasets[name] = Dataset(name, db, tables)
-    return Policy(version, approval, cap, groups, datasets, sha256)
+    approvers = frozenset(_str_list(data.get("approvers", []), "policy.approvers"))
+    unknown = approvers - set(groups)
+    if unknown:
+        raise PolicyError(f"policy.approvers: unknown groups {sorted(unknown)}")
+    if approval == "two-person" and not approvers:
+        raise PolicyError("policy.approvers: two-person approval needs at least one approver group")
+    return Policy(version, approval, cap, groups, datasets, sha256, approvers)
 
 
 class _StrictLoader(yaml.SafeLoader):
