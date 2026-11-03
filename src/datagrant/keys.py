@@ -158,16 +158,38 @@ def _write_new_key(p: Path, hex_text: str) -> None:
         fh.write(hex_text + "\n")
 
 
-def init_keys(directory: str | Path | None = None) -> tuple[Path, Path, str]:
-    """Create hash.key and signing.key (0600) in a 0700 directory; never overwrite.
+def resolve_key_path(
+    kind: str, explicit: str | Path | None = None, directory: str | Path | None = None
+) -> Path:
+    """One resolver for every command: explicit file > env var > directory > default.
 
-    Returns (hash_key_path, signing_key_path, public_key_hex). Paths default to
-    the env overrides or ~/.config/datagrant.
+    ``kind`` is "hash" or "signing".
     """
-    if directory is not None:
-        hp, sp = Path(directory) / "hash.key", Path(directory) / "signing.key"
-    else:
-        hp, sp = hash_key_path(), signing_key_path()
+    env, name = (HASH_KEY_ENV, "hash.key") if kind == "hash" else (SIGNING_KEY_ENV, "signing.key")
+    if explicit:
+        return Path(explicit)
+    if os.environ.get(env):
+        return Path(os.environ[env])
+    if directory:
+        return Path(directory) / name
+    return DEFAULT_KEY_DIR / name
+
+
+def init_keys(
+    directory: str | Path | None = None,
+    *,
+    hash_path: str | Path | None = None,
+    signing_path: str | Path | None = None,
+) -> tuple[Path, Path, str]:
+    """Create hash.key and signing.key (0600) in 0700 directories; never overwrite.
+
+    Returns (hash_key_path, signing_key_path, public_key_hex). Each path resolves
+    as explicit file > env var > ``directory`` > ~/.config/datagrant.
+    """
+    hp = resolve_key_path("hash", hash_path, directory)
+    sp = resolve_key_path("signing", signing_path, directory)
+    if hp.absolute() == sp.absolute():
+        raise KeyFileError(f"hash key and signing key must be different files ({sp})")
     for existing in (hp, sp):
         if existing.exists() or existing.is_symlink():
             raise KeyFileError(f"{existing} already exists; refusing to overwrite a key")

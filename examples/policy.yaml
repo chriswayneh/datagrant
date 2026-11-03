@@ -1,6 +1,6 @@
 # Example datagrant policy. Fictional names only.
 version: 1
-approval: auto            # auto | two-person
+approval: auto            # auto | two-person (two-person also needs `approvers: [group]`)
 max_duration: 8h          # policy-wide cap
 groups:
   ml-team: [alice, bob]

@@ -81,3 +81,26 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 - **Verify:** `verify(log, pubkey, expect_head=None)` checks, for every line: canonical form, key id, signature, `seq`, and the hash link. It reports the first break (line number + reason) and returns the head hash. Edits, deletions and reordering are detected. Truncating the newest lines is only detectable against an externally recorded head hash (`expect_head`).
 - **Hooks:** `apply_plan(conn, plan, receipts=ReceiptSink(...))` writes `issued` after commit. `revoke`/`sweep(…, receipts=…)` write `revoked`/`expired`, or `revoke_failed` on every failed attempt (so a stuck grant produces one per sweep). No-ops write nothing. Facts for revoke receipts come from `datagrant.grants` (new columns `masks`, `policy_version`, `approvers`).
 - **Fail-safe decisions:** *No receipt, no access.* If the `issued` receipt can't be written, the grant is revoked at once and `GrantError` is raised. A revoke never depends on its receipt: access is removed first, and a receipt write failure is returned as `RevokeResult.receipt_error` (U6 exits non-zero; state in `datagrant.grants` still records it).
+
+## U6 — CLI and two-person approval (`cli.py`, `pg/requests.py`)
+
+- **Commands:** `keys init | export-pubkey`, `policy check <file>`, `request`, `approve <request-id>`, `grant list [--all] | status <id>`, `revoke <id>`, `sweep`, `receipts verify [--pubkey] [--expect-head]`, `preflight`. `--json` works on every command, before or after the subcommand.
+- **Dry run by default (QE):** `keys init`, `request`, `approve`, `revoke`, `sweep` and `preflight` change nothing unless `--apply` is given. Without it they print what would happen and exit 0:
+  - plan SQL with `PASSWORD '<redacted>'` for `request` and `approve`; no password is generated and no verifier is shown;
+  - the grant's state and open session count for `revoke`;
+  - due grants and stale requests for `sweep`;
+  - the files `keys init` would create (exit 1 if they already exist);
+  - read-only warnings for `preflight`.
+
+  `grant list`/`status` are read-only and never create state. `--dry-run` is kept as a no-op alias, and `--apply --dry-run` is a usage error (2).
+- **Key paths (QE):** every command resolves each key with one resolver (`keys.resolve_key_path`): `--signing-key` / `--hash-key` > `$DATAGRANT_SIGNING_KEY` / `$DATAGRANT_HASH_KEY` > `--dir` (keys init only) > `~/.config/datagrant/`. An explicit file flag wins over `--dir` for that file.
+- **Flags:** flags can go before or after the subcommand. Each subcommand only accepts the options it uses. A global option that doesn't apply (e.g. `--dsn` with `policy check`) is a usage error (2) rather than being silently ignored.
+- **Config:** `--dsn` or `$DATAGRANT_DSN` (admin), `--policy` or `$DATAGRANT_POLICY`, plus key and log paths from U3/U5 (`--signing-key`, `--receipt-log`). The DSN password is never printed. Errors are redacted (the DSN's own password, `password=…` and `user:pass@` forms).
+- **Exit codes:** 0 ok, 1 denied/failed, 2 usage, 3 receipt not written (the access change still happened), 4 revoke failed (grant still active; the next sweep retries).
+- **Identity:** the OS user (`getpass.getuser()`), or `--as-user` for automation and tests. **Neither is authentication.** Anyone who can run datagrant with the admin DSN can claim any name. Real separation of duties needs the admin DSN held by a trusted service or wrapper that authenticates people. Output says which source was used (`identity_source`).
+- **`request`:** evaluates the policy (denied: reasons, exit 1). Without `--apply` it connects only to read the table catalog and prints the plan. With `--apply` it requires the signing key (no key, no grant).
+  - **Auto mode:** applies the grant and prints connection info and the one-time password once, to stdout only. The password is not stored, logged, or put in receipts.
+  - **Two-person mode:** stores a pending row in `datagrant.requests` (default TTL 24h, `--pending-ttl`) holding only the SCRAM verifier, and prints the request id plus the one-time password to the *requester*. The password works only after approval, and the approver never sees it.
+- **`approve`:** loads the current policy and re-evaluates the stored request (a tightened policy refuses it). The approver must differ from the requester and be in a policy `approvers` group (a new top-level key, required for `two-person`). One transaction creates the role with the stored verifier and claims the request (`pending → approved`, only if not expired), so only one approval can win. The verifier is then cleared. The grant row and the `issued` receipt record `approvers: [approver]`.
+- **`sweep`:** revokes expired grants (U4) and marks pending requests past their TTL `expired`, clearing their verifiers.
+- **`revoke`/`sweep` without a signing key:** they still revoke and exit 3 (removing access never waits on a key).

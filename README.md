@@ -39,6 +39,20 @@ datagrant --version
 ruff check . && mypy src && pytest -q
 ```
 
+## Usage (preview)
+
+```bash
+export DATAGRANT_DSN=postgresql://admin@localhost/clinicdb DATAGRANT_POLICY=examples/policy.yaml
+datagrant keys init --apply
+datagrant policy check examples/policy.yaml
+datagrant request --dataset clinic --table public.patients --columns patient_id,zip \
+  --row-filter "region = 'west'" --duration 2h --purpose "debug model"          # dry run: shows the plan, changes nothing
+datagrant request ... --apply    # creates the grant; prints connection info + one-time password
+datagrant revoke <grant-id> --apply; datagrant sweep --apply; datagrant receipts verify
+```
+
+Commands that change anything are dry runs unless you add `--apply`. Add `--json` for machine-readable output. Full docs arrive with v0.1.0.
+
 ## How this project is built
 
 datagrant follows the [AWS AI-DLC](https://github.com/awslabs/aidlc-workflows) workflow: Inception, Construction and Operations, each with a human approval gate. Artifacts live in [`aidlc-docs/`](aidlc-docs/).

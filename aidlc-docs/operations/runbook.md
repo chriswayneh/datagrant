@@ -35,7 +35,7 @@ Run it every minute or few minutes.
 cron (`crontab -e` for the datagrant service user):
 
 ```cron
-* * * * * DATAGRANT_DSN=postgresql:///clinicdb datagrant sweep >> /var/log/datagrant-sweep.log 2>&1
+* * * * * DATAGRANT_DSN=postgresql:///clinicdb datagrant sweep --apply >> /var/log/datagrant-sweep.log 2>&1
 ```
 
 systemd timer:
@@ -46,7 +46,7 @@ systemd timer:
 Type=oneshot
 User=datagrant
 Environment=DATAGRANT_DSN=postgresql:///clinicdb
-ExecStart=/usr/local/bin/datagrant sweep
+ExecStart=/usr/local/bin/datagrant sweep --apply
 
 # /etc/systemd/system/datagrant-sweep.timer
 [Timer]
@@ -68,6 +68,23 @@ Create keys once (refuses to overwrite): `datagrant.keys.init_keys()`, wired to 
 - **Rotate the signing key:** stop grants and sweep, archive the current log (`receipts-<date>.jsonl`) together with its public key and head hash, move the old key aside, create a new key, then start a new log. Each log verifies with exactly one key.
 - **Rotate the hash key:** only between grants; existing hashed values change. Old rows in `datagrant.hash_keys` can be deleted once no active grant references them.
 - The receipt log (`DATAGRANT_RECEIPT_LOG`, default `~/.config/datagrant/receipts.jsonl`) must stay 0600. Ship it off-host regularly. Never edit it by hand: a partial last line blocks new grants until fixed.
+
+### CLI operation (U6)
+```bash
+export DATAGRANT_DSN='postgresql://datagrant_admin@db/clinicdb'   # password via ~/.pgpass, not the DSN
+export DATAGRANT_POLICY=/etc/datagrant/policy.yaml
+datagrant keys init --apply && datagrant keys export-pubkey   # give the public key to auditors
+datagrant preflight --apply                           # creates state, warns on PUBLIC defaults
+datagrant request --dataset clinic --table public.patients --columns patient_id,zip \
+  --row-filter "region = 'west'" --duration 2h --purpose "model eval" --apply
+datagrant approve <request-id> --apply                # two-person mode, a different person
+datagrant grant list ; datagrant revoke <grant-id> --apply ; datagrant sweep --apply
+datagrant receipts verify --expect-head <recorded head>
+```
+Every changing command (keys init, request, approve, revoke, sweep, preflight) is a **dry run unless `--apply`** is given: it prints the plan and changes nothing, and a dry run never creates or prints a password. `--dry-run` is accepted as a no-op alias, and `--apply --dry-run` together is a usage error.
+Exit codes: 0 ok, 1 denied/failed, 2 usage, 3 receipt not written, 4 revoke failed. Alert on 3 and 4 from the sweep timer.
+Key paths resolve as `--signing-key`/`--hash-key` > env vars > `keys init --dir` > `~/.config/datagrant/`. Pass the same flags (or env) to every command. A flag that doesn't apply to a command is rejected (exit 2).
+Identity is the OS user; `--as-user` is not authentication. For real two-person control, run datagrant behind a service that authenticates users and holds the admin DSN.
 
 ## Approval
 Record approval in ../audit.md.
