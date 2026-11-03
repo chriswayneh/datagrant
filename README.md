@@ -8,7 +8,7 @@
 
 **Temporary, masked access to PHI and PII in Postgres, with signed access receipts.**
 
-[Website](https://chriswayneh.github.io/datagrant/) · [Docs](docs/) · [Releases](https://github.com/chriswayneh/datagrant/releases)
+[Docs](docs/cli.md) · [Releases](https://github.com/chriswayneh/datagrant/releases)
 
 </div>
 
