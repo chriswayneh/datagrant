@@ -4,7 +4,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-02
 
 First usable version: expiring, masked, receipted Postgres access from the command line.
 

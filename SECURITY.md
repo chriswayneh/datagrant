@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | :---: |
-| 0.1.x (unreleased, `main`) | ✅ |
+| 0.1.x | ✅ |
 
 datagrant is pre-1.0. Read the [security model and known limits](docs/security.md) before using it with real regulated data.
 
