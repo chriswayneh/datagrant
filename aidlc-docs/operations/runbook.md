@@ -1,6 +1,6 @@
-# runbook (template)
+# runbook
 
-**Status:** Not started (v0.9.0).
+**Status:** Drafted during Construction (U2–U7). Review is the next step, in the Operations stage.
 
 ## Steps
 
@@ -58,13 +58,12 @@ WantedBy=timers.target
 
 `systemctl enable --now datagrant-sweep.timer`. Alert on non-zero exit, and check
 `SELECT id, last_error FROM datagrant.grants WHERE last_error IS NOT NULL`.
-(The `datagrant sweep` command and its DSN setting are wired in U6.)
 
 ### Keys and receipts (U5)
-Create keys once (refuses to overwrite): `datagrant.keys.init_keys()`, wired to the CLI as `datagrant keygen` in U6. Files are 0600 in a 0700 directory, by default `~/.config/datagrant/{hash,signing}.key`, or set `DATAGRANT_HASH_KEY` / `DATAGRANT_SIGNING_KEY` to file paths.
+Create keys once (refuses to overwrite): `datagrant keys init --apply`. Files are 0600 in a 0700 directory, by default `~/.config/datagrant/{hash,signing}.key`, or set `DATAGRANT_HASH_KEY` / `DATAGRANT_SIGNING_KEY` to file paths.
 
 - **Back up** both key files to an encrypted secret store (e.g. a password manager or KMS-encrypted object). Losing `hash.key` changes every hash mask; losing `signing.key` means new receipts can't be signed with the same key id.
-- **Export the public key** (`SigningKey.public_hex()`, 64 hex) and give it to auditors with the receipt log. Verify with `datagrant.receipt.verify(log, load_public_key(hex))`. Record the returned `head_sha256` somewhere outside the host (ticket or SIEM) so later truncation is detectable via `expect_head`.
+- **Export the public key** (`datagrant keys export-pubkey`, 64 hex) and give it to auditors with the receipt log. They verify with `datagrant receipts verify --pubkey <hex> --receipt-log <file>`. Record the printed head hash somewhere outside the host (ticket or SIEM) so later truncation is detectable with `--expect-head`.
 - **Rotate the signing key:** stop grants and sweep, archive the current log (`receipts-<date>.jsonl`) together with its public key and head hash, move the old key aside, create a new key, then start a new log. Each log verifies with exactly one key.
 - **Rotate the hash key:** only between grants; existing hashed values change. Old rows in `datagrant.hash_keys` can be deleted once no active grant references them.
 - The receipt log (`DATAGRANT_RECEIPT_LOG`, default `~/.config/datagrant/receipts.jsonl`) must stay 0600. Ship it off-host regularly. Never edit it by hand: a partial last line blocks new grants until fixed.
