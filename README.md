@@ -16,8 +16,6 @@ An open source command line tool that gives developers short, limited access to 
 
 **Status:** [v0.2.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.2.0) is released ([release notes](docs/release-notes/v0.2.0.md)). It changes `hash` outputs from v0.1.0; see the notes before upgrading. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
-> **A note on this repo:** This GitHub account is my personal playground, where I experiment, learn, and build security tools in the open. Projects here are personal work, not a product or company offering.
-
 ## Demo
 
 <p align="center"><img src="docs/assets/demo.gif" alt="datagrant demo output: masked rows with a hidden filter column, per-dataset hashes, two-person approval, revoke, sweep, receipt verification and an external receipt sink catching a deleted receipt even after the local cursor is deleted, ending in DEMO OK" width="100%"></p>
