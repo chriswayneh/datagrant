@@ -29,8 +29,8 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| Per-dataset hash scope | Stop same-key hashes from linking values across datasets and grants. | v0.2.0 |
-| `filter_columns` | Let a row filter use a column without exposing it in the view. | v0.2.0 |
+| Per-dataset hash scope | Stop same-key hashes from linking values across datasets. Done on main. | v0.2.0 |
+| `filter_columns` | Let a row filter use a column without exposing it in the view. Done on main. | v0.2.0 |
 | External receipt sink | Ship receipts off the host (object store with retention, SIEM) so tail truncation is caught without a manually recorded head. | v0.3.0 |
 | OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. | v0.4.0 |
 | Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.5.0+ |

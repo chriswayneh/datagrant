@@ -137,8 +137,29 @@ def test_hash_plan_carries_key_but_sql_does_not() -> None:
         hash_key=KEY,
         now=NOW,
     )
-    assert plan.hash_key == KEY and "k" * 32 not in repr(plan)
+    scoped = KEY.scoped("clinic")
+    assert plan.hash_key == scoped and "k" * 32 not in repr(plan)
     view = plan.statements[1].as_string(None)
-    assert "'0123456789abcdef'" in view and "kkkk" not in view
+    assert f"'{scoped.key_id}'" in view and "kkkk" not in view
+    assert "'0123456789abcdef'" not in view
     no_hash = build_plan(dec(), req(), database="db", password="x", catalog=CAT, hash_key=KEY)
     assert no_hash.hash_key is None
+
+
+def test_hash_scope_changes_key_per_dataset() -> None:
+    def key_for(**kw: object) -> str:
+        p = build_plan(
+            dec({"id": "hash", "zip": "passthrough"}, **kw),
+            req(),
+            database="db",
+            password="x",
+            catalog=CAT,
+            hash_key=KEY,
+            now=NOW,
+        )
+        assert p.hash_key is not None
+        return p.hash_key.key_id
+
+    default = key_for()
+    assert default == key_for(hash_scope="clinic") == KEY.scoped("clinic").key_id
+    assert key_for(hash_scope="other") != default

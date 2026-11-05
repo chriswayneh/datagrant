@@ -157,6 +157,9 @@ def build_plan(
     needs_key = any(decision.masks[c] == "hash" for c in req.columns)
     if needs_key and hash_key is None:
         raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
+    if hash_key is not None:
+        # Per-dataset scope: equal values hash differently unless datasets share a hash_scope.
+        hash_key = hash_key.scoped(decision.hash_scope or req.dataset)
     key_id = hash_key.key_id if hash_key is not None else None
     try:
         cols = sql.SQL(", ").join(

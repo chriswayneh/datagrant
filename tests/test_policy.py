@@ -332,3 +332,83 @@ def test_approvers_rules() -> None:
     assert p.can_approve("eve", "alice") == []
     assert any("different person" in r for r in p.can_approve("alice", "alice"))
     assert any("not in an approver group" in r for r in p.can_approve("bob", "alice"))
+
+
+def _fc_table(**patch: Any) -> dict[str, Any]:
+    cols = {"id": "hash", "zip": "partial", "name": "redact"}
+    return table(columns=cols, filter_columns=["region"], **patch)
+
+
+def test_filter_columns_allow_filter_but_not_request() -> None:
+    p = parse_policy(_fc_table())
+    rule = p.datasets["clinic"].tables["public.patients"]
+    assert rule.filter_columns == frozenset({"region"}) and "region" not in rule.columns
+    ok = Request(
+        "alice", "clinic", "public.patients", ("id",), timedelta(hours=1), "x", "region = 'west'"
+    )
+    assert evaluate(p, ok).allowed
+    bad = Request(
+        "alice",
+        "clinic",
+        "public.patients",
+        ("id", "region"),
+        timedelta(hours=1),
+        "x",
+        "region = 'west'",
+    )
+    d = evaluate(p, bad)
+    assert not d.allowed and any("region" in r for r in d.reasons)
+
+
+@pytest.mark.parametrize(
+    ("patch", "msg"),
+    [
+        ({"filter_columns": ["zip"]}, "also in columns"),
+        ({"filter_columns": ["region", "region"]}, "duplicate"),
+        ({"filter_columns": ["bad-name"]}, "invalid column"),
+        ({"filter_columns": "region"}, "list of non-empty strings"),
+        ({"filter_columns": ["region", "site"]}, "not used by any row filter"),
+        ({"row_filters": ["site = 'x'"]}, "columns or filter_columns"),
+        ({"row_filters": [], "require_row_filter": False}, "no row_filters"),
+    ],
+)
+def test_filter_columns_validation(patch: dict[str, Any], msg: str) -> None:
+    d = _fc_table()
+    d["datasets"][0]["tables"][0].update(patch)
+    with pytest.raises(PolicyError, match=msg):
+        parse_policy(d)
+
+
+def test_hash_scope_defaults_to_dataset_name_and_can_be_shared() -> None:
+    p = parse_policy(doc())
+    assert p.datasets["clinic"].hash_scope == "clinic"
+    req = Request(
+        "alice", "clinic", "public.patients", ("id",), timedelta(hours=1), "x", "region = 'west'"
+    )
+    assert evaluate(p, req).hash_scope == "clinic"
+    d = doc()
+    d["datasets"][0]["hash_scope"] = "shared-ids"
+    assert evaluate(parse_policy(d), req).hash_scope == "shared-ids"
+    assert (
+        evaluate(
+            p,
+            Request(
+                "eve",
+                "clinic",
+                "public.patients",
+                ("id",),
+                timedelta(hours=1),
+                "x",
+                "region = 'west'",
+            ),
+        ).hash_scope
+        is None
+    )
+
+
+@pytest.mark.parametrize("scope", ["", "has space", 3, None])
+def test_hash_scope_invalid(scope: object) -> None:
+    d = doc()
+    d["datasets"][0]["hash_scope"] = scope
+    with pytest.raises(PolicyError, match="hash_scope"):
+        parse_policy(d)

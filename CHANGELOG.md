@@ -4,6 +4,14 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+- Per-dataset hash scope. Each dataset now hashes under its own key, derived from the hash key file and the dataset's `hash_scope` (default: the dataset name). Datasets that set the same `hash_scope` share hashes, so values can still be joined across them on purpose.
+- `filter_columns` on a table: columns a row filter may use that are never in the grant view and can't be requested. Every filter column must be used by a row filter and may not also be in `columns`.
+
+### Changed
+- **Hash outputs change.** `hash` values from v0.1.0 grants won't match new grants, because the key is now scoped per dataset. To compare against old outputs, re-issue the old grant. There is no setting that brings back the single unscoped key.
+- Row filters may now reference `columns` or `filter_columns`; anything else is still a policy error.
+
 ## [0.1.0] - 2026-11-02
 
 First usable version: expiring, masked, receipted Postgres access from the command line.
