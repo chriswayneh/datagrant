@@ -4,6 +4,10 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-04
+
+Tighter privacy controls and off-host evidence.
+
 ### Added
 - Per-dataset hash scope. Each dataset now hashes under its own key, derived from the hash key file and the dataset's `hash_scope` (default: the dataset name). Datasets that set the same `hash_scope` share hashes, so values can still be joined across them on purpose.
 - `filter_columns` on a table: columns a row filter may use that are never in the grant view and can't be requested. Every filter column must be used by a row filter and may not also be in `columns`.
@@ -14,8 +18,10 @@ All notable changes to datagrant are documented here. The format follows [Keep a
   - New `receipts push` sends pending receipts (dry run unless `--apply`; exit 3 while any remain).
   - `receipts verify --sink` compares the local chain with the sink head, read-only, and fails on a sink ahead, a hash mismatch, a sink behind its own acknowledgements, a bad cursor or an unreachable sink. `--json` adds `sink_seq`, `sink_head_sha256` and `undelivered`.
 
+### Changed (breaking)
+- **Hash outputs differ from v0.1.0.** `hash` masks now use a key derived per dataset (`hash_scope`, default the dataset name). The same value hashes differently than it did under v0.1.0, and differently in each dataset unless datasets share a `hash_scope`. Joins on hashed values across versions or across datasets won't match. To compare with old outputs, re-issue the grant; there is no setting that restores the single unscoped key.
+
 ### Changed
-- **Hash outputs change.** `hash` values from v0.1.0 grants won't match new grants, because the key is now scoped per dataset. To compare against old outputs, re-issue the old grant. There is no setting that brings back the single unscoped key.
 - Row filters may now reference `columns` or `filter_columns`; anything else is still a policy error.
 
 ## [0.1.0] - 2026-11-02

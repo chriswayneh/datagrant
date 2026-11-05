@@ -8,7 +8,7 @@ The full runbook lives in the AI-DLC operations artifacts: [aidlc-docs/operation
 - **Keys and receipts.** Back up the hash key, the signing key and the receipt log; publish the public key; record the head hash from `receipts verify` off the host.
 - **CLI operation.** Exit codes for alerting (`3` and `4` need a human), and `grant status` to read `last_error`.
 
-## External receipt sink (unreleased, on main)
+## External receipt sink (v0.2.0)
 
 Details: [CLI reference](cli.md#receipt-sink) and [design](design/receipt-sink.md).
 
