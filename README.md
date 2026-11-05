@@ -8,7 +8,7 @@
 
 **Temporary, masked access to PHI and PII in Postgres, with signed access receipts.**
 
-[Docs](docs/cli.md) · [Releases](https://github.com/chriswayneh/datagrant/releases)
+[Docs](docs/cli.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md) · [Releases](https://github.com/chriswayneh/datagrant/releases)
 
 </div>
 
@@ -43,31 +43,42 @@ See [docs/demo.md](docs/demo.md) for every step. The GIF above replays real outp
 
 ## Features
 
-- ✅ **Column and row limits.** Only columns listed in the policy can be requested, and tables can require a row filter.
-- ✅ **Five masking modes.** Passthrough, redact, keyed HMAC hash, partial or NULL, set per column.
-- ✅ **Access that ends itself.** Postgres login roles with an expiry, plus a sweep that revokes expired grants.
-- ✅ **Revoke closes sessions.** Revoking locks the role out and terminates open connections.
-- ✅ **Two-person approval.** A second person in an approver group must approve, and self-approval is refused.
-- ✅ **Signed, hash-chained receipts.** Verify every signature and the chain with `datagrant receipts verify`.
-- ✅ **Dry run by default.** Every command that changes something is a dry run unless you add `--apply`.
-- ✅ **Deny by default policy.** One YAML file decides who can request what, and for how long.
+Only features that ship in v0.1.0 (verified against the CLI and source):
+
+- [x] **Deny-by-default policy.** One YAML file decides who can request what, and for how long. Unknown keys are errors; evaluation refuses anything not allowed explicitly.
+- [x] **Narrow grants.**
+  - [x] Column allow-list: only columns listed in the policy can be requested.
+  - [x] Optional required row filters (the request must exactly match a policy entry).
+  - [x] Five masking modes per column: `passthrough`, `redact`, keyed HMAC `hash`, `partial`, or `null`.
+- [x] **Expiring Postgres access.**
+  - [x] A masked `security_barrier` view plus a `LOGIN` role with `VALID UNTIL`.
+  - [x] One-time password shown once; for two-person mode the database stores only the SCRAM verifier until approval.
+  - [x] `datagrant sweep` revokes expired grants on a schedule.
+- [x] **Revoke closes sessions.** Lock the role out (`NOLOGIN`), terminate its backends, then drop the view and role.
+- [x] **Two-person approval.** A different person in an `approvers` group must approve; self-approval is refused. Policy is re-checked at approval time.
+- [x] **Signed, hash-chained receipts.** ed25519 signatures in an append-only JSONL log. Verify with `datagrant receipts verify` (optional `--expect-head` to catch truncation).
+- [x] **Dry run by default.** Every command that changes something reports what it would do and changes nothing unless you pass `--apply`.
+- [x] **Honest CLI exit codes.** `0` ok, `1` denied or failed, `2` usage, `3` receipt not written, `4` revoke failed. Add `--json` for machine-readable output.
 
 ## Architecture
 
+Flow of a grant: **request -> policy -> masked view + expiring role -> receipt log -> revoke/sweep**.
+
 ```mermaid
 flowchart LR
-    A[datagrant request<br/>columns, rows, duration, purpose] --> B{policy.yaml<br/>deny by default}
+    A[request<br/>columns, rows, duration, purpose] --> B{policy.yaml<br/>deny by default}
     B -- denied --> X[reasons, exit 1]
-    B -- two-person --> P[pending request] --> AP[datagrant approve<br/>by someone else]
+    B -- two-person --> P[pending request] --> AP[approve<br/>by someone else]
     B -- auto --> G
     AP --> G[masked security_barrier view<br/>+ LOGIN role, VALID UNTIL]
-    G --> U[developer connects<br/>with one-time password]
-    G --> R[revoke / sweep<br/>lock out, kill sessions, drop]
-    G -. issued .-> S[(signed, hash-chained<br/>receipt log)]
+    G --> U[developer connects<br/>one-time password]
+    G -. issued .-> S[(signed hash-chained<br/>receipt log)]
+    G --> R[revoke / sweep<br/>NOLOGIN, kill sessions, drop]
     R -. revoked / expired .-> S
+    S --> V[receipts verify]
 ```
 
-Every command that changes something is a **dry run unless you add `--apply`**.
+Every mutating command is a **dry run unless you add `--apply`**. On issue, if the receipt cannot be written, the grant is revoked at once.
 
 ## Quick start
 
