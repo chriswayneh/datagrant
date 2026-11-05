@@ -20,7 +20,7 @@ An open source command line tool that gives developers short, limited access to 
 
 ## Demo
 
-<p align="center"><img src="docs/assets/demo.gif" alt="datagrant demo output: masked rows, two-person approval, revoke, sweep and receipt verification, ending in DEMO OK" width="100%"></p>
+<p align="center"><img src="docs/assets/demo.gif" alt="datagrant demo output: masked rows with a hidden filter column, per-dataset hashes, two-person approval, revoke, sweep, receipt verification and an external receipt sink catching a deleted receipt, ending in DEMO OK" width="100%"></p>
 
 Run it yourself. It needs Python 3.11 or later and Docker with the compose plugin:
 
@@ -31,7 +31,7 @@ make demo          # temporary Postgres 16 in Docker with fake patient data
 make demo-down     # only needed if a run was interrupted; the demo tears down on exit
 ```
 
-The demo creates keys, checks a policy, gives alice a one-hour masked view of the west region only, runs a two-person approval, revokes her grant while she is still connected, sweeps an expired grant, and verifies the signed receipt chain. Each step prints a `DEMO MARKER` line, and a successful run ends with `DEMO OK`.
+The demo creates keys, checks a policy, gives alice a one-hour masked view of the west region only (filtered on `region` without showing it), shows the same SSN hashing differently in a second dataset, runs a two-person approval, revokes her grant while she is still connected, sweeps an expired grant, verifies the signed receipt chain, then pushes the receipts to a `file://` sink and shows `receipts verify --sink` catching a deleted local receipt. Each step prints a `DEMO MARKER` line, and a successful run ends with `DEMO OK`.
 
 No Docker? Point it at a scratch database (the demo drops and recreates the `dg_demo` schema):
 
