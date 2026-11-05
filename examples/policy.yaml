@@ -18,7 +18,7 @@ datasets:
           zip: partial
           diagnosis_code: passthrough
           full_name: redact
-          region: passthrough     # row filters may only use listed columns
+          region: passthrough     # row filters use columns or filter_columns
         row_filters:
           - "region = 'west'"
         require_row_filter: true

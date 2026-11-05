@@ -74,3 +74,14 @@ def test_mode_checked_on_opened_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(Path, "stat", lambda self, **kw: os.stat(os.devnull))
     with pytest.raises(KeyFileError, match="group/others"):
         load_hash_key(p)
+
+
+def test_hash_key_scoped_is_distinct_and_stable() -> None:
+    from datagrant.keys import HashKey, KeyFileError
+
+    k = HashKey("0123456789abcdef", b"m" * 32)
+    a, a2, b = k.scoped("a"), k.scoped("a"), k.scoped("b")
+    assert a == a2 and a.derived != b.derived and a.key_id != b.key_id
+    assert a.derived != k.derived and len(a.key_id) == 16
+    with pytest.raises(KeyFileError):
+        k.scoped("")

@@ -49,7 +49,8 @@ Only features that ship in v0.1.0 (verified against the CLI and source):
 - [x] **Narrow grants.**
   - [x] Column allow-list: only columns listed in the policy can be requested.
   - [x] Optional required row filters (the request must exactly match a policy entry).
-  - [x] Five masking modes per column: `passthrough`, `redact`, keyed HMAC `hash`, `partial`, or `null`.
+  - [x] `filter_columns`: filter rows on a column without exposing it (unreleased, on main).
+  - [x] Five masking modes per column: `passthrough`, `redact`, keyed HMAC `hash`, `partial`, or `null`. Hashes are scoped per dataset (unreleased, on main).
 - [x] **Expiring Postgres access.**
   - [x] A masked `security_barrier` view plus a `LOGIN` role with `VALID UNTIL`.
   - [x] One-time password shown once; for two-person mode the database stores only the SCRAM verifier until approval.
@@ -127,9 +128,9 @@ Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error,
 datagrant narrows and time-boxes access and makes it auditable. It is not an identity provider or a data loss prevention system. Read [docs/security.md](docs/security.md) before using it with real data. In short:
 
 - **Identity is not authentication.** The requester is the operating system user, or whoever `--as-user` names. Anyone with the admin connection string can claim any name, so real two-person control needs datagrant behind a service that signs people in and holds that connection string.
-- **Columns used in a row filter are visible** to the grantee, because a filter column must also be a listed column.
+- **Row filters reveal what they match.** A column listed only in `filter_columns` is hidden, but the grantee knows every row matches the filter.
 - **Masking still shows some shape.** You can see whether a value is empty, and partial and hash masks show its length.
-- **Hashed values can be matched** across grants and datasets, because one hash key covers everything.
+- **Hashed values can be matched** across grants on the same dataset (or datasets sharing a `hash_scope`), but not across datasets.
 - **Deleting the newest receipts** is only caught if you saved the latest hash somewhere else and check it with `--expect-head`.
 - **On Windows, the receipt log isn't locked,** so only one process should write to it at a time.
 - **Full statement logging** (`log_statement = 'all'`) on the admin connection would record grant SQL, including key values. Turn it off for the datagrant admin role.

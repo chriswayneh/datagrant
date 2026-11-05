@@ -33,9 +33,9 @@ datagrant narrows, time-boxes and records access to regulated tables in Postgres
 ## Known limits
 
 - **Identity is not authentication.** The requester and approver names come from the OS user or `--as-user`. Anyone with the admin DSN can claim any name, so two-person approval is a workflow control, not an enforced one. To enforce it, run datagrant behind a service that authenticates people and keeps the DSN to itself. OIDC identity is on the [roadmap](../ROADMAP.md).
-- **Filter columns are visible.** A row-filter column must be a listed column, so its values are in the view (usually as `passthrough`).
+- **Filters still reveal something.** A column in `filter_columns` is not in the view, but the grantee knows every row they see matches the filter (for example `region = 'west'`). A row filter on a column from `columns` leaves that column visible as usual.
 - **Masks leak shape.** NULLs stay NULL under `partial` and `hash`, and `partial` keeps value length. Pick `redact` or `null` when shape matters.
-- **Hashes are linkable.** One hash key covers all datasets and grants, so equal values hash equally everywhere. That's useful for joins, but it lets values be linked across grants. Per-dataset scope is planned.
+- **Hashes are linkable within a scope.** Each dataset hashes under its own derived key (`hash_scope`, default the dataset name), so equal values don't match across datasets. Within one scope (every grant on that dataset, or datasets that share a `hash_scope`) equal values still hash equally, and anyone holding the hash key file can recompute any scope's hashes.
 - **Tail truncation.** Deleting the newest receipts leaves a valid shorter chain. Record the head hash off the host and use `receipts verify --expect-head`. An external receipt sink is planned.
 - **Single writer on Windows.** On POSIX, the receipt log is locked with `fcntl`. Windows has no lock, so run one writer at a time there.
 - **Statement logging.** With `log_statement = 'all'` (or similar) on the admin connection, the server log captures grant SQL, including the hash-key parameter and SCRAM verifiers. Disable statement logging for the datagrant admin role.

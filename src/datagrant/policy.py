@@ -50,6 +50,7 @@ class TableRule:
     row_filters: tuple[str, ...]
     require_row_filter: bool
     max_duration: timedelta
+    filter_columns: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,11 @@ class Dataset:
     name: str
     database: str
     tables: dict[str, TableRule]
+    hash_scope: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.hash_scope:
+            object.__setattr__(self, "hash_scope", self.name)
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,7 @@ class Decision:
     policy_sha256: str
     masks: dict[str, str] = field(default_factory=dict)
     policy_version: int = 1
+    hash_scope: str | None = None
 
 
 def _req(d: dict[str, Any], key: str, typ: type, where: str) -> Any:
@@ -129,7 +136,15 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
         raise PolicyError(f"{where}: expected a mapping")
     _check_keys(
         raw,
-        {"name", "allowed_groups", "columns", "row_filters", "require_row_filter", "max_duration"},
+        {
+            "name",
+            "allowed_groups",
+            "columns",
+            "filter_columns",
+            "row_filters",
+            "require_row_filter",
+            "max_duration",
+        },
         where,
     )
     name = _req(raw, "name", str, where)
@@ -150,17 +165,33 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
             raise PolicyError(
                 f"{where}.columns.{col}: unknown mask {mask!r} (one of {sorted(MASK_TYPES)})"
             )
+    fcols = _str_list(raw.get("filter_columns", []), f"{where}.filter_columns")
+    for col in fcols:
+        if not _IDENT_RE.match(col):
+            raise PolicyError(f"{where}.filter_columns: invalid column name {col!r}")
+        if col in cols:
+            raise PolicyError(
+                f"{where}.filter_columns: {col!r} is also in columns (list it in one place)"
+            )
+    if len(set(fcols)) != len(fcols):
+        raise PolicyError(f"{where}.filter_columns: duplicate column names")
     filters = _str_list(raw.get("row_filters", []), f"{where}.row_filters")
     for k, f in enumerate(filters):
         try:
             _, used = parse_row_filter(f)
         except RowFilterError as exc:
             raise PolicyError(f"{where}.row_filters[{k}]: {exc}") from None
-        outside = sorted(used - set(cols))
+        outside = sorted(used - set(cols) - set(fcols))
         if outside:
             raise PolicyError(
-                f"{where}.row_filters[{k}]: references columns not listed in columns: {outside}"
+                f"{where}.row_filters[{k}]: references columns not listed in columns"
+                f" or filter_columns: {outside}"
             )
+    if fcols and not filters:
+        raise PolicyError(f"{where}: filter_columns is set but no row_filters are listed")
+    unused = sorted(set(fcols) - {c for f in filters for c in parse_row_filter(f)[1]})
+    if unused:
+        raise PolicyError(f"{where}.filter_columns: not used by any row filter: {unused}")
     require = raw.get("require_row_filter", False)
     if not isinstance(require, bool):
         raise PolicyError(f"{where}.require_row_filter: expected true/false")
@@ -173,7 +204,9 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
     )
     if max_d > cap:
         raise PolicyError(f"{where}.max_duration exceeds the policy-wide max_duration")
-    return TableRule(name, frozenset(allowed), dict(cols), tuple(filters), require, max_d)
+    return TableRule(
+        name, frozenset(allowed), dict(cols), tuple(filters), require, max_d, frozenset(fcols)
+    )
 
 
 def parse_policy(data: object, sha256: str = "") -> Policy:
@@ -203,13 +236,16 @@ def parse_policy(data: object, sha256: str = "") -> Policy:
         where = f"policy.datasets[{i}]"
         if not isinstance(ds, dict):
             raise PolicyError(f"{where}: expected a mapping")
-        _check_keys(ds, {"name", "database", "tables"}, where)
+        _check_keys(ds, {"name", "database", "tables", "hash_scope"}, where)
         name = _req(ds, "name", str, where)
         if not _NAME_RE.match(name) or name in datasets:
             raise PolicyError(f"{where}.name: invalid or duplicate dataset name {name!r}")
         db = _req(ds, "database", str, where)
         if not _IDENT_RE.match(db):
             raise PolicyError(f"{where}.database: invalid database name {db!r}")
+        scope = ds.get("hash_scope", name)
+        if not isinstance(scope, str) or not _NAME_RE.match(scope):
+            raise PolicyError(f"{where}.hash_scope: invalid hash scope {scope!r}")
         tables: dict[str, TableRule] = {}
         for j, t in enumerate(_req(ds, "tables", list, where)):
             rule = _parse_table(t, f"{where}.tables[{j}]", cap, set(groups))
@@ -218,7 +254,7 @@ def parse_policy(data: object, sha256: str = "") -> Policy:
             tables[rule.name] = rule
         if not tables:
             raise PolicyError(f"{where}.tables: must define at least one table")
-        datasets[name] = Dataset(name, db, tables)
+        datasets[name] = Dataset(name, db, tables, scope)
     approvers = frozenset(_str_list(data.get("approvers", []), "policy.approvers"))
     unknown = approvers - set(groups)
     if unknown:
@@ -311,5 +347,11 @@ def evaluate(policy: Policy, req: Request) -> Decision:
         return deny()
     masks = {c: rule.columns[c] for c in req.columns}
     return Decision(
-        True, ("allowed by policy",), policy.approval, policy.sha256, masks, policy.version
+        True,
+        ("allowed by policy",),
+        policy.approval,
+        policy.sha256,
+        masks,
+        policy.version,
+        ds.hash_scope,
     )

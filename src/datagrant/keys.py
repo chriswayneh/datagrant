@@ -32,6 +32,7 @@ DEFAULT_KEY_DIR = Path.home() / ".config" / "datagrant"
 MIN_KEY_BYTES = 32
 _MAX_FILE_BYTES = 1024
 _LABEL = b"datagrant/hash-mask/v1"
+_SCOPE_LABEL = b"datagrant/hash-scope/v1:"
 
 
 class KeyFileError(ValueError):
@@ -42,6 +43,13 @@ class KeyFileError(ValueError):
 class HashKey:
     key_id: str
     derived: bytes = field(repr=False)
+
+    def scoped(self, scope: str) -> HashKey:
+        """Key for one hash scope: values hash differently in different scopes."""
+        if not scope:
+            raise KeyFileError("hash scope must be a non-empty string")
+        derived = hmac.digest(self.derived, _SCOPE_LABEL + scope.encode("utf-8"), "sha256")
+        return HashKey(hashlib.sha256(derived).hexdigest()[:16], derived)
 
 
 def hash_key_path() -> Path:
