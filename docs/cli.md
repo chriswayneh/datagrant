@@ -35,7 +35,7 @@ Key paths resolve in this order: explicit flag, then environment variable, then 
 | 0 | Success, including a clean dry run and "nothing to do". |
 | 1 | Denied or failed: policy denial, invalid policy, failed check, bad receipt chain, database error, or keys that already exist. |
 | 2 | Usage error: unknown or inapplicable flag, an invalid receipt sink URL, mode or token, `--apply` with `--dry-run`, missing DSN or policy, or both keys resolving to the same file. |
-| 3 | `revoke`/`sweep`: access was removed but a receipt could not be written. `request`/`approve` in `required` sink mode: the receipt could not be delivered to the sink, so the grant was revoked. `receipts push`: some receipts could not be delivered. |
+| 3 | `revoke`/`sweep`: access was removed but a receipt could not be written. `request`/`approve` with a sink: the outbox cursor is unusable, so nothing was issued; or, in `required` mode, the `issued` receipt could not be delivered, so the grant was revoked (the message says if the grant is STILL ACTIVE because that revoke failed). `receipts push --apply`: some receipts are still pending. |
 | 4 | `revoke`/`sweep`: a revoke failed. The grant stays active and its role stays locked out; the error is in `last_error`. |
 
 ## Commands
@@ -75,7 +75,51 @@ Creates datagrant's state schema (with `--apply`) and warns about `PUBLIC` defau
 ### `receipts push [--receipt-sink URL] [--receipt-log FILE] [--apply]`
 Sends receipts the sink hasn't acknowledged yet (the outbox) to the external sink, in order. A dry run shows how many are pending. The last acknowledged `seq` is kept in `<receipt-log>.sink` (0600). Run it from cron after a sink outage. Exit 3 if anything is still pending.
 
-With a sink configured, `request` and `approve` send the `issued` receipt right after writing it locally. In `best-effort` mode a failed send only warns and leaves the receipt pending. In `required` mode the grant is revoked and the command exits 3. `revoke` and `sweep` remove access first and then make one delivery attempt without retries; a sink failure only warns and never changes their exit code. The token is never printed. See the [design](design/receipt-sink.md).
+See [Receipt sink](#receipt-sink) below for how delivery works.
+
+## Receipt sink
+
+An external receipt sink keeps an off-host copy of every receipt, so deleting or rewriting the newest local receipts is caught without a hand-recorded head hash. Design: [design/receipt-sink.md](design/receipt-sink.md). Unreleased, on main.
+
+**Configuration.** No sink configured means v0.1.0 behavior.
+
+| Setting | Flag | Environment | Notes |
+| --- | --- | --- | --- |
+| Sink URL | `--receipt-sink` (`--sink` on `receipts verify`) | `DATAGRANT_RECEIPT_SINK` | `https://host/path`, or `file:///absolute/path`. Plain `http://` only for `localhost` and `127.0.0.1`. URLs with credentials, a query or a fragment are refused. |
+| Mode | `--receipt-sink-mode required\|best-effort` | `DATAGRANT_RECEIPT_SINK_MODE` | Default `best-effort`. Only `request`, `approve`, `revoke` and `sweep` take the flag. |
+| Bearer token | none | `DATAGRANT_RECEIPT_SINK_TOKEN` | Printable ASCII without spaces. Never accepted on the command line and never printed. |
+
+Bad settings exit 2 before any database work. Flags beat the environment.
+
+**Webhook.** `POST <url>` with `Content-Type: application/x-ndjson` and one signed receipt line per request; any 2xx is success. `GET <url>/head` returns `{"seq": N, "head_sha256": "..."}`, or 404 when empty. 5 s connect timeout and a 10 s wall-clock limit per request. Retries after 0.5, 1 and 2 s on network errors, 5xx, 408 and 429; other 4xx are refusals and aren't retried. Redirects are never followed. The receiver should refuse a different line at a `seq` it already has.
+
+**File sink.** Appends to the file (created 0600, no symlinks, must stay private), locked like the receipt log. Lines must arrive in `seq` order; an identical resend is a no-op and a different line at a used `seq` is refused.
+
+**Delivery and modes.**
+
+| Command | `best-effort` | `required` |
+| --- | --- | --- |
+| `request --apply`, `approve --apply` | Checks the outbox cursor first (exit 3, nothing issued, if it's unusable). Sends the `issued` receipt with retries. On failure: warning, the grant stands, the receipt stays pending. | Same check first. On failure: the grant is revoked and the command exits 3. |
+| `revoke --apply`, `sweep --apply` | Access is removed first, then one delivery attempt without retries. A failure only warns; the exit code doesn't change. `--json` adds `sink` with `delivered`, `pending` and `error`. | Same. Revokes never wait on the sink. |
+
+**Outbox and cursor.** The outbox is the local receipt log plus `<receipt-log>.sink`, a 0600 file (no symlinks) holding `{"acked_seq": N}`, the last `seq` the sink acknowledged. Lines after it are pending. The cursor advances only after a successful delivery and is replaced atomically; a crash in between just resends a line, which sinks treat as a no-op. Flushes are serialized on `<receipt-log>.sink.lock` (not on Windows). A cursor that is corrupt, not private, or ahead of the local log stops new grants (exit 3) until it's fixed.
+
+**`receipts push`.** Dry run by default: prints how many receipts are pending. With `--apply` it sends them in order and exits 3 if any remain. `--json`: `delivered`, `pending`, `error`.
+
+**`receipts verify --sink`.** Read-only; it never writes the cursor or the sink. After the local chain verifies:
+
+| Situation | Result |
+| --- | --- |
+| Sink head equals the local head | OK, `undelivered` 0 |
+| Sink behind, and the local receipt at its `seq` hashes to its head | OK, `undelivered` > 0 |
+| Sink empty and nothing acknowledged | OK, every receipt `undelivered` |
+| Sink ahead of the local log | Exit 1: local log truncated or replaced |
+| Different hash at the sink's `seq` | Exit 1: local log or sink rewritten |
+| Sink head behind the cursor's `acked_seq` | Exit 1: sink lost or replaced |
+| Cursor unreadable, corrupt, or ahead of the log | Exit 1 (fails closed) |
+| Sink unreachable | Exit 1; the local result is still printed |
+
+`--json` adds `sink_seq`, `sink_head_sha256` and `undelivered`.
 
 ## Who can use which shared flag
 
