@@ -200,3 +200,24 @@ def test_keys_init_refuses_same_file(
     with pytest.raises(KeyFileError, match="different files"):
         init_keys(hash_path=same, signing_path=same)
     assert not (tmp_path / "k").exists()
+
+
+def _help(argv: list[str], capsys: pytest.CaptureFixture[str]) -> str:
+    assert main([*argv, "--help"]) == EXIT_OK
+    return " ".join(capsys.readouterr().out.split())
+
+
+def test_key_help_mentions_dir_only_on_keys_init(capsys: pytest.CaptureFixture[str]) -> None:
+    out = _help(["keys", "init"], capsys)
+    assert "$DATAGRANT_SIGNING_KEY, then --dir, then ~/.config/datagrant" in out
+    assert "$DATAGRANT_HASH_KEY, then --dir, then ~/.config/datagrant" in out
+    for argv in (["request"], ["sweep"], ["revoke"], []):
+        out = _help(argv, capsys)
+        assert "--dir" not in out
+        assert "then ~/.config/datagrant" in out
+
+
+def test_preflight_help_says_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
+    out = _help([], capsys)
+    assert "dry run; --apply creates state" in out
+    assert "create state;" not in out

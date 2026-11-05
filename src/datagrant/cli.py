@@ -620,11 +620,11 @@ def build_parser() -> argparse.ArgumentParser:
         "dsn": (("--dsn",), {"help": f"admin connection string (default ${DSN_ENV})"}),
         "signing_key": (
             ("--signing-key",),
-            {"help": "signing key file (beats $DATAGRANT_SIGNING_KEY and --dir)"},
+            {"help": "signing key file (beats $DATAGRANT_SIGNING_KEY, then ~/.config/datagrant)"},
         ),
         "hash_key": (
             ("--hash-key",),
-            {"help": "hash key file (beats $DATAGRANT_HASH_KEY and --dir)"},
+            {"help": "hash key file (beats $DATAGRANT_HASH_KEY, then ~/.config/datagrant)"},
         ),
         "receipt_log": (
             ("--receipt-log",),
@@ -632,11 +632,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     }
 
-    def only(*names: str) -> list[argparse.ArgumentParser]:
+    # keys init is the only command with --dir, so only its key help mentions it.
+    with_dir: dict[str, tuple[tuple[str, ...], dict[str, Any]]] = {
+        "signing_key": (
+            ("--signing-key",),
+            {
+                "help": "signing key file (beats $DATAGRANT_SIGNING_KEY, then --dir, "
+                "then ~/.config/datagrant)"
+            },
+        ),
+        "hash_key": (
+            ("--hash-key",),
+            {
+                "help": "hash key file (beats $DATAGRANT_HASH_KEY, then --dir, "
+                "then ~/.config/datagrant)"
+            },
+        ),
+    }
+
+    def only(*names: str, dir_help: bool = False) -> list[argparse.ArgumentParser]:
         out = []
         for n in names:
             c = argparse.ArgumentParser(add_help=False)
-            flags, kw = opts[n]
+            flags, kw = with_dir[n] if dir_help and n in with_dir else opts[n]
             c.add_argument(*flags, **kw, **sup)
             out.append(c)
         return out
@@ -670,7 +688,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     k = keys.add_parser(
         "init",
-        parents=[*only("json", "signing_key", "hash_key"), apply],
+        parents=[*only("json", "signing_key", "hash_key", dir_help=True), apply],
         help="create hash + signing keys (0600)",
     )
     k.add_argument(
@@ -735,7 +753,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "preflight",
         parents=[*only("json", "dsn"), apply],
-        help="create state; warn on PUBLIC defaults",
+        help="check state and warn on PUBLIC defaults (dry run; --apply creates state)",
     ).set_defaults(fn=cmd_preflight)
     return p
 
