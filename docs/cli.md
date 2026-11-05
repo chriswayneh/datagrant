@@ -64,8 +64,10 @@ Locks the role out and commits, terminates its sessions, then drops the view and
 ### `sweep [--apply]`
 Revokes every expired grant (`expired` receipts) and expires stale pending requests. Run it on a schedule, for example every minute.
 
-### `receipts verify [--pubkey HEX|FILE] [--expect-head SHA256] [--receipt-log FILE] [--signing-key FILE]`
+### `receipts verify [--pubkey HEX|FILE] [--expect-head SHA256] [--sink URL] [--receipt-log FILE] [--signing-key FILE]`
 Checks every signature, sequence number and hash link, and reports the first break. It prints the head hash. Record that hash somewhere off the host and pass it back with `--expect-head` to detect truncation of the newest entries.
+
+With `--sink URL` (alias `--receipt-sink`, or `DATAGRANT_RECEIPT_SINK`), it also reads the sink head and compares it with the local chain. It never writes to the sink or the outbox cursor. Equal heads pass. A sink behind the local log passes if the local receipt at the sink's `seq` hashes to the sink head; the rest are reported as not yet delivered. A sink ahead of the local log, or a different hash at the same `seq`, fails (exit 1), as does a sink that can't be reached. `--json` adds `sink_seq`, `sink_head_sha256` and `undelivered` (null when the sink check didn't produce them). If the local chain fails, the sink isn't checked.
 
 ### `preflight [--apply]`
 Creates datagrant's state schema (with `--apply`) and warns about `PUBLIC` defaults that every grant role inherits: `CONNECT` on other databases, `TEMP` in this database, and `CREATE` in schema `public`. A dry run only reports the warnings.
@@ -85,6 +87,6 @@ With a sink configured, `request` and `approve` send the `issued` receipt right 
 | `request`, `approve` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `grant list`, `grant status` | ✓ | | | | | | |
 | `revoke`, `sweep` | ✓ | ✓ | | ✓ | ✓ | ✓ | ✓ |
-| `receipts verify` | | ✓ | | ✓ | | | |
+| `receipts verify` | | ✓ | | ✓ | ✓ | | |
 | `receipts push` | | | | ✓ | ✓ | | ✓ |
 | `preflight` | ✓ | | | | | | ✓ |

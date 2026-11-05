@@ -12,6 +12,7 @@ idempotent per ``seq`` (an identical resend is a no-op).
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import stat
@@ -172,3 +173,60 @@ def _flush(log: str | Path, sink: ReceiptSink) -> FlushResult:
             return FlushResult(done, len(lines) - done, str(exc))
         done += 1
     return FlushResult(done, 0, None)
+
+
+@dataclass(frozen=True)
+class SinkCheck:
+    ok: bool
+    sink_seq: int | None
+    sink_head_sha256: str | None
+    undelivered: int | None
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "sink_seq": self.sink_seq,
+            "sink_head_sha256": self.sink_head_sha256,
+            "undelivered": self.undelivered,
+        }
+
+
+def compare_with_sink(log: str | Path, sink: ReceiptSink) -> SinkCheck:
+    """Compare the (already verified) local chain with the sink head. Read-only."""
+    try:
+        head = sink.head()
+    except SinkError as exc:
+        return SinkCheck(False, None, None, None, f"remote check could not run: {exc}")
+    try:
+        fd = os.open(log, os.O_RDONLY | _NOFOLLOW)
+    except FileNotFoundError:
+        lines: list[bytes] = []
+    except OSError as exc:
+        return SinkCheck(False, None, None, None, f"cannot read receipt log: {exc.strerror}")
+    else:
+        with os.fdopen(fd, "rb") as f:
+            lines = f.read().splitlines()
+    n = len(lines)
+    if head is None:
+        return SinkCheck(True, None, None, n)
+    seq, remote = head
+    if seq >= n:
+        return SinkCheck(
+            False,
+            seq,
+            remote,
+            None,
+            f"sink is ahead: sink head is seq {seq}, local log has {n} receipt(s)"
+            " (local log truncated or replaced)",
+        )
+    local = hashlib.sha256(lines[seq]).hexdigest()
+    if local != remote:
+        return SinkCheck(
+            False,
+            seq,
+            remote,
+            None,
+            f"chains differ at seq {seq}: local {local}, sink {remote}"
+            " (local log or sink rewritten)",
+        )
+    return SinkCheck(True, seq, remote, n - 1 - seq)

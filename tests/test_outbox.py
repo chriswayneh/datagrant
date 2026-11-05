@@ -173,7 +173,6 @@ def test_push_failure_exit_3_and_token_hidden(
         ["receipts", "push", "--receipt-sink", f"https://u:{TOKEN}@example.com/r"],
         ["revoke", "abc", "--receipt-sink", "ftp://x/r"],
         ["sweep", "--receipt-sink-mode", "sometimes"],
-        ["receipts", "verify", "--receipt-sink", "https://x.example/r"],
     ],
 )
 def test_bad_sink_config_is_usage_before_db(

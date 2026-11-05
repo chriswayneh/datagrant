@@ -657,20 +657,39 @@ def cmd_receipts_verify(ctx: Ctx) -> int:
         pub = key.private.public_key()
     log = Path(a.receipt_log) if a.receipt_log else receipt.default_log_path()
     res = receipt.verify(log, pub, expect_head=a.expect_head)
-    ctx.emit(
-        {
-            "ok": res.ok,
-            "count": res.count,
-            "head_sha256": res.head_sha256,
-            "error": res.error,
-            "line": res.line,
-        },
+    data: dict[str, Any] = {
+        "ok": res.ok,
+        "count": res.count,
+        "head_sha256": res.head_sha256,
+        "error": res.error,
+        "line": res.line,
+    }
+    text = (
         f"OK: {res.count} receipt(s), head {res.head_sha256}"
         if res.ok
         else "FAILED"
         + (f" at line {res.line}" if res.line is not None else "")
-        + f": {res.error} ({res.count} good receipt(s) before it)",
+        + f": {res.error} ({res.count} good receipt(s) before it)"
     )
+    remote = _remote(a)
+    if remote is not None and res.ok:
+        from datagrant.outbox import compare_with_sink
+
+        chk = compare_with_sink(log, remote.sink)  # read-only: no cursor or sink writes
+        data |= chk.as_dict()
+        if not chk.ok:
+            err = _hide_token(chk.error or "sink check failed")
+            data |= {"ok": False, "error": err}
+            text += f"\nSINK FAILED: {err}"
+        elif chk.sink_seq is None:
+            text += f"\nsink is empty; {chk.undelivered} receipt(s) not yet delivered"
+        else:
+            text += f"\nsink OK: head seq {chk.sink_seq} matches"
+            if chk.undelivered:
+                text += f"; {chk.undelivered} receipt(s) not yet delivered"
+        ctx.emit(data, text)
+        return EXIT_OK if chk.ok else EXIT_FAILED
+    ctx.emit(data, text)
     return EXIT_OK if res.ok else EXIT_FAILED
 
 
@@ -869,8 +888,14 @@ def build_parser() -> argparse.ArgumentParser:
     rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(dest="sub", required=True)
     v = rc.add_parser(
         "verify",
-        parents=only("json", "signing_key", "receipt_log"),
+        parents=only("json", "signing_key", "receipt_log", "receipt_sink"),
         help="verify signatures and the hash chain",
+    )
+    v.add_argument(
+        "--sink",
+        dest="receipt_sink",
+        default=argparse.SUPPRESS,
+        help="also compare the local head with this sink (same as --receipt-sink)",
     )
     v.add_argument("--pubkey", help="public key hex, or a file containing it")
     v.add_argument("--expect-head", help="head hash recorded earlier (detects truncation)")
@@ -899,7 +924,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
         cmd_approve: _GRANTING,
         cmd_revoke: _REVOKING,
         cmd_sweep: _REVOKING,
-        cmd_receipts_verify: ("signing_key", "receipt_log"),
+        cmd_receipts_verify: ("signing_key", "receipt_log", "receipt_sink"),
         cmd_receipts_push: ("receipt_log", "receipt_sink"),
         cmd_grant_list: ("dsn",),
         cmd_grant_status: ("dsn",),
