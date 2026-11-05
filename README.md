@@ -119,10 +119,11 @@ See the [policy reference](docs/policy.md) for the policy format and the [runboo
 | `grant list`, `grant status ID` | List grants or show one grant |
 | `revoke GRANT_ID` | End access now and close open sessions |
 | `sweep` | Revoke expired grants and expire old requests |
-| `receipts verify` | Check every receipt signature and the hash chain |
+| `receipts verify` | Check every receipt signature and the hash chain; with `--sink`, compare against the external sink |
+| `receipts push` | Send receipts still pending in the outbox to the external sink |
 | `preflight` | Set up datagrant's tables and warn about risky PUBLIC permissions |
 
-Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error, `3` when a receipt wasn't written, and `4` when a revoke failed. Add `--json` to any command for JSON output. See the full [CLI reference](docs/cli.md).
+Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error, `3` when a receipt wasn't written or delivered to a sink (see the CLI reference), and `4` when a revoke failed. Add `--json` to any command for JSON output. See the full [CLI reference](docs/cli.md).
 
 ## Limits
 
@@ -130,10 +131,10 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 
 - **Identity is not authentication.** The requester is the operating system user, or whoever `--as-user` names. Anyone with the admin connection string can claim any name, so real two-person control needs datagrant behind a service that signs people in and holds that connection string.
 - **Row filters reveal what they match.** A column listed only in `filter_columns` is hidden, but the grantee knows every row matches the filter.
-- **Masking still shows some shape.** You can see whether a value is empty, and partial and hash masks show its length.
+- **Masking still shows some shape.** You can see whether a value is empty (NULL stays NULL under `partial` and `hash`), and `partial` keeps its length.
 - **Hashed values can be matched** across grants on the same dataset (or datasets sharing a `hash_scope`), but not across datasets.
 - **Deleting the newest receipts** is only caught with an external receipt sink and `receipts verify --sink` (v0.2.0), or if you saved the latest hash somewhere else and check it with `--expect-head`. Receipts not yet delivered to the sink can't be checked off-host.
-- **On Windows, the receipt log isn't locked,** so only one process should write to it at a time.
+- **On Windows, the receipt log, the file sink and outbox flushes aren't locked,** so only one process should write at a time.
 - **Full statement logging** (`log_statement = 'all'`) on the admin connection would record grant SQL, including key values. Turn it off for the datagrant admin role.
 
 ## Documentation
