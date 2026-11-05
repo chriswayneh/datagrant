@@ -14,7 +14,7 @@
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
 
-**Status:** v0.2.0 is ready, release pending ([release notes](docs/release-notes/v0.2.0.md)); v0.1.0 is the latest published release. It changes `hash` outputs from v0.1.0; see the notes before upgrading. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Status:** [v0.2.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.2.0) is released ([release notes](docs/release-notes/v0.2.0.md)). It changes `hash` outputs from v0.1.0; see the notes before upgrading. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
 > **A note on this repo:** This GitHub account is my personal playground, where I experiment, learn, and build security tools in the open. Projects here are personal work, not a product or company offering.
 
