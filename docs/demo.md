@@ -20,7 +20,7 @@ make demo-down     # only needed if a run was interrupted; the demo tears down o
    7. `revoke --apply` while alice's session is open: the session is terminated;
    8. the second grant's expiry is fast-forwarded (a demo shortcut), then `sweep` (dry run) and `sweep --apply`;
    9. `receipts verify` passes (6 receipts: issued ×3, revoked ×2, expired), then again with `--expect-head <head>`;
-   10. external receipt sink (`file://` into `offhost/`): `receipts push` (dry run, 6 pending), `receipts push --apply`, and `receipts verify --sink` passes; then the newest local receipt is deleted and `receipts verify --sink` fails with exit 1 (local log truncated or replaced).
+   10. external receipt sink (`file://` into `offhost/`): `receipts push` (dry run, 6 pending), `receipts push --apply`, and `receipts verify --sink` passes. Then the newest local receipt is deleted: `receipts verify --sink` fails with exit 1 on the local outbox cursor (`outbox cursor is at seq 5 but the local log has 5 receipt(s)`). The local cursor is deleted too, as a careful attacker would, and `receipts verify --sink` still fails with exit 1, this time from the sink itself: `sink is ahead: sink head is seq 5, local log has 5 receipt(s) (local log truncated or replaced)`.
 3. On exit the temp dir (keys, receipts) and schema `dg_demo` are removed.
 
 Expected output ends with:
