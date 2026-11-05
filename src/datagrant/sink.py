@@ -260,7 +260,7 @@ def parse_sink_url(url: str, token: str | None = None) -> ReceiptSink:
     if u.scheme == "file":
         if u.netloc not in ("", "localhost") or not u.path or u.query or u.fragment:
             raise SinkConfigError("file sink must be file:///absolute/path")
-        path = urllib.parse.unquote(u.path)
+        path = urllib.request.url2pathname(u.path)
         if not os.path.isabs(path):
             raise SinkConfigError("file sink path must be absolute")
         return FileSink(path)
