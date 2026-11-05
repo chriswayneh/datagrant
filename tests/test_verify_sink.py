@@ -208,3 +208,65 @@ def test_text_output(local: Path, tmp_path: Path, capsys: pytest.CaptureFixture[
     r = _remote(tmp_path, local.read_bytes().splitlines()[:2])
     assert main(["receipts", "verify", "--sink", r.as_uri()]) == EXIT_OK
     assert "1 receipt(s) not yet delivered" in capsys.readouterr().out
+
+
+# ---------- acknowledgements and bounds ----------
+
+
+def test_empty_sink_after_acks_fails(local: Path, tmp_path: Path) -> None:
+    outbox.write_cursor(local, 1)  # sink had acknowledged seq 0 and 1
+    code, out = verify("--sink", (tmp_path / "fresh.jsonl").as_uri())
+    assert code == EXIT_FAILED
+    assert "sink is behind its own acknowledgements" in out["error"]
+    assert "acked seq 1, sink head none" in out["error"]
+
+
+def test_rolled_back_sink_head_fails(local: Path, tmp_path: Path) -> None:
+    r = _remote(tmp_path, local.read_bytes().splitlines()[:1])
+    outbox.write_cursor(local, 2)
+    code, out = verify("--sink", r.as_uri())
+    assert code == EXIT_FAILED and "acked seq 2, sink head 0" in out["error"]
+
+
+def test_acked_and_matching_passes(local: Path, tmp_path: Path) -> None:
+    r = _remote(tmp_path, local.read_bytes().splitlines()[:2])
+    outbox.write_cursor(local, 1)
+    code, out = verify("--sink", r.as_uri())
+    assert code == EXIT_OK and out["undelivered"] == 1
+    assert json.loads(outbox.cursor_path(local).read_text()) == {"acked_seq": 1}
+
+
+@pytest.mark.parametrize("bad", ["corrupt", "ahead"])
+def test_bad_cursor_fails_closed(local: Path, tmp_path: Path, bad: str) -> None:
+    r = _remote(tmp_path, local.read_bytes().splitlines())
+    p = outbox.cursor_path(local)
+    if bad == "corrupt":
+        p.write_text("not json")
+        p.chmod(0o600)
+    else:
+        outbox.write_cursor(local, 7)
+    code, out = verify("--sink", r.as_uri())
+    assert code == EXIT_FAILED
+    assert ("outbox cursor unusable" if bad == "corrupt" else "outbox cursor is at seq 7") in out[
+        "error"
+    ]
+
+
+def test_line_hash_read_is_bounded(tmp_path: Path) -> None:
+    log = tmp_path / "big.jsonl"
+    log.write_bytes(b"x" * (receipt.MAX_LINE_BYTES + 10) + b"\n")
+    remote = tmp_path / "remote.jsonl"
+    remote.write_bytes(b"")
+    remote.chmod(0o600)
+
+    class Head:
+        name = "fixed"
+
+        def deliver(self, line: bytes) -> None:
+            raise AssertionError("read-only")
+
+        def head(self) -> tuple[int, str] | None:
+            return 0, "0" * 64
+
+    chk = outbox.compare_with_sink(log, Head(), 1)
+    assert not chk.ok and "line too long" in (chk.error or "")

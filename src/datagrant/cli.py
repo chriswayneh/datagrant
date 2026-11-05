@@ -675,7 +675,7 @@ def cmd_receipts_verify(ctx: Ctx) -> int:
     if remote is not None and res.ok:
         from datagrant.outbox import compare_with_sink
 
-        chk = compare_with_sink(log, remote.sink)  # read-only: no cursor or sink writes
+        chk = compare_with_sink(log, remote.sink, res.count)  # read-only: no cursor or sink writes
         data |= chk.as_dict()
         if not chk.ok:
             err = _hide_token(chk.error or "sink check failed")
