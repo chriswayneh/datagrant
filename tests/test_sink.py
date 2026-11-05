@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,11 +69,23 @@ def test_file_sink_refuses_gap_and_rewrite(tmp_path: Path, lines: list[bytes]) -
         s.deliver(lines[1])
     s.deliver(lines[0])
     s.deliver(lines[1])
-    with pytest.raises(SinkError, match="expects seq 2"):
-        s.deliver(lines[0])
+    with pytest.raises(SinkError, match="expects seq 2, got 3"):
+        s.deliver(lines[2].replace(b'"seq":2', b'"seq":3'))
+
+
+def test_file_sink_idempotent_per_seq(tmp_path: Path, lines: list[bytes]) -> None:
+    s = FileSink(tmp_path / "s.jsonl")
+    for ln in lines:
+        s.deliver(ln)
+    before = s.path.read_bytes()
+    s.deliver(lines[1])  # identical resend of an older seq: no-op
+    s.deliver(lines[0])
+    assert s.path.read_bytes() == before
     forged = lines[1].replace(b'"h"', b'"x"')
-    with pytest.raises(SinkError):
+    assert forged != lines[1]
+    with pytest.raises(SinkError, match="different receipt at seq 1"):
         s.deliver(forged)
+    assert s.path.read_bytes() == before
 
 
 def test_file_sink_rejects_bad_lines(tmp_path: Path) -> None:
@@ -250,3 +263,91 @@ def test_config_from_env(tmp_path: Path) -> None:
     )
     with pytest.raises(SinkConfigError, match="mode"):
         sink.sink_from_config(env={sink.SINK_MODE_ENV: "sometimes"})
+
+
+# ---------- wall-clock limit ----------
+
+
+@pytest.fixture
+def slow_server() -> Iterator[str]:
+    stop = threading.Event()
+
+    class Slow(BaseHTTPRequestHandler):
+        def log_message(self, *a: Any) -> None:
+            pass
+
+        def _trickle(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            for _ in range(1000):  # one byte every 0.2 s: never idle long enough to time out
+                if stop.is_set():
+                    return
+                try:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.2)
+
+        def do_GET(self) -> None:
+            self._trickle()
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self._trickle()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}/sink"
+    finally:
+        stop.set()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_webhook_total_deadline_on_trickle(slow_server: str, lines: list[bytes]) -> None:
+    s = WebhookSink(slow_server, TOKEN, timeout=1.0, retry_delays=())
+    t = time.monotonic()
+    with pytest.raises(SinkError, match="timed out"):
+        s.head()
+    assert time.monotonic() - t < 3
+    t = time.monotonic()
+    with pytest.raises(SinkError, match="timed out"):
+        s.deliver(lines[0])
+    assert time.monotonic() - t < 3
+
+
+# ---------- token validation ----------
+
+
+@pytest.mark.parametrize("bad", ["abc123\r\n", "has space", "tab\there", "caf\u00e9", "nul\x00x"])
+def test_bad_token_refused_without_echo(bad: str, tmp_path: Path) -> None:
+    errors: list[str] = []
+    with pytest.raises(SinkConfigError, match="invalid characters") as e1:
+        WebhookSink("https://siem.example/r", bad)
+    errors.append(str(e1.value))
+    errors.append(repr(e1.value))
+    env = {sink.SINK_ENV: "https://siem.example/r", sink.SINK_TOKEN_ENV: bad}
+    with pytest.raises(SinkConfigError) as e2:
+        sink.sink_from_config(env=env)
+    errors.append(str(e2.value))
+    errors.append(repr(e2.value))
+    with pytest.raises(SinkConfigError) as e3:
+        sink.parse_sink_url("https://siem.example/r", bad)
+    errors.append(str(e3.value))
+    for text in errors:
+        assert bad not in text
+        assert repr(bad) not in text
+        assert bad.strip() not in text
+
+
+def test_good_token_never_in_repr() -> None:
+    s = WebhookSink("https://siem.example/r", TOKEN)
+    assert TOKEN not in repr(s) and TOKEN not in str(s)
+    cfg = sink.sink_from_config(
+        env={sink.SINK_ENV: "https://x.example/r", sink.SINK_TOKEN_ENV: TOKEN}
+    )
+    assert cfg is not None and TOKEN not in repr(cfg)

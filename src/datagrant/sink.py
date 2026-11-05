@@ -12,11 +12,14 @@ redacted from every error message.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
+import re
+import ssl
 import stat
+import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
@@ -115,6 +118,15 @@ class FileSink:
         except ReceiptError as exc:
             raise SinkError(f"sink file: {exc}") from None
 
+    @staticmethod
+    def _line_at(fd: int, seq: int) -> bytes | None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(fd), "rb") as f:
+            for i, raw in enumerate(f):
+                if i == seq:
+                    return raw.rstrip(b"\n")
+        return None
+
     def deliver(self, line: bytes) -> None:
         line = _check_line(line)
         seq = _line_seq(line)
@@ -123,8 +135,10 @@ class FileSink:
             with _locked(fd):
                 last = self._last(fd)
                 next_seq = 0 if last is None else _line_seq(last) + 1
-                if last is not None and seq == next_seq - 1 and line == last:
-                    return
+                if seq < next_seq:
+                    if self._line_at(fd, seq) == line:
+                        return  # identical resend: idempotent
+                    raise SinkError(f"sink already has a different receipt at seq {seq}")
                 if seq != next_seq:
                     raise SinkError(f"sink expects seq {next_seq}, got {seq}")
                 data = line + b"\n"
@@ -150,13 +164,21 @@ class FileSink:
         return _line_seq(last), hashlib.sha256(last).hexdigest()
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None  # never follow redirects (would resend the token elsewhere)
+def _check_token(token: str | None) -> str | None:
+    if not token:
+        return None
+    if not re.fullmatch(r"[\x21-\x7e]+", token):
+        raise SinkConfigError("receipt sink token contains invalid characters")
+    return token
 
 
 class WebhookSink:
-    """POST signed lines as NDJSON to ``url``; read the head from ``url/head``."""
+    """POST signed lines as NDJSON to ``url``; read the head from ``url/head``.
+
+    Each request gets a 5 s connect timeout and a hard wall-clock limit of
+    ``timeout`` seconds (default 10) for the whole exchange. Redirects are never
+    followed, so the token can't be sent anywhere else.
+    """
 
     def __init__(
         self,
@@ -166,31 +188,75 @@ class WebhookSink:
         timeout: float = TOTAL_TIMEOUT,
         retry_delays: Sequence[float] = RETRY_DELAYS,
     ) -> None:
+        self._token = _check_token(token)
         self.url = url.rstrip("/")
-        self._token = token or None
         self.name = self.url
         self.timeout = timeout
         self.retry_delays = tuple(retry_delays)
-        self._opener = urllib.request.build_opener(_NoRedirect)
 
     def __repr__(self) -> str:
         return f"WebhookSink({self.url!r}, token={'***' if self._token else None})"
 
-    def _request(self, method: str, url: str, body: bytes | None) -> tuple[int, bytes]:
-        headers = {"User-Agent": "datagrant-sink"}
-        if body is not None:
-            headers["Content-Type"] = "application/x-ndjson"
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    def _exchange(
+        self, method: str, url: str, body: bytes | None, deadline: float
+    ) -> tuple[int, bytes]:
+        u = urllib.parse.urlsplit(url)
+        host, port = u.hostname or "", u.port
+        path = u.path or "/"
+        conn: http.client.HTTPConnection
+        connect = min(CONNECT_TIMEOUT, self.timeout)
+        if u.scheme == "https":
+            ctx = ssl.create_default_context()
+            conn = http.client.HTTPSConnection(host, port, timeout=connect, context=ctx)
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=connect)
+        # Hard stop: close the socket at the deadline, whatever phase we're in.
+        watchdog = threading.Timer(max(deadline - time.monotonic(), 0), conn.close)
+        watchdog.daemon = True
+        watchdog.start()
         try:
-            timeout = min(CONNECT_TIMEOUT, self.timeout)
-            with self._opener.open(req, timeout=timeout) as resp:  # nosec B310
-                return resp.status, resp.read(MAX_LINE_BYTES + 1)
-        except urllib.error.HTTPError as exc:
-            return exc.code, b""
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            reason = getattr(exc, "reason", exc)
+            conn.connect()
+
+            def remaining() -> float:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("timed out")
+                return left
+
+            if conn.sock is None:
+                raise OSError("not connected")
+            conn.sock.settimeout(remaining())
+            headers = {"User-Agent": "datagrant-sink", "Host": u.netloc}
+            if body is not None:
+                headers["Content-Type"] = "application/x-ndjson"
+            if self._token:
+                headers["Authorization"] = f"Bearer {self._token}"
+            conn.request(method, path, body=body, headers=headers)
+            conn.sock.settimeout(remaining())
+            resp = conn.getresponse()
+            buf = b""
+            while len(buf) <= MAX_LINE_BYTES:
+                if conn.sock is not None:
+                    conn.sock.settimeout(remaining())
+                chunk = resp.read1(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                remaining()
+            remaining()
+            return resp.status, buf
+        finally:
+            watchdog.cancel()
+            conn.close()
+
+    def _request(self, method: str, url: str, body: bytes | None) -> tuple[int, bytes]:
+        deadline = time.monotonic() + self.timeout
+        try:
+            return self._exchange(method, url, body, deadline)
+        except (OSError, http.client.HTTPException, ValueError, AttributeError) as exc:
+            reason = (
+                "timed out" if time.monotonic() >= deadline else (str(exc) or type(exc).__name__)
+            )
             raise SinkError(
                 _redact(f"sink {self.url} unreachable: {reason}", self._token)
             ) from None
