@@ -12,6 +12,7 @@ idempotent per ``seq`` (an identical resend is a no-op).
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import stat
@@ -21,7 +22,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from datagrant.receipt import ReceiptError, _locked
+from datagrant.receipt import MAX_LINE_BYTES, ReceiptError, _locked
 from datagrant.sink import ReceiptSink, SinkError, WebhookSink, _line_seq
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
@@ -172,3 +173,99 @@ def _flush(log: str | Path, sink: ReceiptSink) -> FlushResult:
             return FlushResult(done, len(lines) - done, str(exc))
         done += 1
     return FlushResult(done, 0, None)
+
+
+@dataclass(frozen=True)
+class SinkCheck:
+    ok: bool
+    sink_seq: int | None
+    sink_head_sha256: str | None
+    undelivered: int | None
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "sink_seq": self.sink_seq,
+            "sink_head_sha256": self.sink_head_sha256,
+            "undelivered": self.undelivered,
+        }
+
+
+def _line_hash_at(log: str | Path, seq: int) -> str:
+    """SHA-256 of the line at ``seq``, streaming with the same per-line limit as verify."""
+    fd = os.open(log, os.O_RDONLY | _NOFOLLOW)
+    with os.fdopen(fd, "rb") as f:
+        for i in range(seq + 1):
+            raw = f.readline(MAX_LINE_BYTES + 2)
+            if not raw.endswith(b"\n"):
+                raise ReceiptError(
+                    "line too long" if len(raw) > MAX_LINE_BYTES else "receipt log ended early"
+                )
+            if len(raw) - 1 > MAX_LINE_BYTES:
+                raise ReceiptError("line too long")
+            if i == seq:
+                return hashlib.sha256(raw[:-1]).hexdigest()
+    raise ReceiptError("receipt log ended early")  # pragma: no cover - loop always returns
+
+
+def compare_with_sink(log: str | Path, sink: ReceiptSink, local_count: int) -> SinkCheck:
+    """Compare the already verified local chain (``local_count`` receipts) with the sink head.
+
+    Read-only: never writes the cursor or the sink. An unreadable or corrupt
+    cursor fails closed, since the acknowledgements can't be checked.
+    """
+    n = local_count
+    try:
+        acked = read_cursor(log)
+    except ReceiptError as exc:
+        return SinkCheck(False, None, None, None, f"outbox cursor unusable: {exc}")
+    if acked >= n:
+        return SinkCheck(
+            False,
+            None,
+            None,
+            None,
+            f"outbox cursor is at seq {acked} but the local log has {n} receipt(s)"
+            " (local log truncated or replaced)",
+        )
+    try:
+        head = sink.head()
+    except SinkError as exc:
+        return SinkCheck(False, None, None, None, f"remote check could not run: {exc}")
+    seq = head[0] if head is not None else None
+    if acked >= 0 and (seq is None or seq < acked):
+        return SinkCheck(
+            False,
+            seq,
+            head[1] if head else None,
+            None,
+            f"sink is behind its own acknowledgements (sink lost or replaced:"
+            f" acked seq {acked}, sink head {'none' if seq is None else seq})",
+        )
+    if head is None:
+        return SinkCheck(True, None, None, n)
+    seq, remote = head
+    if seq >= n:
+        return SinkCheck(
+            False,
+            seq,
+            remote,
+            None,
+            f"sink is ahead: sink head is seq {seq}, local log has {n} receipt(s)"
+            " (local log truncated or replaced)",
+        )
+    try:
+        local = _line_hash_at(log, seq)
+    except (OSError, ReceiptError) as exc:
+        msg = exc.strerror if isinstance(exc, OSError) else str(exc)
+        return SinkCheck(False, seq, remote, None, f"cannot read receipt log: {msg}")
+    if local != remote:
+        return SinkCheck(
+            False,
+            seq,
+            remote,
+            None,
+            f"chains differ at seq {seq}: local {local}, sink {remote}"
+            " (local log or sink rewritten)",
+        )
+    return SinkCheck(True, seq, remote, n - 1 - seq)
