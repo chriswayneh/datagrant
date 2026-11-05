@@ -4,7 +4,8 @@
 
 | Version | Supported |
 | --- | :---: |
-| 0.1.x | ✅ |
+| 0.2.x | ✅ |
+| 0.1.x | ❌ (upgrade to 0.2.x; note the [hash output change](docs/release-notes/v0.2.0.md)) |
 
 datagrant is pre-1.0. Read the [security model and known limits](docs/security.md) before using it with real regulated data.
 

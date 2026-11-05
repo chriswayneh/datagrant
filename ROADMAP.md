@@ -7,10 +7,9 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | Version | Theme | Status |
 | --- | --- | :---: |
 | v0.1.0 | Expiring, masked, receipted Postgres access from the CLI | ✅ Released |
-| v0.2.0 | Tighter privacy controls | Planned |
-| v0.3.0 | Off-host evidence | Planned |
-| v0.4.0 | Real identity | Planned |
-| v0.5.0+ | More warehouses | Planned |
+| v0.2.0 | Tighter privacy controls and off-host evidence | Ready, release pending |
+| v0.3.0 | Real identity | Planned |
+| v0.4.0+ | More warehouses | Planned |
 
 ## v0.1.0: done
 
@@ -25,14 +24,19 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | U7 | One-command demo, run in CI | ✅ |
 | U8 | Docs and release prep | ✅ |
 
+## v0.2.0: ready, release pending
+
+| Item | What | Status |
+| --- | --- | :---: |
+| Per-dataset hash scope | Stop same-key hashes from linking values across datasets (`hash_scope`). Changes hash outputs from v0.1.0. | ✅ |
+| `filter_columns` | Let a row filter use a column without exposing it in the view. | ✅ |
+| External receipt sink | Webhook and `file://` sinks, outbox, `receipts push`, `receipts verify --sink`. Design: [docs/design/receipt-sink.md](docs/design/receipt-sink.md). | ✅ |
+
 ## Next
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| Per-dataset hash scope | Stop same-key hashes from linking values across datasets. Done on main. | v0.2.0 |
-| `filter_columns` | Let a row filter use a column without exposing it in the view. Done on main. | v0.2.0 |
-| External receipt sink | Ship receipts off the host (object store with retention, SIEM) so tail truncation is caught without a manually recorded head. Done on main: webhook and `file://` sinks, outbox, `receipts push`, `receipts verify --sink`. Design: [docs/design/receipt-sink.md](docs/design/receipt-sink.md). | v0.3.0 |
-| OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. | v0.4.0 |
-| Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.5.0+ |
+| OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. | v0.3.0 |
+| Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.4.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.

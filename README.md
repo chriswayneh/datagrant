@@ -14,7 +14,7 @@
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
 
-**Status:** [v0.1.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.1.0) is released. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Status:** v0.2.0 is ready, release pending ([release notes](docs/release-notes/v0.2.0.md)); v0.1.0 is the latest published release. It changes `hash` outputs from v0.1.0; see the notes before upgrading. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
 > **A note on this repo:** This GitHub account is my personal playground, where I experiment, learn, and build security tools in the open. Projects here are personal work, not a product or company offering.
 
@@ -43,14 +43,14 @@ See [docs/demo.md](docs/demo.md) for every step. The GIF above replays real outp
 
 ## Features
 
-Only features that ship in v0.1.0 (verified against the CLI and source):
+Only features that ship in v0.2.0 (verified against the CLI and source):
 
 - [x] **Deny-by-default policy.** One YAML file decides who can request what, and for how long. Unknown keys are errors; evaluation refuses anything not allowed explicitly.
 - [x] **Narrow grants.**
   - [x] Column allow-list: only columns listed in the policy can be requested.
   - [x] Optional required row filters (the request must exactly match a policy entry).
-  - [x] `filter_columns`: filter rows on a column without exposing it (unreleased, on main).
-  - [x] Five masking modes per column: `passthrough`, `redact`, keyed HMAC `hash`, `partial`, or `null`. Hashes are scoped per dataset (unreleased, on main).
+  - [x] `filter_columns`: filter rows on a column without exposing it (v0.2.0).
+  - [x] Five masking modes per column: `passthrough`, `redact`, keyed HMAC `hash`, `partial`, or `null`. Hashes are scoped per dataset (v0.2.0).
 - [x] **Expiring Postgres access.**
   - [x] A masked `security_barrier` view plus a `LOGIN` role with `VALID UNTIL`.
   - [x] One-time password shown once; for two-person mode the database stores only the SCRAM verifier until approval.
@@ -58,9 +58,9 @@ Only features that ship in v0.1.0 (verified against the CLI and source):
 - [x] **Revoke closes sessions.** Lock the role out (`NOLOGIN`), terminate its backends, then drop the view and role.
 - [x] **Two-person approval.** A different person in an `approvers` group must approve; self-approval is refused. Policy is re-checked at approval time.
 - [x] **Signed, hash-chained receipts.** ed25519 signatures in an append-only JSONL log. Verify with `datagrant receipts verify` (optional `--expect-head` to catch truncation).
-- [x] **External receipt sink** (unreleased, on main). Copy every receipt to an HTTPS webhook or an append-only file elsewhere, with an outbox and `receipts push` for outages, an optional `required` mode, and `receipts verify --sink` to catch local truncation or rewrites.
+- [x] **External receipt sink** (v0.2.0). Copy every receipt to an HTTPS webhook or an append-only file elsewhere, with an outbox and `receipts push` for outages, an optional `required` mode, and `receipts verify --sink` to catch local truncation or rewrites.
 - [x] **Dry run by default.** Every command that changes something reports what it would do and changes nothing unless you pass `--apply`.
-- [x] **Honest CLI exit codes.** `0` ok, `1` denied or failed, `2` usage, `3` receipt not written, `4` revoke failed. Add `--json` for machine-readable output.
+- [x] **Honest CLI exit codes.** `0` ok, `1` denied or failed, `2` usage, `3` receipt not written, not delivered to the sink, or unusable outbox, `4` revoke failed. Add `--json` for machine-readable output.
 
 ## Architecture
 
@@ -119,10 +119,11 @@ See the [policy reference](docs/policy.md) for the policy format and the [runboo
 | `grant list`, `grant status ID` | List grants or show one grant |
 | `revoke GRANT_ID` | End access now and close open sessions |
 | `sweep` | Revoke expired grants and expire old requests |
-| `receipts verify` | Check every receipt signature and the hash chain |
+| `receipts verify` | Check every receipt signature and the hash chain; with `--sink`, compare against the external sink |
+| `receipts push` | Send receipts still pending in the outbox to the external sink |
 | `preflight` | Set up datagrant's tables and warn about risky PUBLIC permissions |
 
-Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error, `3` when a receipt wasn't written, and `4` when a revoke failed. Add `--json` to any command for JSON output. See the full [CLI reference](docs/cli.md).
+Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error, `3` when a receipt wasn't written, wasn't delivered to the sink, or the outbox is unusable, and `4` when a revoke failed. Add `--json` to any command for JSON output. See the full [CLI reference](docs/cli.md).
 
 ## Limits
 
@@ -130,10 +131,10 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 
 - **Identity is not authentication.** The requester is the operating system user, or whoever `--as-user` names. Anyone with the admin connection string can claim any name, so real two-person control needs datagrant behind a service that signs people in and holds that connection string.
 - **Row filters reveal what they match.** A column listed only in `filter_columns` is hidden, but the grantee knows every row matches the filter.
-- **Masking still shows some shape.** You can see whether a value is empty, and partial and hash masks show its length.
+- **Masking still shows some shape.** You can see whether a value is empty (NULL stays NULL under `partial` and `hash`), and `partial` keeps its length.
 - **Hashed values can be matched** across grants on the same dataset (or datasets sharing a `hash_scope`), but not across datasets.
-- **Deleting the newest receipts** is only caught with an external receipt sink and `receipts verify --sink` (unreleased, on main), or if you saved the latest hash somewhere else and check it with `--expect-head`. Receipts not yet delivered to the sink can't be checked off-host.
-- **On Windows, the receipt log isn't locked,** so only one process should write to it at a time.
+- **Deleting the newest receipts** is only caught with an external receipt sink and `receipts verify --sink` (v0.2.0), or if you saved the latest hash somewhere else and check it with `--expect-head`. Receipts not yet delivered to the sink can't be checked off-host.
+- **On Windows, the receipt log, the file sink and outbox flushes aren't locked,** so only one process should write at a time.
 - **Full statement logging** (`log_statement = 'all'`) on the admin connection would record grant SQL, including key values. Turn it off for the datagrant admin role.
 
 ## Documentation
