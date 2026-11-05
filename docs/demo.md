@@ -10,25 +10,29 @@ make demo-down     # only needed if a run was interrupted; the demo tears down o
 
 ## What happens
 1. `scripts/demo.sh` generates a random Postgres password and starts `postgres:16` (digest-pinned) from `scripts/demo-compose.yml`, bound to `127.0.0.1:55439` only. A `trap` runs `docker compose down -v` on exit, removing the containers and the volume.
-2. `scripts/demo.py` creates a temp dir for keys, receipts and two policy files (auto and two-person), then:
+2. `scripts/demo.py` creates a temp dir for keys, receipts, an `offhost/` folder standing in for another host, and two policy files (auto and two-person). The policy has two datasets over the same table: `clinic` (filters on `region` through `filter_columns`, so `region` is never in the view) and `research` (its own `hash_scope`). Then it:
    1. seeds `dg_demo.patients` (8 rows such as `Fake Patient 001`, SSN `000-00-0001` (never issued), phone `555-01xx-…` (fictional range)) and prints the raw admin view;
    2. runs `keys init --apply`, `policy check` and `preflight --apply`;
    3. runs `request` with no flag: a dry run showing plan SQL with `PASSWORD '<redacted>'` and no password;
-   4. runs `request --apply` (auto): alice connects and sees 4 west rows with name redacted, SSN HMAC-hashed, phone partial and birth date NULL; reading the raw table is refused;
-   5. two-person: the request goes pending; alice approving her own request is refused (exit 1); carol approves; alice logs in with the password she got at request time;
-   6. `revoke --apply` while alice's session is open: the session is terminated;
-   7. the second grant's expiry is fast-forwarded (a demo shortcut), then `sweep` (dry run) and `sweep --apply`;
-   8. `receipts verify` passes (4 receipts: issued ×2, revoked, expired), then again with `--expect-head <head>`.
+   4. runs `request --apply` (auto): alice connects and sees 4 west rows with name redacted, SSN HMAC-hashed, phone partial and birth date NULL, and the view has no `region` column; reading the raw table is refused;
+   5. `hash_scope`: alice gets a grant on the `research` dataset; the same patient's SSN hashes to a different value there; that grant is revoked;
+   6. two-person: the request goes pending; alice approving her own request is refused (exit 1); carol approves; alice logs in with the password she got at request time;
+   7. `revoke --apply` while alice's session is open: the session is terminated;
+   8. the second grant's expiry is fast-forwarded (a demo shortcut), then `sweep` (dry run) and `sweep --apply`;
+   9. `receipts verify` passes (6 receipts: issued ×3, revoked ×2, expired), then again with `--expect-head <head>`;
+   10. external receipt sink (`file://` into `offhost/`): `receipts push` (dry run, 6 pending), `receipts push --apply`, and `receipts verify --sink` passes. Then the newest local receipt is deleted: `receipts verify --sink` fails with exit 1 on the local outbox cursor (`outbox cursor is at seq 5 but the local log has 5 receipt(s)`). The local cursor is deleted too, as a careful attacker would, and `receipts verify --sink` still fails with exit 1, this time from the sink itself: `sink is ahead: sink head is seq 5, local log has 5 receipt(s) (local log truncated or replaced)`.
 3. On exit the temp dir (keys, receipts) and schema `dg_demo` are removed.
 
 Expected output ends with:
 
 ```text
 DEMO MARKER: masked-rows-ok
+DEMO MARKER: hash-scope-ok
 DEMO MARKER: two-person-ok
 DEMO MARKER: revoke-ok
 DEMO MARKER: sweep-ok
 DEMO MARKER: receipts-ok
+DEMO MARKER: sink-ok
 
 DEMO OK
 ```
