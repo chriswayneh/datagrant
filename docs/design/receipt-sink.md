@@ -26,7 +26,7 @@ Out of scope: protecting against an operator who holds the admin DSN and the key
 | HTTPS webhook | As strong as the receiver (SIEM, log service, function writing to WORM storage) | Stdlib `urllib` and `ssl` only | Low | **Recommended built-in** |
 | Postgres table owned by another role | Good if that role is not reachable with the admin DSN | psycopg (already a dependency) | Low to medium | Deferred: often the same server and the same administrators, so weaker in practice than it looks |
 
-## Recommendation (next minor release)
+## Recommendation (v0.3.0)
 
 1. Add a small **pluggable sink interface** in datagrant (`deliver(line)` and `head()`), selected by URL scheme.
 2. Ship **one built-in sink: HTTPS webhook** on the standard library. It POSTs each signed receipt line and reads the remote head back. Any SIEM, log service or WORM bucket sits behind a receiver the user controls.
@@ -52,7 +52,7 @@ class ReceiptSink(Protocol):
 - `GET <url>/head` returns `{"seq": <int>, "head_sha256": "<hex>"}`, or 404 if empty.
 - HTTPS only (plain `http://` refused except `http://127.0.0.1` and `http://localhost`, for tests). Certificates verified with the system store; no option to turn verification off.
 - Optional bearer token from the environment (below). Timeouts: 5 s connect, 10 s total per request.
-- The receiver should check the signature with the exported public key (`datagrant export-pubkey`) and the chain link before storing. A reference receiver is a later, optional example, not part of datagrant.
+- The receiver should check the signature with the exported public key (`datagrant keys export-pubkey`) and the chain link before storing. A reference receiver is a later, optional example, not part of datagrant.
 
 ## Delivery semantics
 
