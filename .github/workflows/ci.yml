@@ -68,7 +68,7 @@ jobs:
         run: ./scripts/demo.sh | tee demo.log
       - name: assert demo markers
         run: |
-          for m in masked-rows-ok two-person-ok revoke-ok sweep-ok receipts-ok; do
+          for m in masked-rows-ok hash-scope-ok two-person-ok revoke-ok sweep-ok receipts-ok sink-ok; do
             grep -q "DEMO MARKER: $m" demo.log || { echo "missing marker $m"; exit 1; }
           done
           grep -q '^DEMO OK$' demo.log
@@ -91,7 +91,7 @@ jobs:
       - name: assert demo markers
         shell: bash
         run: |
-          for m in masked-rows-ok two-person-ok revoke-ok sweep-ok receipts-ok; do
+          for m in masked-rows-ok hash-scope-ok two-person-ok revoke-ok sweep-ok receipts-ok sink-ok; do
             grep -q "DEMO MARKER: $m" demo.log || { echo "missing marker $m"; exit 1; }
           done
           grep -q '^DEMO OK$' demo.log
