@@ -170,7 +170,8 @@ def run(dsn: str, work: Path) -> None:
         dg("policy", "check", str(auto))
         dg("preflight", "--apply")
 
-        sink = (work / "offhost" / "receipts.jsonl").as_uri()  # stands in for another host
+        (work / "offhost").mkdir(mode=0o700)  # stands in for storage on another host
+        sink = (work / "offhost" / "receipts.jsonl").as_uri()
 
         step("request as alice: dry run (default) changes nothing")
         d = dg("request", "--policy", str(auto), "--as-user", "alice", *req)
