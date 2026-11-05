@@ -191,3 +191,60 @@ def test_bad_token_env_is_usage(
     monkeypatch.setenv("DATAGRANT_RECEIPT_SINK_TOKEN", "abc 123\r\n")
     assert main(["receipts", "push"]) == EXIT_USAGE
     assert "abc 123" not in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no flush lock on Windows (single writer)")
+def test_concurrent_flushes_keep_cursor_monotonic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    log = _log(tmp_path, 6)
+    seen: list[int] = []
+    real = outbox.write_cursor
+
+    def spy(lg: Path, seq: int) -> None:
+        seen.append(seq)
+        real(lg, seq)
+
+    monkeypatch.setattr(outbox, "write_cursor", spy)
+    s = FileSink(tmp_path / "remote.jsonl")
+    errs: list[str | None] = []
+    ts = [
+        threading.Thread(target=lambda: errs.append(outbox.flush(log, s).error)) for _ in range(4)
+    ]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert errs == [None] * 4
+    assert outbox.read_cursor(log) == 5
+    assert seen == list(range(6))  # locked: each seq written once, in order
+    assert (tmp_path / "remote.jsonl").read_bytes() == log.read_bytes()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".sink.")]
+
+
+def test_required_revoke_failure_says_still_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+    from types import SimpleNamespace
+
+    from datagrant import cli
+    from datagrant.pg.revoke import RevokeResult
+    from datagrant.sink import SinkConfig
+
+    log = _log(tmp_path, 1)
+    bad = Flaky(tmp_path / "remote.jsonl", {0})
+    args = argparse.Namespace(json=True, _remote=SinkConfig(bad, "required"))
+    ctx = cli.Ctx(args, print)
+    monkeypatch.setattr(
+        "datagrant.pg.revoke.revoke",
+        lambda *a, **k: RevokeResult("abcdef012345", "failed", 0, "db down"),
+    )
+    with pytest.raises(cli.CliError) as ei:
+        cli._deliver_issued(
+            ctx, None, SimpleNamespace(grant_id="abcdef012345"), SimpleNamespace(log=log)
+        )
+    assert ei.value.code == EXIT_RECEIPT
+    assert "grant STILL ACTIVE until the next sweep" in str(ei.value)

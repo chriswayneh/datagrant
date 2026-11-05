@@ -15,10 +15,13 @@ import copy
 import json
 import os
 import stat
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from datagrant.receipt import ReceiptError
+from datagrant.receipt import ReceiptError, _locked
 from datagrant.sink import ReceiptSink, SinkError, WebhookSink, _line_seq
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
@@ -77,17 +80,20 @@ def read_cursor(log: str | Path) -> int:
 def write_cursor(log: str | Path, seq: int) -> None:
     """Atomically replace the cursor (temp file 0600, O_EXCL, no symlinks, fsync, rename)."""
     p = cursor_path(log)
-    tmp = p.with_name(p.name + ".tmp")
     try:
-        tmp.unlink(missing_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
+        fd, name = tempfile.mkstemp(dir=p.parent, prefix=".sink.")  # unique, O_EXCL, 0600
+        tmp = Path(name)
         try:
+            os.chmod(tmp, 0o600)
             data = json.dumps({"acked_seq": seq}).encode() + b"\n"
             if os.write(fd, data) != len(data):
                 raise ReceiptError("short write to sink cursor")
             os.fsync(fd)
-        finally:
+        except BaseException:
             os.close(fd)
+            tmp.unlink(missing_ok=True)
+            raise
+        os.close(fd)
         os.replace(tmp, p)
     except OSError as exc:
         raise ReceiptError(f"cannot write sink cursor {p}: {exc.strerror}") from None
@@ -123,8 +129,35 @@ def quick(sink: ReceiptSink) -> ReceiptSink:
     return sink
 
 
+@contextmanager
+def flush_lock(log: str | Path) -> Iterator[None]:
+    """Serialize flushes on ``<receipt-log>.sink.lock`` (no lock on Windows, like the log)."""
+    p = Path(log)
+    lock = p.with_name(p.name + ".sink.lock")
+    try:
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | _NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise ReceiptError(f"cannot open sink lock {lock}: {exc.strerror}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ReceiptError(f"sink lock {lock} is not a regular file")
+        with _locked(fd):
+            yield
+    finally:
+        os.close(fd)
+
+
 def flush(log: str | Path, sink: ReceiptSink) -> FlushResult:
-    """Deliver every pending line in order; stop at the first failure."""
+    """Deliver every pending line in order, under the flush lock; stop at the first failure."""
+    try:
+        with flush_lock(log):
+            return _flush(log, sink)
+    except ReceiptError as exc:
+        return FlushResult(0, 0, str(exc))
+
+
+def _flush(log: str | Path, sink: ReceiptSink) -> FlushResult:
     try:
         lines = pending_lines(log)
     except ReceiptError as exc:
@@ -134,8 +167,7 @@ def flush(log: str | Path, sink: ReceiptSink) -> FlushResult:
         try:
             sink.deliver(ln)
             seq = _line_seq(ln)
-            if seq > read_cursor(log):  # never move backwards under a concurrent flush
-                write_cursor(log, seq)
+            write_cursor(log, seq)
         except (SinkError, ReceiptError) as exc:
             return FlushResult(done, len(lines) - done, str(exc))
         done += 1

@@ -141,6 +141,19 @@ def _warn(ctx: Ctx, msg: str) -> None:
     print(f"datagrant: warning: {_hide_token(msg)}", file=sys.stderr)
 
 
+def _check_outbox(ctx: Ctx, local: Any) -> None:
+    """Before issuing: the outbox must be sound (cursor private, no symlink, not ahead)."""
+    from datagrant.outbox import pending_lines
+    from datagrant.receipt import ReceiptError
+
+    if _remote(ctx.args) is None:
+        return
+    try:
+        pending_lines(local.log)
+    except ReceiptError as exc:
+        raise CliError(f"receipt outbox unusable, not issuing: {exc}", EXIT_RECEIPT) from None
+
+
 def _deliver_issued(ctx: Ctx, conn: Any, plan: Any, local: Any) -> None:
     """After an issued receipt: flush the outbox. Required mode: no delivery, no access."""
     from datagrant.outbox import flush
@@ -159,11 +172,13 @@ def _deliver_issued(ctx: Ctx, conn: Any, plan: Any, local: Any) -> None:
 
     r = revoke(conn, plan.grant_id, "manual", local)
     flush(local.log, quick(remote.sink))  # best effort for the revoked receipt
+    state = (
+        "grant revoked"
+        if r.outcome == "revoked"
+        else f"revoke {r.outcome} ({r.error}): grant STILL ACTIVE until the next sweep"
+    )
     raise CliError(
-        _hide_token(
-            f"grant {plan.grant_id}: receipt not delivered to sink ({res.error});"
-            f" grant revoked: {r.outcome}"
-        ),
+        _hide_token(f"grant {plan.grant_id}: receipt not delivered to sink ({res.error}); {state}"),
         EXIT_RECEIPT,
     )
 
@@ -321,6 +336,7 @@ def cmd_request(ctx: Ctx) -> int:
             )
             return EXIT_OK
         sink = _sink(a)  # no signing key, no grant
+        _check_outbox(ctx, sink)
         ensure_state(conn)
         password = new_password()
         if two_person:
@@ -433,6 +449,7 @@ def cmd_approve(ctx: Ctx) -> int:
             )
             return EXIT_OK
         sink = _sink(a)
+        _check_outbox(ctx, sink)
         plan = build_plan(
             decision,
             pending.request,

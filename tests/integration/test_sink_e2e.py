@@ -126,7 +126,7 @@ def test_webhook_required_failure_revokes_grant(
     st.status = 503
     code, out = _grant(env["auto"], "--receipt-sink", url, "--receipt-sink-mode", "required")
     assert code == EXIT_RECEIPT
-    assert "grant revoked: revoked" in out["error"] and TOKEN not in out["error"]
+    assert out["error"].endswith("; grant revoked") and TOKEN not in out["error"]
     code, lst = run("grant", "list", "--all")
     assert [x["status"] for x in lst["grants"]] == ["revoked"]
     assert _events() == ["issued", "revoked"]
@@ -164,3 +164,19 @@ def test_two_person_approve_delivers(env: dict[str, Path], tmp_path: Path) -> No
     assert code == EXIT_OK
     assert remote.read_bytes() == _log().read_bytes()
     assert _events() == ["issued"]
+
+
+@pytest.mark.parametrize("problem", ["ahead", "loose"])
+def test_bad_outbox_refuses_before_issuing(
+    env: dict[str, Path], tmp_path: Path, problem: str
+) -> None:
+    sink = ("--receipt-sink", (tmp_path / "remote.jsonl").as_uri())
+    cur = outbox.cursor_path(_log())
+    cur.parent.mkdir(parents=True, exist_ok=True)
+    cur.write_text('{"acked_seq": 999}' if problem == "ahead" else '{"acked_seq": -1}')
+    cur.chmod(0o600 if problem == "ahead" else 0o644)
+    for mode in ("best-effort", "required"):
+        code, out = _grant(env["auto"], *sink, "--receipt-sink-mode", mode)
+        assert code == EXIT_RECEIPT and "not issuing" in out["error"]
+    assert run("grant", "list", "--all")[1]["grants"] == []
+    assert not _log().exists() or _log().read_text() == ""
