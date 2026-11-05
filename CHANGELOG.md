@@ -7,9 +7,12 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 ### Added
 - Per-dataset hash scope. Each dataset now hashes under its own key, derived from the hash key file and the dataset's `hash_scope` (default: the dataset name). Datasets that set the same `hash_scope` share hashes, so values can still be joined across them on purpose.
 - `filter_columns` on a table: columns a row filter may use that are never in the grant view and can't be requested. Every filter column must be used by a row filter and may not also be in `columns`.
-- Receipt sink building blocks (`datagrant.sink`): a `ReceiptSink` interface, an HTTPS webhook sink (standard library only) and an append-only `file://` sink, with URL and mode validation. Not used by any command yet; see [the design](docs/design/receipt-sink.md).
-- Receipt sink delivery: `--receipt-sink` and `--receipt-sink-mode` (or `DATAGRANT_RECEIPT_SINK`, `DATAGRANT_RECEIPT_SINK_MODE`, token in `DATAGRANT_RECEIPT_SINK_TOKEN`) on `request`, `approve`, `revoke` and `sweep`. `required` mode revokes a grant whose `issued` receipt can't reach the sink (exit 3); revokes never wait on the sink. Undelivered receipts stay in an outbox (the local log plus a 0600 `<receipt-log>.sink` cursor) and `receipts push --apply` sends them.
-- `receipts verify --sink URL` (or `DATAGRANT_RECEIPT_SINK`) compares the local chain with the sink head, read-only: a sink ahead of the local log or a different hash at the same `seq` fails (exit 1), a sink behind reports how many receipts are not yet delivered. `--json` adds `sink_seq`, `sink_head_sha256` and `undelivered`.
+- External receipt sink ([design](docs/design/receipt-sink.md), [CLI](docs/cli.md#receipt-sink)). Every receipt can also go to an HTTPS webhook (standard library only) or an append-only `file://` sink.
+  - Configure with `--receipt-sink`, `--receipt-sink-mode` or `DATAGRANT_RECEIPT_SINK`, `DATAGRANT_RECEIPT_SINK_MODE`; the bearer token comes only from `DATAGRANT_RECEIPT_SINK_TOKEN` and is never printed. Invalid settings exit 2.
+  - `best-effort` (default) warns and keeps undelivered receipts in an outbox: the local log plus a 0600 `<receipt-log>.sink` cursor. `required` revokes a grant whose `issued` receipt can't be delivered (exit 3). `revoke` and `sweep` never wait on the sink.
+  - New grants are refused (exit 3) if the outbox cursor is unusable.
+  - New `receipts push` sends pending receipts (dry run unless `--apply`; exit 3 while any remain).
+  - `receipts verify --sink` compares the local chain with the sink head, read-only, and fails on a sink ahead, a hash mismatch, a sink behind its own acknowledgements, a bad cursor or an unreachable sink. `--json` adds `sink_seq`, `sink_head_sha256` and `undelivered`.
 
 ### Changed
 - **Hash outputs change.** `hash` values from v0.1.0 grants won't match new grants, because the key is now scoped per dataset. To compare against old outputs, re-issue the old grant. There is no setting that brings back the single unscoped key.

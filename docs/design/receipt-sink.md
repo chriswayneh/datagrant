@@ -1,6 +1,6 @@
 # Design: external receipt sink
 
-Status: proposed. Docs only; nothing here is implemented yet. Roadmap item: [External receipt sink](../../ROADMAP.md).
+Status: implemented on main (unreleased), in PRs #18, #19 and #20, documented in a follow-up docs PR. Differences from this proposal: `receipts push` is a dry run unless `--apply`, like the other commands that change things; `request` and `approve` also refuse (exit 3) when the outbox cursor is unusable; and `verify --sink` also fails when the sink is behind its own acknowledgements or the cursor is bad. The [CLI reference](../cli.md#receipt-sink) is authoritative. Roadmap item: [External receipt sink](../../ROADMAP.md).
 
 ## Problem
 

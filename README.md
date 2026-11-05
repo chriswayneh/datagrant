@@ -58,6 +58,7 @@ Only features that ship in v0.1.0 (verified against the CLI and source):
 - [x] **Revoke closes sessions.** Lock the role out (`NOLOGIN`), terminate its backends, then drop the view and role.
 - [x] **Two-person approval.** A different person in an `approvers` group must approve; self-approval is refused. Policy is re-checked at approval time.
 - [x] **Signed, hash-chained receipts.** ed25519 signatures in an append-only JSONL log. Verify with `datagrant receipts verify` (optional `--expect-head` to catch truncation).
+- [x] **External receipt sink** (unreleased, on main). Copy every receipt to an HTTPS webhook or an append-only file elsewhere, with an outbox and `receipts push` for outages, an optional `required` mode, and `receipts verify --sink` to catch local truncation or rewrites.
 - [x] **Dry run by default.** Every command that changes something reports what it would do and changes nothing unless you pass `--apply`.
 - [x] **Honest CLI exit codes.** `0` ok, `1` denied or failed, `2` usage, `3` receipt not written, `4` revoke failed. Add `--json` for machine-readable output.
 
@@ -131,7 +132,7 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 - **Row filters reveal what they match.** A column listed only in `filter_columns` is hidden, but the grantee knows every row matches the filter.
 - **Masking still shows some shape.** You can see whether a value is empty, and partial and hash masks show its length.
 - **Hashed values can be matched** across grants on the same dataset (or datasets sharing a `hash_scope`), but not across datasets.
-- **Deleting the newest receipts** is only caught if you saved the latest hash somewhere else and check it with `--expect-head`.
+- **Deleting the newest receipts** is only caught with an external receipt sink and `receipts verify --sink` (unreleased, on main), or if you saved the latest hash somewhere else and check it with `--expect-head`. Receipts not yet delivered to the sink can't be checked off-host.
 - **On Windows, the receipt log isn't locked,** so only one process should write to it at a time.
 - **Full statement logging** (`log_statement = 'all'`) on the admin connection would record grant SQL, including key values. Turn it off for the datagrant admin role.
 
