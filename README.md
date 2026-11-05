@@ -14,7 +14,7 @@
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
 
-**Status:** v0.2.0 ([release notes](docs/release-notes/v0.2.0.md)). It changes `hash` outputs from v0.1.0; see the notes before upgrading. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Status:** v0.2.0 is ready, release pending ([release notes](docs/release-notes/v0.2.0.md)); v0.1.0 is the latest published release. It changes `hash` outputs from v0.1.0; see the notes before upgrading. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
 > **A note on this repo:** This GitHub account is my personal playground, where I experiment, learn, and build security tools in the open. Projects here are personal work, not a product or company offering.
 
@@ -60,7 +60,7 @@ Only features that ship in v0.2.0 (verified against the CLI and source):
 - [x] **Signed, hash-chained receipts.** ed25519 signatures in an append-only JSONL log. Verify with `datagrant receipts verify` (optional `--expect-head` to catch truncation).
 - [x] **External receipt sink** (v0.2.0). Copy every receipt to an HTTPS webhook or an append-only file elsewhere, with an outbox and `receipts push` for outages, an optional `required` mode, and `receipts verify --sink` to catch local truncation or rewrites.
 - [x] **Dry run by default.** Every command that changes something reports what it would do and changes nothing unless you pass `--apply`.
-- [x] **Honest CLI exit codes.** `0` ok, `1` denied or failed, `2` usage, `3` receipt not written, `4` revoke failed. Add `--json` for machine-readable output.
+- [x] **Honest CLI exit codes.** `0` ok, `1` denied or failed, `2` usage, `3` receipt not written, not delivered to the sink, or unusable outbox, `4` revoke failed. Add `--json` for machine-readable output.
 
 ## Architecture
 
@@ -123,7 +123,7 @@ See the [policy reference](docs/policy.md) for the policy format and the [runboo
 | `receipts push` | Send receipts still pending in the outbox to the external sink |
 | `preflight` | Set up datagrant's tables and warn about risky PUBLIC permissions |
 
-Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error, `3` when a receipt wasn't written or delivered to a sink (see the CLI reference), and `4` when a revoke failed. Add `--json` to any command for JSON output. See the full [CLI reference](docs/cli.md).
+Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error, `3` when a receipt wasn't written, wasn't delivered to the sink, or the outbox is unusable, and `4` when a revoke failed. Add `--json` to any command for JSON output. See the full [CLI reference](docs/cli.md).
 
 ## Limits
 

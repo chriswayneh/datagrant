@@ -7,7 +7,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | Version | Theme | Status |
 | --- | --- | :---: |
 | v0.1.0 | Expiring, masked, receipted Postgres access from the CLI | ✅ Released |
-| v0.2.0 | Tighter privacy controls and off-host evidence | ✅ Released |
+| v0.2.0 | Tighter privacy controls and off-host evidence | Ready, release pending |
 | v0.3.0 | Real identity | Planned |
 | v0.4.0+ | More warehouses | Planned |
 
@@ -24,7 +24,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | U7 | One-command demo, run in CI | ✅ |
 | U8 | Docs and release prep | ✅ |
 
-## v0.2.0: done
+## v0.2.0: ready, release pending
 
 | Item | What | Status |
 | --- | --- | :---: |
