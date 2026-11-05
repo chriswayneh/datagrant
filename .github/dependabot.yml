@@ -8,3 +8,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # Bumps the digest-pinned postgres:16 image in scripts/demo-compose.yml.
+  # CI service images in ci.yml are not covered by Dependabot; keep them in sync by hand.
+  - package-ecosystem: docker-compose
+    directory: /scripts
+    schedule:
+      interval: weekly
