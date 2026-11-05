@@ -121,6 +121,83 @@ def _sink(args: argparse.Namespace) -> Any:
     return ReceiptSink(log, key)
 
 
+def _remote(args: argparse.Namespace) -> Any:
+    """The external sink config (validated in main), or None."""
+    return getattr(args, "_remote", None)
+
+
+def _log_path(args: argparse.Namespace) -> Path:
+    return Path(args.receipt_log) if args.receipt_log else receipt.default_log_path()
+
+
+def _hide_token(text: str) -> str:
+    from datagrant.sink import SINK_TOKEN_ENV
+
+    tok = os.environ.get(SINK_TOKEN_ENV)
+    return text.replace(tok, "***") if tok else text
+
+
+def _warn(ctx: Ctx, msg: str) -> None:
+    print(f"datagrant: warning: {_hide_token(msg)}", file=sys.stderr)
+
+
+def _check_outbox(ctx: Ctx, local: Any) -> None:
+    """Before issuing: the outbox must be sound (cursor private, no symlink, not ahead)."""
+    from datagrant.outbox import pending_lines
+    from datagrant.receipt import ReceiptError
+
+    if _remote(ctx.args) is None:
+        return
+    try:
+        pending_lines(local.log)
+    except ReceiptError as exc:
+        raise CliError(f"receipt outbox unusable, not issuing: {exc}", EXIT_RECEIPT) from None
+
+
+def _deliver_issued(ctx: Ctx, conn: Any, plan: Any, local: Any) -> None:
+    """After an issued receipt: flush the outbox. Required mode: no delivery, no access."""
+    from datagrant.outbox import flush
+
+    remote = _remote(ctx.args)
+    if remote is None:
+        return
+    res = flush(local.log, remote.sink)
+    if res.error is None:
+        return
+    if remote.mode != "required":
+        _warn(ctx, f"receipt not delivered to sink, {res.pending} pending: {res.error}")
+        return
+    from datagrant.outbox import quick
+    from datagrant.pg.revoke import revoke
+
+    r = revoke(conn, plan.grant_id, "manual", local)
+    flush(local.log, quick(remote.sink))  # best effort for the revoked receipt
+    state = (
+        "grant revoked"
+        if r.outcome == "revoked"
+        else f"revoke {r.outcome} ({r.error}): grant STILL ACTIVE until the next sweep"
+    )
+    raise CliError(
+        _hide_token(f"grant {plan.grant_id}: receipt not delivered to sink ({res.error}); {state}"),
+        EXIT_RECEIPT,
+    )
+
+
+def _deliver_quick(ctx: Ctx, local: Any) -> dict[str, Any] | None:
+    """After revoke/sweep: one attempt, no retries. Never changes the exit code."""
+    from datagrant.outbox import flush, quick
+
+    remote = _remote(ctx.args)
+    if remote is None or local is None:
+        return None
+    res = flush(local.log, quick(remote.sink))
+    if res.error is not None:
+        _warn(ctx, f"receipts not delivered to sink, {res.pending} pending: {res.error}")
+    d = res.as_dict()
+    d["error"] = _hide_token(res.error) if res.error else None
+    return d
+
+
 def _conn_info(args: argparse.Namespace, plan: Any) -> dict[str, Any]:
     import psycopg
 
@@ -259,6 +336,7 @@ def cmd_request(ctx: Ctx) -> int:
             )
             return EXIT_OK
         sink = _sink(a)  # no signing key, no grant
+        _check_outbox(ctx, sink)
         ensure_state(conn)
         password = new_password()
         if two_person:
@@ -294,6 +372,7 @@ def cmd_request(ctx: Ctx) -> int:
         from datagrant.pg.grant import apply_plan
 
         apply_plan(conn, plan, sink)
+        _deliver_issued(ctx, conn, plan, sink)
     return _print_grant(ctx, plan, password, user, source)
 
 
@@ -370,6 +449,7 @@ def cmd_approve(ctx: Ctx) -> int:
             )
             return EXIT_OK
         sink = _sink(a)
+        _check_outbox(ctx, sink)
         plan = build_plan(
             decision,
             pending.request,
@@ -381,6 +461,7 @@ def cmd_approve(ctx: Ctx) -> int:
             approvers=(approver,),
         )
         apply_plan(conn, plan, sink, request_id=pending.id, approver=approver)
+        _deliver_issued(ctx, conn, plan, sink)
     _print_grant(ctx, plan, None, pending.request.requester, source)
     return EXIT_OK
 
@@ -499,6 +580,7 @@ def cmd_revoke(ctx: Ctx) -> int:
     with _connect(ctx.args) as conn:
         ensure_state(conn)
         r = revoke(conn, ctx.args.grant_id, "manual", sink)
+    delivery = _deliver_quick(ctx, sink)
     code = _exit_for([r] if r.outcome != "noop" else [], key_problem)
     msg = f"grant {r.grant_id}: {r.outcome}"
     if r.outcome == "revoked":
@@ -507,7 +589,7 @@ def cmd_revoke(ctx: Ctx) -> int:
         msg += f"\nerror: {r.error}"
     if r.receipt_error or (key_problem and r.outcome != "noop"):
         msg += f"\nreceipt not written: {r.receipt_error or key_problem}"
-    ctx.emit(_result_dict(r) | {"key_problem": key_problem}, msg)
+    ctx.emit(_result_dict(r) | {"key_problem": key_problem, "sink": delivery}, msg)
     return code
 
 
@@ -543,6 +625,7 @@ def cmd_sweep(ctx: Ctx) -> int:
         ensure_state(conn)
         results = sweep(conn, sink)
         expired_requests = expire_requests(conn)
+    delivery = _deliver_quick(ctx, sink)
     lines = [
         f"grant {r.grant_id}: {r.outcome}"
         + (f" ({r.error})" if r.error else "")
@@ -557,6 +640,7 @@ def cmd_sweep(ctx: Ctx) -> int:
             "results": [_result_dict(r) for r in results],
             "expired_requests": expired_requests,
             "key_problem": key_problem,
+            "sink": delivery,
         },
         "\n".join(lines) or "nothing to sweep",
     )
@@ -590,6 +674,32 @@ def cmd_receipts_verify(ctx: Ctx) -> int:
     return EXIT_OK if res.ok else EXIT_FAILED
 
 
+def cmd_receipts_push(ctx: Ctx) -> int:
+    from datagrant.outbox import flush, pending_lines
+
+    remote = _remote(ctx.args)
+    if remote is None:
+        raise CliError(
+            "no receipt sink: pass --receipt-sink or set $DATAGRANT_RECEIPT_SINK", EXIT_USAGE
+        )
+    log = _log_path(ctx.args)
+    if not ctx.args.apply:
+        n = len(pending_lines(log))
+        ctx.emit(
+            {"dry_run": True, "pending": n, "sink": remote.sink.name},
+            f"dry run: {n} receipt(s) pending; --apply would send them to {remote.sink.name}",
+        )
+        return EXIT_OK
+    res = flush(log, remote.sink)
+    err = _hide_token(res.error) if res.error else None
+    ctx.emit(
+        {"delivered": res.delivered, "pending": res.pending, "error": err},
+        f"delivered {res.delivered} receipt(s), {res.pending} pending"
+        + (f": {err}" if err else ""),
+    )
+    return EXIT_RECEIPT if res.error else EXIT_OK
+
+
 def cmd_preflight(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state, preflight
 
@@ -607,8 +717,9 @@ def cmd_preflight(ctx: Ctx) -> int:
 # ---- parser ---------------------------------------------------------------
 
 
-_GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log")
-_REVOKING = ("json", "dsn", "signing_key", "receipt_log")
+_SINK = ("receipt_sink", "receipt_sink_mode")
+_GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
+_REVOKING = ("json", "dsn", "signing_key", "receipt_log", *_SINK)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -629,6 +740,21 @@ def build_parser() -> argparse.ArgumentParser:
         "receipt_log": (
             ("--receipt-log",),
             {"help": "receipt log (default $DATAGRANT_RECEIPT_LOG)"},
+        ),
+        "receipt_sink": (
+            ("--receipt-sink",),
+            {
+                "help": "external receipt sink, https:// or file:/// URL"
+                " (default $DATAGRANT_RECEIPT_SINK; token only via $DATAGRANT_RECEIPT_SINK_TOKEN)"
+            },
+        ),
+        "receipt_sink_mode": (
+            ("--receipt-sink-mode",),
+            {
+                "choices": ("required", "best-effort"),
+                "help": "required: a grant whose receipt can't reach the sink is revoked"
+                " (default $DATAGRANT_RECEIPT_SINK_MODE, else best-effort)",
+            },
         ),
     }
 
@@ -749,6 +875,12 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--pubkey", help="public key hex, or a file containing it")
     v.add_argument("--expect-head", help="head hash recorded earlier (detects truncation)")
     v.set_defaults(fn=cmd_receipts_verify)
+    pu = rc.add_parser(
+        "push",
+        parents=[*only("json", "receipt_log", "receipt_sink"), apply],
+        help="send pending receipts to the external sink (dry run; --apply sends)",
+    )
+    pu.set_defaults(fn=cmd_receipts_push)
 
     sub.add_parser(
         "preflight",
@@ -768,6 +900,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
         cmd_revoke: _REVOKING,
         cmd_sweep: _REVOKING,
         cmd_receipts_verify: ("signing_key", "receipt_log"),
+        cmd_receipts_push: ("receipt_log", "receipt_sink"),
         cmd_grant_list: ("dsn",),
         cmd_grant_status: ("dsn",),
         cmd_preflight: ("dsn",),
@@ -789,7 +922,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         return int(exc.code or 0)
     unused = [
         f"--{n.replace('_', '-')}"
-        for n in ("dsn", "signing_key", "hash_key", "receipt_log")
+        for n in ("dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
         if getattr(args, n, None) is not None and n not in _accepts(args)
     ]
     if unused:
@@ -801,6 +934,15 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         print("datagrant: error: --apply and --dry-run conflict", file=sys.stderr)
         return EXIT_USAGE
     ctx = Ctx(args, out)
+    if "receipt_sink" in _accepts(args):
+        from datagrant.sink import SinkConfigError, sink_from_config
+
+        try:
+            mode = getattr(args, "receipt_sink_mode", None)
+            args._remote = sink_from_config(getattr(args, "receipt_sink", None), mode)
+        except SinkConfigError as exc:
+            _err(ctx, _hide_token(str(exc)), EXIT_USAGE)
+            return EXIT_USAGE
     dsn = getattr(args, "dsn", None) or os.environ.get(DSN_ENV)
     try:
         return int(args.fn(ctx))
@@ -825,6 +967,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
 
 
 def _err(ctx: Ctx, msg: str, code: int) -> None:
+    msg = _hide_token(msg)
     if ctx.json:
         ctx.out(json.dumps({"error": msg, "exit_code": code}))
     else:

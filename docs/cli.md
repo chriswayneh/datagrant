@@ -1,7 +1,7 @@
 # CLI reference
 
 ```text
-datagrant [--json] [--dsn DSN] [--signing-key FILE] [--hash-key FILE] [--receipt-log FILE] [--version] COMMAND ...
+datagrant [--json] [--dsn DSN] [--signing-key FILE] [--hash-key FILE] [--receipt-log FILE] [--receipt-sink URL] [--receipt-sink-mode MODE] [--version] COMMAND ...
 ```
 
 Run `datagrant COMMAND --help` for the exact flags of your installed version. This page matches v0.1.0.
@@ -22,6 +22,9 @@ Run `datagrant COMMAND --help` for the exact flags of your installed version. Th
 | Signing key | `--signing-key` | `DATAGRANT_SIGNING_KEY` | `~/.config/datagrant/signing.key` |
 | Hash key | `--hash-key` | `DATAGRANT_HASH_KEY` | `~/.config/datagrant/hash.key` |
 | Receipt log | `--receipt-log` | `DATAGRANT_RECEIPT_LOG` | `~/.config/datagrant/receipts.jsonl` |
+| External receipt sink (`https://` URL, or `file:///` path) | `--receipt-sink` | `DATAGRANT_RECEIPT_SINK` | none (no sink) |
+| Sink mode (`required` or `best-effort`) | `--receipt-sink-mode` | `DATAGRANT_RECEIPT_SINK_MODE` | `best-effort` |
+| Sink bearer token | none | `DATAGRANT_RECEIPT_SINK_TOKEN` | none |
 
 Key paths resolve in this order: explicit flag, then environment variable, then `keys init --dir`, then the default directory. Every command uses the same resolver.
 
@@ -31,8 +34,8 @@ Key paths resolve in this order: explicit flag, then environment variable, then 
 | :---: | --- |
 | 0 | Success, including a clean dry run and "nothing to do". |
 | 1 | Denied or failed: policy denial, invalid policy, failed check, bad receipt chain, database error, or keys that already exist. |
-| 2 | Usage error: unknown or inapplicable flag, `--apply` with `--dry-run`, missing DSN or policy, or both keys resolving to the same file. |
-| 3 | `revoke`/`sweep`: access was removed but a receipt could not be written. |
+| 2 | Usage error: unknown or inapplicable flag, an invalid receipt sink URL, mode or token, `--apply` with `--dry-run`, missing DSN or policy, or both keys resolving to the same file. |
+| 3 | `revoke`/`sweep`: access was removed but a receipt could not be written. `request`/`approve` in `required` sink mode: the receipt could not be delivered to the sink, so the grant was revoked. `receipts push`: some receipts could not be delivered. |
 | 4 | `revoke`/`sweep`: a revoke failed. The grant stays active and its role stays locked out; the error is in `last_error`. |
 
 ## Commands
@@ -67,15 +70,21 @@ Checks every signature, sequence number and hash link, and reports the first bre
 ### `preflight [--apply]`
 Creates datagrant's state schema (with `--apply`) and warns about `PUBLIC` defaults that every grant role inherits: `CONNECT` on other databases, `TEMP` in this database, and `CREATE` in schema `public`. A dry run only reports the warnings.
 
+### `receipts push [--receipt-sink URL] [--receipt-log FILE] [--apply]`
+Sends receipts the sink hasn't acknowledged yet (the outbox) to the external sink, in order. A dry run shows how many are pending. The last acknowledged `seq` is kept in `<receipt-log>.sink` (0600). Run it from cron after a sink outage. Exit 3 if anything is still pending.
+
+With a sink configured, `request` and `approve` send the `issued` receipt right after writing it locally. In `best-effort` mode a failed send only warns and leaves the receipt pending. In `required` mode the grant is revoked and the command exits 3. `revoke` and `sweep` remove access first and then make one delivery attempt without retries; a sink failure only warns and never changes their exit code. The token is never printed. See the [design](design/receipt-sink.md).
+
 ## Who can use which shared flag
 
-| Command | `--dsn` | `--signing-key` | `--hash-key` | `--receipt-log` | `--apply` |
-| --- | :---: | :---: | :---: | :---: | :---: |
-| `keys init` | | ✓ | ✓ | | ✓ |
-| `keys export-pubkey` | | ✓ | | | |
-| `policy check` | | | | | |
-| `request`, `approve` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `grant list`, `grant status` | ✓ | | | | |
-| `revoke`, `sweep` | ✓ | ✓ | | ✓ | ✓ |
-| `receipts verify` | | ✓ | | ✓ | |
-| `preflight` | ✓ | | | | ✓ |
+| Command | `--dsn` | `--signing-key` | `--hash-key` | `--receipt-log` | `--receipt-sink` | `--receipt-sink-mode` | `--apply` |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `keys init` | | ✓ | ✓ | | | | ✓ |
+| `keys export-pubkey` | | ✓ | | | | | |
+| `policy check` | | | | | | | |
+| `request`, `approve` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `grant list`, `grant status` | ✓ | | | | | | |
+| `revoke`, `sweep` | ✓ | ✓ | | ✓ | ✓ | ✓ | ✓ |
+| `receipts verify` | | ✓ | | ✓ | | | |
+| `receipts push` | | | | ✓ | ✓ | | ✓ |
+| `preflight` | ✓ | | | | | | ✓ |

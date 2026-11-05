@@ -8,6 +8,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 - Per-dataset hash scope. Each dataset now hashes under its own key, derived from the hash key file and the dataset's `hash_scope` (default: the dataset name). Datasets that set the same `hash_scope` share hashes, so values can still be joined across them on purpose.
 - `filter_columns` on a table: columns a row filter may use that are never in the grant view and can't be requested. Every filter column must be used by a row filter and may not also be in `columns`.
 - Receipt sink building blocks (`datagrant.sink`): a `ReceiptSink` interface, an HTTPS webhook sink (standard library only) and an append-only `file://` sink, with URL and mode validation. Not used by any command yet; see [the design](docs/design/receipt-sink.md).
+- Receipt sink delivery: `--receipt-sink` and `--receipt-sink-mode` (or `DATAGRANT_RECEIPT_SINK`, `DATAGRANT_RECEIPT_SINK_MODE`, token in `DATAGRANT_RECEIPT_SINK_TOKEN`) on `request`, `approve`, `revoke` and `sweep`. `required` mode revokes a grant whose `issued` receipt can't reach the sink (exit 3); revokes never wait on the sink. Undelivered receipts stay in an outbox (the local log plus a 0600 `<receipt-log>.sink` cursor) and `receipts push --apply` sends them.
 
 ### Changed
 - **Hash outputs change.** `hash` values from v0.1.0 grants won't match new grants, because the key is now scoped per dataset. To compare against old outputs, re-issue the old grant. There is no setting that brings back the single unscoped key.
