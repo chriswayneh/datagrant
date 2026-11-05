@@ -298,7 +298,16 @@ def run(dsn: str, work: Path) -> None:
         log.write_bytes(b"".join(lines[:-1]))  # someone with host access deletes the newest receipt
         print("deleted the newest local receipt (simulated tampering)")
         bad = dg("receipts", "verify", "--sink", sink, expect=1)
-        check("truncated or replaced" in (bad["error"] or ""), "truncation not caught")
+        check("outbox cursor" in (bad["error"] or ""), "local cursor check did not fire")
+        cursor = log.with_name(log.name + ".sink")
+        cursor.unlink()  # a careful attacker also removes the outbox cursor
+        print("also deleted the local outbox cursor; the off-host sink still has every receipt")
+        bad = dg("receipts", "verify", "--sink", sink, expect=1)
+        check(
+            "sink is ahead" in (bad["error"] or "") and bad["sink_seq"] == 5,
+            "the sink did not catch the truncation",
+        )
+        print(f"FAILED as expected: {bad['error']}")
         print("DEMO MARKER: sink-ok")
 
         admin.execute("DROP SCHEMA dg_demo CASCADE")
