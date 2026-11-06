@@ -131,10 +131,12 @@ def _log_path(args: argparse.Namespace) -> Path:
 
 
 def _hide_token(text: str) -> str:
+    from datagrant.oidc import OIDC_TOKEN_ENV, redact_token
     from datagrant.sink import SINK_TOKEN_ENV
 
     tok = os.environ.get(SINK_TOKEN_ENV)
-    return text.replace(tok, "***") if tok else text
+    out = text.replace(tok, "***") if tok else text
+    return redact_token(out, os.environ.get(OIDC_TOKEN_ENV))
 
 
 def _warn(ctx: Ctx, msg: str) -> None:
@@ -296,6 +298,12 @@ def cmd_request(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
+    if policy.identity.mode != "local":
+        raise CliError(
+            f"policy requires identity.mode={policy.identity.mode!r}, which is not yet"
+            " supported on CLI commands",
+            EXIT_FAILED,
+        )
     user, source = _identity(a)
     cols = tuple(c.strip() for c in a.columns.split(",") if c.strip())
     req = Request(
@@ -416,6 +424,12 @@ def cmd_approve(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
+    if policy.identity.mode != "local":
+        raise CliError(
+            f"policy requires identity.mode={policy.identity.mode!r}, which is not yet"
+            " supported on CLI commands",
+            EXIT_FAILED,
+        )
     approver, source = _identity(a)
     with _connect(a) as conn:
         if a.apply:

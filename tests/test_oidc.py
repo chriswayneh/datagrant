@@ -724,3 +724,227 @@ def test_slow_trickle_idp_hits_deadline(keys: KeySet, tmp_path: Path) -> None:
         stop.set()
         srv.shutdown()
         srv.server_close()
+
+
+# ---------- QE + Red Team review regression tests ----------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions, symlinks and uids")
+def test_cache_dir_no_chmod_existing_and_lstat_fstat_checks(
+    idp: IdpState, keys: KeySet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tok = keys.sign(_base_claims(idp.issuer), alg="EdDSA")
+    cfg = _cfg(idp.issuer)
+
+    # QE1: existing loose directory (0755) is NOT silently chmodded; fails closed
+    loose_dir = tmp_path / "loose_dir"
+    loose_dir.mkdir()
+    loose_dir.chmod(0o755)
+    with pytest.raises(IdentityError, match="group/others"):
+        verify_oidc_token(tok, cfg, now=NOW, cache_dir=loose_dir, env=INSECURE_ENV)
+    assert (loose_dir.stat().st_mode & 0o777) == 0o755
+
+    # L7: symlinked cache directory rejected
+    real_dir = tmp_path / "real_dir"
+    real_dir.mkdir(mode=0o700)
+    real_dir.chmod(0o700)
+    sym_dir = tmp_path / "sym_dir"
+    sym_dir.symlink_to(real_dir)
+    with pytest.raises(IdentityError, match="symlink"):
+        verify_oidc_token(tok, cfg, now=NOW, cache_dir=sym_dir, env=INSECURE_ENV)
+
+    # L7: non-directory path rejected
+    file_path = tmp_path / "not_a_dir"
+    file_path.write_text("x")
+    file_path.chmod(0o600)
+    with pytest.raises(IdentityError, match="not a directory"):
+        verify_oidc_token(tok, cfg, now=NOW, cache_dir=file_path, env=INSECURE_ENV)
+
+    # L7: cache directory owned by a different uid rejected
+    other_dir = tmp_path / "other_uid_dir"
+    other_dir.mkdir(mode=0o700)
+    other_dir.chmod(0o700)
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(other_dir).st_uid + 1)
+    with pytest.raises(IdentityError, match="not owned by current uid"):
+        verify_oidc_token(tok, cfg, now=NOW, cache_dir=other_dir, env=INSECURE_ENV)
+    monkeypatch.undo()
+
+    # L7: cache file owned by a different uid rejected on read
+    good_dir = tmp_path / "good_dir"
+    verify_oidc_token(tok, cfg, now=NOW, cache_dir=good_dir, env=INSECURE_ENV)
+    assert any(good_dir.glob("*.json"))
+    orig_fstat = os.fstat
+
+    class FakeStat:
+        def __init__(self, st: os.stat_result) -> None:
+            self.st_mode = st.st_mode
+            self.st_uid = st.st_uid + 99
+
+    monkeypatch.setattr(os, "fstat", lambda fd: FakeStat(orig_fstat(fd)))
+    with pytest.raises(IdentityError, match="not owned by current uid"):
+        verify_oidc_token(tok, cfg, now=NOW + 1, cache_dir=good_dir, env=INSECURE_ENV)
+
+
+def test_cache_write_oserror_wrapped_and_skipped_after_good_fetch(
+    idp: IdpState, keys: KeySet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tok = keys.sign(_base_claims(idp.issuer), alg="EdDSA")
+    cdir = tmp_path / "ro_cache"
+
+    # QE2: OSError from mkstemp in _write_cache is wrapped in IdentityError,
+    # and _resolve_jwk skips caching after a good fetch so verification still succeeds!
+    def boom_mkstemp(*a: Any, **kw: Any) -> tuple[int, str]:
+        raise PermissionError(13, "Read-only file system")
+
+    monkeypatch.setattr("datagrant.oidc.tempfile.mkstemp", boom_mkstemp)
+    with pytest.raises(IdentityError, match="cannot create temporary JWKS cache"):
+        oidc._write_cache(cdir / "x.json", {"a": 1})
+
+    ident = verify_oidc_token(tok, _cfg(idp.issuer), now=NOW, cache_dir=cdir, env=INSECURE_ENV)
+    assert ident.username == "user-alice-123"
+    assert list(cdir.glob("*.json")) == []
+
+
+def test_cli_request_and_approve_refuse_oidc_policy_before_dsn(
+    idp: IdpState, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # H1: request and approve fail closed (exit 1) immediately on non-local policy.identity,
+    # before touching --dsn (no DSN set at all -> would exit 2 if it got past the gate).
+    monkeypatch.setenv(INSECURE_LOCALHOST_ENV, "1")
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    pol = tmp_path / "oidc.yaml"
+    pol.write_text(
+        f"version: 1\napproval: two-person\napprovers: [sec]\nmax_duration: 1h\n"
+        f"groups: {{ml: [alice], sec: [carol]}}\n"
+        f"identity:\n  mode: oidc\n  issuer: {idp.issuer}\n  audience: datagrant-cli\n"
+        f"datasets:\n  - name: clinic\n    database: postgres\n    tables:\n"
+        f"      - name: public.t\n        allowed_groups: [ml]\n        columns: {{id: passthrough}}\n"
+    )
+    out1: list[str] = []
+    rc1 = main(
+        [
+            "--json",
+            "request",
+            "--policy",
+            str(pol),
+            "--as-user",
+            "alice",
+            "--dataset",
+            "clinic",
+            "--table",
+            "public.t",
+            "--columns",
+            "id",
+            "--duration",
+            "30m",
+            "--purpose",
+            "t",
+        ],
+        out1.append,
+    )
+    assert rc1 == 1 and "identity.mode='oidc'" in json.loads(out1[-1])["error"]
+
+    out2: list[str] = []
+    rc2 = main(
+        ["--json", "approve", "--policy", str(pol), "--as-user", "carol", "req123"], out2.append
+    )
+    assert rc2 == 1 and "identity.mode='oidc'" in json.loads(out2[-1])["error"]
+
+
+def test_strict_json_nan_infinity_duplicate_keys_and_deep_nesting(
+    idp: IdpState, keys: KeySet, tmp_path: Path
+) -> None:
+    cfg = _cfg(idp.issuer, jwks_cache_ttl=timedelta(seconds=0))
+
+    # M2: NaN / Infinity in JWT payload and non-finite `now` rejected
+    for raw_const in ("NaN", "Infinity", "-Infinity"):
+        h = _b64u(b'{"alg":"EdDSA","kid":"ed-1"}')
+        p = _b64u(
+            f'{{"iss":"{idp.issuer}","sub":"u","aud":"datagrant-cli","iat":1800000000,"exp":{raw_const}}}'.encode()
+        )
+        sig = keys.ed_priv.sign(f"{h}.{p}".encode("ascii"))
+        with pytest.raises(IdentityError, match="non-standard JSON constant"):
+            verify_oidc_token(f"{h}.{p}.{_b64u(sig)}", cfg, now=NOW, env=INSECURE_ENV)
+
+    good = keys.sign(_base_claims(idp.issuer), alg="EdDSA")
+    with pytest.raises(IdentityError, match="non-finite"):
+        verify_oidc_token(good, cfg, now=float("nan"), env=INSECURE_ENV)
+    with pytest.raises(IdentityError, match="non-finite"):
+        verify_oidc_token(good, cfg, now=float("inf"), env=INSECURE_ENV)
+
+    # L4: duplicate JSON keys rejected in JWT header, JWT payload, HTTP response, and cache
+    dup_hdr = _b64u(b'{"alg":"RS256","alg":"EdDSA","kid":"ed-1"}')
+    pay = _b64u(json.dumps(_base_claims(idp.issuer)).encode())
+    sig = keys.ed_priv.sign(f"{dup_hdr}.{pay}".encode("ascii"))
+    with pytest.raises(IdentityError, match="duplicate JSON key"):
+        verify_oidc_token(f"{dup_hdr}.{pay}.{_b64u(sig)}", cfg, now=NOW, env=INSECURE_ENV)
+
+    dup_pay = _b64u(
+        f'{{"iss":"{idp.issuer}","sub":"victim","sub":"attacker","aud":"datagrant-cli","iat":1800000000,"exp":1800000300}}'.encode()
+    )
+    h_ok = _b64u(b'{"alg":"EdDSA","kid":"ed-1"}')
+    sig2 = keys.ed_priv.sign(f"{h_ok}.{dup_pay}".encode("ascii"))
+    with pytest.raises(IdentityError, match="duplicate JSON key"):
+        verify_oidc_token(f"{h_ok}.{dup_pay}.{_b64u(sig2)}", cfg, now=NOW, env=INSECURE_ENV)
+
+    with pytest.raises(IdentityError, match="duplicate JSON key"):
+        oidc._strict_json_loads(b'{"keys":[],"keys":[]}', "JWKS")
+
+    # L5: deep nesting -> IdentityError on token/endpoint, None on cache read
+    deep = b"[" * 2000 + b"]" * 2000
+    with pytest.raises(IdentityError, match="nested too deeply"):
+        oidc._strict_json_loads(deep, "JWT payload")
+    cdir = tmp_path / "deep_cache"
+    cdir.mkdir(mode=0o700)
+    if os.name == "posix":
+        cdir.chmod(0o700)
+    cfile = cdir / "bad.json"
+    cfile.write_bytes(b'{"a":' * 100 + b"1" + b"}" * 100)
+    if os.name == "posix":
+        cfile.chmod(0o600)
+    assert oidc._read_cache(cfile) is None
+
+
+def test_azp_required_for_multi_aud_and_validated_for_single_aud(
+    idp: IdpState, keys: KeySet, tmp_path: Path
+) -> None:
+    cfg = _cfg(idp.issuer)
+    # M3: multi-aud WITHOUT azp is rejected
+    t_no_azp = keys.sign(_base_claims(idp.issuer, aud=["datagrant-cli", "other"]), alg="EdDSA")
+    with pytest.raises(IdentityError, match="multiple audiences must include azp"):
+        verify_oidc_token(t_no_azp, cfg, now=NOW, cache_dir=tmp_path, env=INSECURE_ENV)
+
+    # Single-aud WITH disallowed or non-string azp is also rejected
+    for bad_azp in ("evil-client", 123, None):
+        t_single = keys.sign(
+            _base_claims(idp.issuer, aud="datagrant-cli", azp=bad_azp), alg="EdDSA"
+        )
+        with pytest.raises(IdentityError, match="azp"):
+            verify_oidc_token(t_single, cfg, now=NOW, cache_dir=tmp_path, env=INSECURE_ENV)
+
+
+def test_jws_like_token_file_path_not_echoed_and_cli_hides_oidc_token(
+    idp: IdpState, keys: KeySet, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant import cli as cli_mod
+
+    # L6: accidentally passing a raw JWS as the file path to read_token_file never echoes it
+    tok = keys.sign(_base_claims(idp.issuer), alg="EdDSA")
+    with pytest.raises(IdentityError) as ei:
+        read_token_file(tok)
+    assert tok not in str(ei.value)
+    assert tok.split(".")[1] not in str(ei.value)
+    assert "<redacted token-like path>" in str(ei.value)
+
+    # cli._hide_token also scrubs $DATAGRANT_OIDC_TOKEN
+    monkeypatch.setenv(oidc.OIDC_TOKEN_ENV, tok)
+    assert tok not in cli_mod._hide_token(f"boom: {tok}")
+
+
+def test_recursion_error_from_json_loads_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **kw: Any) -> Any:
+        raise RecursionError("max recursion")
+
+    monkeypatch.setattr("datagrant.oidc.json.loads", boom)
+    with pytest.raises(IdentityError, match="nested too deeply"):
+        oidc._strict_json_loads(b"{}", "JWT payload")

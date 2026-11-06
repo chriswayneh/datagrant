@@ -96,7 +96,7 @@ Every step fails closed with `IdentityError`:
 5. **Claims.** Payload must be a JSON object:
    - `iss`: string, exact match with `policy.identity.issuer`.
    - `sub`: non-empty string, max 256 chars, printable (always required per OIDC Core, even when `username_claim` is another claim).
-   - `aud`: string equal to an allowed audience, or list of strings intersecting `policy.identity.audience`. If `aud` is a list with multiple entries and `azp` is present, `azp` must also be in `policy.identity.audience`.
+   - `aud`: string equal to an allowed audience, or list of strings intersecting `policy.identity.audience`. If `aud` is a list with multiple entries, `azp` is required; whenever `azp` is present (single or multiple `aud`), `azp` must be a string in `policy.identity.audience`.
    - `exp`: integer/float timestamp (reject booleans), required; fail if `now - skew >= exp`.
    - `iat`: integer/float timestamp (reject booleans), required per OIDC Core ID Token spec; fail if `iat > now + skew` or if `now - skew - iat > max_token_age` (default `15m`, rejecting old tokens even when the IdP sets a long `exp`).
    - `nbf`: if present, integer/float timestamp; fail if `now + skew < nbf`.

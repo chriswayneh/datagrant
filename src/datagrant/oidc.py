@@ -16,6 +16,7 @@ import base64
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import ssl
@@ -56,6 +57,7 @@ DEFAULT_CLOCK_SKEW = timedelta(seconds=60)
 DEFAULT_JWKS_CACHE_TTL = timedelta(minutes=5)
 
 _B64U_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_JWS_LIKE_RE = re.compile(r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
 _PRINTABLE_TOKEN_RE = re.compile(r"^[\x21-\x7e]+$")
 _SUB_RE = re.compile(r"^[\x20-\x7e]{1,256}$")
 _USERNAME_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
@@ -86,7 +88,7 @@ class IdentityConfig:
 
 @dataclass(frozen=True)
 class VerifiedIdentity:
-    """Result of verifying an caller's identity."""
+    """Result of verifying a caller's identity."""
 
     username: str
     source: str  # "oidc" | "os" | "flag"
@@ -142,6 +144,55 @@ def redact_token(text: str, raw_token: str | None) -> str:
     return out.replace(stripped, "***") if stripped else out
 
 
+def _safe_path_label(path: Path) -> str:
+    """Never echo a path that looks like an accidentally pasted compact JWS."""
+    raw = str(path)
+    if _JWS_LIKE_RE.search(raw):
+        return "<redacted token-like path>"
+    return raw
+
+
+MAX_JSON_DEPTH = 32
+
+
+def _check_json_depth(obj: Any, what: str) -> None:
+    stack: list[tuple[Any, int]] = [(obj, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        if depth > MAX_JSON_DEPTH:
+            raise IdentityError(f"{what} is nested too deeply")
+        if isinstance(cur, dict):
+            stack.extend((v, depth + 1) for v in cur.values())
+        elif isinstance(cur, list):
+            stack.extend((v, depth + 1) for v in cur)
+
+
+def _strict_json_loads(raw: bytes | str, what: str) -> Any:
+    """Parse JSON rejecting NaN/Infinity, duplicate object keys, and deep nesting."""
+
+    def no_dups(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for k, v in pairs:
+            if k in out:
+                raise IdentityError(f"duplicate JSON key {k!r} in {what}")
+            out[k] = v
+        return out
+
+    def no_constants(val: str) -> Any:
+        raise IdentityError(f"non-standard JSON constant {val!r} in {what}")
+
+    try:
+        parsed = json.loads(raw, object_pairs_hook=no_dups, parse_constant=no_constants)
+    except IdentityError:
+        raise
+    except (ValueError, UnicodeDecodeError):
+        raise IdentityError(f"{what} is not valid JSON") from None
+    except RecursionError:
+        raise IdentityError(f"{what} is nested too deeply") from None
+    _check_json_depth(parsed, what)
+    return parsed
+
+
 def default_cache_dir(env: Mapping[str, str] | None = None) -> Path:
     e = os.environ if env is None else env
     override = e.get(JWKS_CACHE_DIR_ENV)
@@ -153,19 +204,20 @@ def default_cache_dir(env: Mapping[str, str] | None = None) -> Path:
 def read_token_file(path: str | Path) -> str:
     """Read an OIDC token from a private (0600) regular file without following symlinks."""
     p = Path(path)
+    label = _safe_path_label(p)
     if str(p) == "-":
         raise IdentityError("token file '-' (stdin) is not supported; pass a 0600 file path")
     try:
         fd = os.open(p, os.O_RDONLY | _NOFOLLOW)
     except OSError as exc:
-        raise IdentityError(f"cannot open OIDC token file {p}: {exc.strerror}") from None
+        raise IdentityError(f"cannot open OIDC token file {label}: {exc.strerror}") from None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise IdentityError(f"OIDC token file {p} is not a regular file")
+            raise IdentityError(f"OIDC token file {label} is not a regular file")
         if os.name == "posix" and st.st_mode & 0o077:
             raise IdentityError(
-                f"OIDC token file {p} must not be readable by group/others (chmod 600)"
+                f"OIDC token file {label} must not be readable by group/others (chmod 600)"
             )
         buf = b""
         while len(buf) <= MAX_TOKEN_BYTES:
@@ -174,17 +226,17 @@ def read_token_file(path: str | Path) -> str:
                 break
             buf += chunk
     except OSError as exc:
-        raise IdentityError(f"cannot read OIDC token file {p}: {exc.strerror}") from None
+        raise IdentityError(f"cannot read OIDC token file {label}: {exc.strerror}") from None
     finally:
         os.close(fd)
     if len(buf) > MAX_TOKEN_BYTES:
-        raise IdentityError(f"OIDC token file {p} exceeds {MAX_TOKEN_BYTES} bytes")
+        raise IdentityError(f"OIDC token file {label} exceeds {MAX_TOKEN_BYTES} bytes")
     try:
         token = buf.decode("ascii").strip()
     except UnicodeDecodeError:
-        raise IdentityError(f"OIDC token file {p} is not ASCII") from None
+        raise IdentityError(f"OIDC token file {label} is not ASCII") from None
     if not token or not _PRINTABLE_TOKEN_RE.match(token):
-        raise IdentityError(f"OIDC token file {p} does not contain a compact JWT")
+        raise IdentityError(f"OIDC token file {label} does not contain a compact JWT")
     return token
 
 
@@ -281,10 +333,7 @@ def _http_get_json(
         conn.close()
     if len(buf) > MAX_HTTP_BYTES:
         raise IdentityError(f"OIDC endpoint {url} response exceeds {MAX_HTTP_BYTES} bytes")
-    try:
-        doc = json.loads(buf)
-    except ValueError:
-        raise IdentityError(f"OIDC endpoint {url} did not return valid JSON") from None
+    doc = _strict_json_loads(buf, f"OIDC endpoint {url} response")
     if not isinstance(doc, dict):
         raise IdentityError(f"OIDC endpoint {url} JSON top level must be an object")
     return doc
@@ -295,7 +344,75 @@ def _cache_file(cache_dir: Path, issuer: str) -> Path:
     return cache_dir / f"{digest}.json"
 
 
+def _check_cache_dir_stat(st: os.stat_result, cdir: Path) -> None:
+    if stat.S_ISLNK(st.st_mode):
+        raise IdentityError(f"JWKS cache directory {cdir} must not be a symlink")
+    if not stat.S_ISDIR(st.st_mode):
+        raise IdentityError(f"JWKS cache path {cdir} is not a directory")
+    if os.name == "posix":
+        euid = os.geteuid()
+        if st.st_uid != euid:
+            raise IdentityError(f"JWKS cache directory {cdir} is not owned by current uid {euid}")
+        if st.st_mode & 0o077:
+            raise IdentityError(
+                f"JWKS cache directory {cdir} must not be accessible by group/others (chmod 700)"
+            )
+
+
+def _ensure_cache_dir(cdir: Path) -> None:
+    """Ensure ``cdir`` exists and is private. Only chmod directories we create ourselves."""
+    missing: list[Path] = []
+    cur = cdir
+    while True:
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            missing.append(cur)
+            parent = cur.parent
+            if parent == cur:
+                break
+            cur = parent
+        except OSError as exc:
+            raise IdentityError(
+                f"cannot inspect JWKS cache directory {cur}: {exc.strerror}"
+            ) from None
+        else:
+            if cur == cdir:
+                _check_cache_dir_stat(st, cdir)
+            elif stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                raise IdentityError(f"JWKS cache parent {cur} must be a real directory")
+            break
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, 0o700)
+            if os.name == "posix":
+                os.chmod(d, 0o700)
+        except FileExistsError:
+            try:
+                st = os.lstat(d)
+            except OSError as exc:
+                raise IdentityError(
+                    f"cannot inspect JWKS cache directory {d}: {exc.strerror}"
+                ) from None
+            if d == cdir:
+                _check_cache_dir_stat(st, cdir)
+        except OSError as exc:
+            raise IdentityError(f"cannot create JWKS cache directory {d}: {exc.strerror}") from None
+    try:
+        _check_cache_dir_stat(os.lstat(cdir), cdir)
+    except OSError as exc:
+        raise IdentityError(f"cannot inspect JWKS cache directory {cdir}: {exc.strerror}") from None
+
+
 def _read_cache(path: Path) -> dict[str, Any] | None:
+    cdir = path.parent
+    try:
+        dir_st = os.lstat(cdir)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise IdentityError(f"cannot inspect JWKS cache directory {cdir}: {exc.strerror}") from None
+    _check_cache_dir_stat(dir_st, cdir)
     try:
         fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
     except FileNotFoundError:
@@ -306,26 +423,33 @@ def _read_cache(path: Path) -> dict[str, Any] | None:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise IdentityError(f"JWKS cache {path} is not a regular file")
-        if os.name == "posix" and st.st_mode & 0o077:
-            raise IdentityError(f"JWKS cache {path} must not be readable by group/others")
+        if os.name == "posix":
+            euid = os.geteuid()
+            if st.st_uid != euid:
+                raise IdentityError(f"JWKS cache {path} is not owned by current uid {euid}")
+            if st.st_mode & 0o077:
+                raise IdentityError(f"JWKS cache {path} must not be readable by group/others")
         raw = b""
         while len(raw) <= MAX_HTTP_BYTES * 2:
             chunk = os.read(fd, 8192)
             if not chunk:
                 break
             raw += chunk
+    except OSError as exc:
+        raise IdentityError(f"cannot read JWKS cache {path}: {exc.strerror}") from None
     finally:
         os.close(fd)
     if len(raw) > MAX_HTTP_BYTES * 2:
         return None
     try:
-        doc = json.loads(raw)
-    except ValueError:
+        doc = _strict_json_loads(raw, "JWKS cache")
+    except IdentityError:
         return None
     if (
         not isinstance(doc, dict)
         or not isinstance(doc.get("fetched_at"), (int, float))
         or isinstance(doc.get("fetched_at"), bool)
+        or not math.isfinite(float(doc["fetched_at"]))
         or doc.get("issuer") is None
         or not isinstance(doc.get("keys"), list)
     ):
@@ -334,25 +458,36 @@ def _read_cache(path: Path) -> dict[str, Any] | None:
 
 
 def _write_cache(path: Path, doc: Mapping[str, Any]) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if os.name == "posix":
-        os.chmod(path.parent, 0o700)
-        if os.stat(path.parent).st_mode & 0o077:
-            raise IdentityError(f"JWKS cache directory {path.parent} must be mode 0700")
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".jwks.")
-    tmp = Path(name)
+    _ensure_cache_dir(path.parent)
     try:
-        os.chmod(tmp, 0o600)
-        payload = json.dumps(doc, sort_keys=True).encode("utf-8") + b"\n"
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=".jwks.")
+    except OSError as exc:
+        raise IdentityError(
+            f"cannot create temporary JWKS cache file in {path.parent}: {exc.strerror}"
+        ) from None
+    tmp = Path(name)
+    closed = False
+    try:
+        if os.name == "posix":
+            os.fchmod(fd, 0o600)
+        payload = json.dumps(doc, sort_keys=True, allow_nan=False).encode("utf-8") + b"\n"
         if os.write(fd, payload) != len(payload):
             raise IdentityError("short write to JWKS cache")
         os.fsync(fd)
-    except BaseException:
         os.close(fd)
+        closed = True
+        os.replace(tmp, path)
+    except IdentityError:
+        if not closed:
+            os.close(fd)
         tmp.unlink(missing_ok=True)
         raise
-    os.close(fd)
-    os.replace(tmp, path)
+    except (OSError, ValueError) as exc:
+        if not closed:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+        msg = exc.strerror if isinstance(exc, OSError) else str(exc)
+        raise IdentityError(f"cannot write JWKS cache {path}: {msg}") from None
 
 
 def _usable_jwks_entries(raw_keys: object) -> list[dict[str, Any]]:
@@ -403,6 +538,7 @@ def _resolve_jwk(
 ) -> dict[str, Any]:
     ttl = cfg.jwks_cache_ttl.total_seconds()
     cfile = _cache_file(cache_dir, cfg.issuer)
+    # Unsafe cache dir/file ownership, symlink or permissions MUST raise IdentityError (fail closed).
     cached = _read_cache(cfile) if ttl > 0 else None
     keys: list[dict[str, Any]] | None = None
     fetched_at = 0.0
@@ -417,15 +553,21 @@ def _resolve_jwk(
             cfg.issuer, allow_localhost_http=allow_localhost_http, timeout=timeout
         )
         if ttl > 0:
-            _write_cache(
-                cfile,
-                {
-                    "issuer": cfg.issuer,
-                    "jwks_uri": jwks_uri,
-                    "fetched_at": now_epoch,
-                    "keys": fresh,
-                },
-            )
+            # Verify cache directory safety first (unsafe existing dir raises IdentityError),
+            # then treat pure filesystem write failures (read-only fs, ENOSPC) as cache skip.
+            _ensure_cache_dir(cfile.parent)
+            try:
+                _write_cache(
+                    cfile,
+                    {
+                        "issuer": cfg.issuer,
+                        "jwks_uri": jwks_uri,
+                        "fetched_at": now_epoch,
+                        "keys": fresh,
+                    },
+                )
+            except IdentityError:
+                pass
         return fresh
 
     if keys is None:
@@ -509,7 +651,10 @@ def _req_num_claim(claims: Mapping[str, Any], name: str) -> float:
     val = claims[name]
     if isinstance(val, bool) or not isinstance(val, (int, float)):
         raise IdentityError(f"claim {name!r} must be a number")
-    return float(val)
+    num = float(val)
+    if not math.isfinite(num):
+        raise IdentityError(f"claim {name!r} must be finite")
+    return num
 
 
 def _opt_num_claim(claims: Mapping[str, Any], name: str) -> float | None:
@@ -518,7 +663,10 @@ def _opt_num_claim(claims: Mapping[str, Any], name: str) -> float | None:
     val = claims[name]
     if isinstance(val, bool) or not isinstance(val, (int, float)):
         raise IdentityError(f"claim {name!r} must be a number")
-    return float(val)
+    num = float(val)
+    if not math.isfinite(num):
+        raise IdentityError(f"claim {name!r} must be finite")
+    return num
 
 
 def verify_oidc_token(
@@ -542,15 +690,21 @@ def verify_oidc_token(
         or not _PRINTABLE_TOKEN_RE.match(token)
     ):
         raise IdentityError("OIDC token is empty, oversized, or contains invalid characters")
+
+    now_epoch = time.time() if now is None else float(now)
+    skew = cfg.clock_skew.total_seconds()
+    max_age = cfg.max_token_age.total_seconds()
+    if not (math.isfinite(now_epoch) and math.isfinite(skew) and math.isfinite(max_age)):
+        raise IdentityError("non-finite clock or token age parameter")
+    if max_age <= 0 or skew < 0:
+        raise IdentityError("invalid clock_skew or max_token_age")
+
     parts = token.split(".")
     if len(parts) != 3 or not all(parts):
         raise IdentityError("OIDC token is not a 3-part compact JWS")
     hdr_b64, pay_b64, sig_b64 = parts
-    try:
-        header = json.loads(_b64u_decode(hdr_b64, "JWT header"))
-        claims = json.loads(_b64u_decode(pay_b64, "JWT payload"))
-    except (ValueError, UnicodeDecodeError):
-        raise IdentityError("JWT header or payload is not valid JSON") from None
+    header = _strict_json_loads(_b64u_decode(hdr_b64, "JWT header"), "JWT header")
+    claims = _strict_json_loads(_b64u_decode(pay_b64, "JWT payload"), "JWT payload")
     if not isinstance(header, dict) or not isinstance(claims, dict):
         raise IdentityError("JWT header and payload must be JSON objects")
 
@@ -570,7 +724,6 @@ def verify_oidc_token(
     except ValueError as exc:
         raise IdentityError(str(exc)) from None
 
-    now_epoch = time.time() if now is None else float(now)
     cdir = Path(cache_dir) if cache_dir is not None else default_cache_dir(env)
     jwk = _resolve_jwk(
         cfg,
@@ -604,13 +757,15 @@ def verify_oidc_token(
         aud_list = aud
     else:
         raise IdentityError("JWT missing valid aud claim")
-    if len(aud_list) > 1 and "azp" in claims:
+    # OIDC Core 3.1.3.7: if aud contains multiple entries, azp SHOULD/MUST be present;
+    # whenever azp is present (single or multi-aud), it must be a string in allowed_aud.
+    if len(aud_list) > 1 and "azp" not in claims:
+        raise IdentityError("JWT with multiple audiences must include azp")
+    if "azp" in claims:
         azp = claims["azp"]
         if not isinstance(azp, str) or azp not in allowed_aud:
             raise IdentityError("JWT azp is not in allowed audience")
 
-    skew = cfg.clock_skew.total_seconds()
-    max_age = cfg.max_token_age.total_seconds()
     exp = _req_num_claim(claims, "exp")
     iat = _req_num_claim(claims, "iat")
     nbf = _opt_num_claim(claims, "nbf")
