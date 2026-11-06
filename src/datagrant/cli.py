@@ -26,7 +26,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from datagrant import __version__, receipt
 from datagrant.keys import (
@@ -50,6 +50,7 @@ class CliError(Exception):
         self.code = code
 
 
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _PW_KV = re.compile(r"(password\s*=\s*)('(?:[^'\\]|\\.)*'|\S+)", re.IGNORECASE)
 _PW_URL = re.compile(r"(\w+://[^:/@\s]*:)[^@\s]*@")
 
@@ -478,17 +479,34 @@ def cmd_approve(ctx: Ctx) -> int:
                 f" but current policy uses {policy.identity.mode!r}",
                 EXIT_FAILED,
             )
-        if policy.identity.mode == "oidc" and (
-            not isinstance(req_meta, dict)
-            or not isinstance(req_meta.get("iss"), str)
-            or not req_meta["iss"]
-            or not isinstance(req_meta.get("sub"), str)
-            or not req_meta["sub"]
-        ):
-            raise CliError(
-                f"request {pending.id} is missing verified OIDC (iss, sub) metadata",
-                EXIT_FAILED,
-            )
+        if policy.identity.mode == "oidc":
+            if (
+                not isinstance(req_meta, dict)
+                or req_meta.get("source") != "oidc"
+                or not isinstance(req_meta.get("iss"), str)
+                or not req_meta["iss"]
+                or not isinstance(req_meta.get("sub"), str)
+                or not req_meta["sub"]
+                or not isinstance(req_meta.get("token_sha256"), str)
+                or not _HEX64_RE.fullmatch(req_meta["token_sha256"])
+            ):
+                raise CliError(
+                    f"request {pending.id} is missing valid verified OIDC metadata",
+                    EXIT_FAILED,
+                )
+            if req_meta["iss"] != policy.identity.issuer:
+                raise CliError(
+                    f"request {pending.id} was issued by {req_meta['iss']!r},"
+                    f" which does not match policy.identity.issuer {policy.identity.issuer!r}",
+                    EXIT_FAILED,
+                )
+            if req_meta.get("username_claim") != policy.identity.username_claim:
+                raise CliError(
+                    f"request {pending.id} used username_claim={req_meta.get('username_claim')!r},"
+                    f" which does not match policy.identity.username_claim"
+                    f" {policy.identity.username_claim!r}",
+                    EXIT_FAILED,
+                )
         reasons = policy.can_approve(
             approver, pending.request.requester, extra_groups=caller.mapped_groups
         )
@@ -500,10 +518,14 @@ def cmd_approve(ctx: Ctx) -> int:
         ):
             reasons.insert(0, "approver must be a different person than the requester")
         # Re-check requester's recorded IdP groups against CURRENT policy's allowed_groups
-        # and group_map (never trust stale pre-mapped policy group names).
+        # and group_map ONLY when stored groups_claim matches current policy.identity.groups_claim.
         req_extra: frozenset[str] = frozenset()
         if policy.identity.mode == "oidc" and isinstance(req_meta, dict):
-            raw_idp_g = req_meta.get("idp_groups", ())
+            same_gclaim = (
+                "groups_claim" in req_meta
+                and req_meta.get("groups_claim") == policy.identity.groups_claim
+            )
+            raw_idp_g = req_meta.get("idp_groups", ()) if same_gclaim else ()
             idp_gs = (
                 [g for g in raw_idp_g if isinstance(g, str)] if isinstance(raw_idp_g, list) else []
             )
@@ -852,6 +874,22 @@ _GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
 _REVOKING = ("json", "dsn", "signing_key", "receipt_log", *_SINK)
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser with allow_abbrev=False and token/JWS-scrubbed usage errors."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> NoReturn:
+        from datagrant.oidc import _JWS_LIKE_RE
+
+        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(message))
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {clean}", file=sys.stderr)
+        raise SystemExit(EXIT_USAGE)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Each option lives in its own parent so a subcommand only advertises what it uses.
     # Subcommand copies use SUPPRESS so a value given before the subcommand is kept.
@@ -909,13 +947,13 @@ def build_parser() -> argparse.ArgumentParser:
     def only(*names: str, dir_help: bool = False) -> list[argparse.ArgumentParser]:
         out = []
         for n in names:
-            c = argparse.ArgumentParser(add_help=False)
+            c = _SafeArgumentParser(add_help=False)
             flags, kw = with_dir[n] if dir_help and n in with_dir else opts[n]
             c.add_argument(*flags, **kw, **sup)
             out.append(c)
         return out
 
-    ident = argparse.ArgumentParser(add_help=False)
+    ident = _SafeArgumentParser(add_help=False)
     ident.add_argument(
         "--as-user",
         help="act as this name instead of the OS user. NOT authentication: for automation/tests",
@@ -924,27 +962,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--oidc-token-file",
         help="0600 file containing the caller's OIDC ID token (beats $DATAGRANT_OIDC_TOKEN)",
     )
-    apply = argparse.ArgumentParser(add_help=False)
+    apply = _SafeArgumentParser(add_help=False)
     apply.add_argument(
         "--apply", action="store_true", help="make the change (default is a dry run)"
     )
     apply.add_argument(
         "--dry-run", action="store_true", help="no-op: dry run is already the default"
     )
-    pol = argparse.ArgumentParser(add_help=False)
+    pol = _SafeArgumentParser(add_help=False)
     pol.add_argument("--policy", help=f"policy YAML (default ${POLICY_ENV})")
 
-    p = argparse.ArgumentParser(
+    p = _SafeArgumentParser(
         prog="datagrant",
         description="Just-in-time, expiring, masked access to regulated data, with receipts.",
     )
     for flags, kw in opts.values():
         p.add_argument(*flags, **kw)
     p.add_argument("--version", action="version", version=f"datagrant {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=_SafeArgumentParser)
 
     keys = sub.add_parser("keys", help="create or export keys").add_subparsers(
-        dest="sub", required=True
+        dest="sub", required=True, parser_class=_SafeArgumentParser
     )
     k = keys.add_parser(
         "init",
@@ -960,7 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
         "export-pubkey", parents=only("json", "signing_key"), help="print the receipt public key"
     ).set_defaults(fn=cmd_keys_export)
 
-    pc = sub.add_parser("policy", help="policy tools").add_subparsers(dest="sub", required=True)
+    pc = sub.add_parser("policy", help="policy tools").add_subparsers(dest="sub", required=True, parser_class=_SafeArgumentParser)
     c = pc.add_parser("check", parents=only("json"), help="validate a policy file")
     c.add_argument("file")
     c.set_defaults(fn=cmd_policy_check)
@@ -983,7 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("request_id")
     ap.set_defaults(fn=cmd_approve)
 
-    g = sub.add_parser("grant", help="inspect grants").add_subparsers(dest="sub", required=True)
+    g = sub.add_parser("grant", help="inspect grants").add_subparsers(dest="sub", required=True, parser_class=_SafeArgumentParser)
     gl = g.add_parser("list", parents=only("json", "dsn"), help="list active grants")
     gl.add_argument("--all", action="store_true", help="include revoked/expired")
     gl.set_defaults(fn=cmd_grant_list)
@@ -1000,7 +1038,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="revoke expired grants (run on a schedule)",
     ).set_defaults(fn=cmd_sweep)
 
-    rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(dest="sub", required=True)
+    rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(dest="sub", required=True, parser_class=_SafeArgumentParser)
     v = rc.add_parser(
         "verify",
         parents=only("json", "signing_key", "receipt_log", "receipt_sink"),

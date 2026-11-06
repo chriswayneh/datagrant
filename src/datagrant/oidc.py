@@ -98,6 +98,8 @@ class VerifiedIdentity:
     token_sha256: str | None = None
     mapped_groups: frozenset[str] = frozenset()
     idp_groups: tuple[str, ...] = ()
+    username_claim: str | None = None
+    groups_claim: str | None = None
 
     def receipt_dict(self) -> dict[str, str]:
         out: dict[str, str] = {"source": self.source}
@@ -116,8 +118,12 @@ class VerifiedIdentity:
     def request_state_dict(self) -> dict[str, Any]:
         mode = "oidc" if self.source == "oidc" else "local"
         out: dict[str, Any] = {"mode": mode, **self.receipt_dict()}
-        if self.source == "oidc" and self.idp_groups:
-            out["idp_groups"] = list(self.idp_groups)
+        if self.source == "oidc":
+            if self.username_claim is not None:
+                out["username_claim"] = self.username_claim
+            out["groups_claim"] = self.groups_claim
+            if self.idp_groups:
+                out["idp_groups"] = list(self.idp_groups)
         return out
 
 
@@ -806,6 +812,8 @@ def verify_oidc_token(
         raise IdentityError(f"JWT claim {cfg.username_claim!r} missing or invalid")
     if cfg.username_claim == "email" and claims.get("email_verified") is not True:
         raise IdentityError("JWT email_verified must be boolean true when username_claim is email")
+    if cfg.username_claim == "email" or "@" in raw_user:
+        raw_user = raw_user.lower()
 
     mapped: set[str] = set()
     if cfg.groups_claim is not None:
@@ -832,4 +840,6 @@ def verify_oidc_token(
         token_sha256=token_sha256(token),
         mapped_groups=frozenset(mapped),
         idp_groups=tuple(token_groups) if cfg.groups_claim is not None else (),
+        username_claim=cfg.username_claim,
+        groups_claim=cfg.groups_claim,
     )

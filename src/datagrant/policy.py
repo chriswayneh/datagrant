@@ -94,7 +94,7 @@ class Policy:
     ) -> list[str]:
         """Reasons the approver may not approve this requester (empty list = allowed)."""
         reasons = []
-        if approver == requester:
+        if approver == requester or approver.casefold() == requester.casefold():
             reasons.append("approver must be a different person than the requester")
         if not (self.groups_of(approver) | extra_groups) & self.approver_groups:
             reasons.append(f"{approver!r} is not in an approver group")
