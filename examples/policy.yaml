@@ -1,4 +1,5 @@
-# Example datagrant policy. Fictional names only.
+# Example datagrant policy (local identity, the default). Fictional names only.
+# For identity.mode: oidc see examples/policy-oidc.yaml and docs/demo-oidc.md.
 version: 1
 approval: auto            # auto | two-person (two-person also needs `approvers: [group]`)
 max_duration: 8h          # policy-wide cap

@@ -1,0 +1,39 @@
+# Example oidc-mode policy. Fictional names only.
+# Issuer must be the exact iss string your IdP puts in ID tokens.
+# datagrant does not obtain tokens; callers present one via --oidc-token-file
+# or $DATAGRANT_OIDC_TOKEN. See docs/demo-oidc.md and docs/policy.md#identity.
+version: 1
+approval: two-person
+approvers: [sec]
+max_duration: 8h
+groups:
+  ml: []          # empty on purpose: membership comes from identity.group_map
+  sec: []
+identity:
+  mode: oidc
+  issuer: https://idp.example.com
+  audience: datagrant-cli
+  username_claim: email
+  groups_claim: groups
+  allowed_groups: [idp-ml, idp-sec]   # IdP-side gate; grants no policy group
+  group_map:
+    idp-ml: ml
+    idp-sec: sec
+  # algorithms, max_token_age (15m), clock_skew (60s), jwks_cache_ttl (5m): defaults
+datasets:
+  - name: clinic
+    database: clinicdb
+    tables:
+      - name: public.patients
+        allowed_groups: [ml]
+        max_duration: 4h
+        columns:
+          patient_id: hash
+          birth_year: passthrough
+          zip: partial
+          diagnosis_code: passthrough
+          full_name: redact
+          region: passthrough
+        row_filters:
+          - "region = 'west'"
+        require_row_filter: true

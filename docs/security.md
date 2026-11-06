@@ -15,7 +15,7 @@ datagrant narrows, time-boxes and records access to regulated tables in Postgres
 | --- | --- |
 | Operator holding the admin DSN and keys | Run datagrant honestly. They can bypass it entirely. |
 | Requester / grantee | Nothing beyond the granted view, until it expires. |
-| Approver | Approve in good faith. Identity is not verified (see below). |
+| Approver | Approve in good faith. In local mode the name is not verified. In `oidc` mode the ID token is verified (see below). |
 | Policy file | Is the source of truth. Protect it like code: review it and limit who can write it. |
 | Postgres | Enforces roles, privileges, `security_barrier` views and session termination. |
 
@@ -30,10 +30,17 @@ datagrant narrows, time-boxes and records access to regulated tables in Postgres
 - **Tail truncation or replacement of the local log, with a sink (v0.2.0).** Each receipt is also sent to an external sink (HTTPS webhook or an append-only file elsewhere). `receipts verify --sink` fails if the sink is ahead of the local log, if the hashes differ at the same `seq`, or if the sink falls behind what it already acknowledged. `required` mode refuses access whose `issued` receipt can't reach the sink.
 - **Silent or forged audit edits.** Receipts are canonical JSON signed with ed25519 and hash-chained. `verify` reports the first altered, reordered, deleted or inserted entry. No receipt, no access: if the `issued` receipt can't be written, the grant is revoked.
 - **Key file tricks.** Key files are opened without following symlinks and must be private regular files. `keys init` won't overwrite a key or put both keys in one file.
+- **Claimed names, when `identity.mode: oidc` (on main, pending v0.3.0).** `request` and `approve` verify a compact ID token from the configured issuer (RS256 / ES256 / EdDSA only, exact `iss`, audience, `exp`, `iat` within `max_token_age`). `--as-user` is refused. Self-approval checks both the display name and `(iss, sub)`. IdP groups grant nothing unless `identity.group_map` translates them. Receipts record `iss`, `sub` and `token_sha256`, never the token.
 
 ## Known limits
 
-- **Identity is not authentication.** The requester and approver names come from the OS user or `--as-user`. Anyone with the admin DSN can claim any name, so two-person approval is a workflow control, not an enforced one. To enforce it, run datagrant behind a service that authenticates people and keeps the DSN to itself. OIDC identity is on the [roadmap](../ROADMAP.md).
+- **Local identity is not authentication.** Default `identity.mode: local` (and omitted `identity`) still takes the OS user or `--as-user`. Anyone with the admin DSN can claim any name, so two-person approval is a workflow control in that mode.
+- **OIDC is a CLI boundary, not a database boundary.** Verifying tokens on `request`/`approve` does not stop someone who already holds the admin DSN, write access to `policy.yaml`, or the keys from connecting to Postgres directly or editing policy. To treat OIDC as an enforced control, run datagrant on a bastion, CI job or wrapper that holds `DATAGRANT_DSN` and the policy and accepts only caller ID tokens.
+- **Bearer ID tokens can be replayed** until `exp` and `max_token_age` (default 15 minutes from `iat`). There is no DPoP or sender-constraining. Keep `--oidc-token-file` at `0600`. datagrant does not check live IdP session revocation.
+- **JWKS cache.** A revoked IdP signing key remains accepted until `jwks_cache_ttl` (default `5m`). Set `0s` to fetch every time, or delete `~/.cache/datagrant/jwks` during a key-compromise response.
+- **Claim stability.** Mutable claims (`email`, `preferred_username`) can be reassigned at some IdPs. Prefer `sub`, or verified emails that are not recycled. Self-approval still checks `(iss, sub)`.
+- **Unmapped IdP groups grant nothing.** A token group named `sec` does not make the caller a member of `policy.groups.sec` unless `group_map` says so.
+- **`http://` localhost issuers are a test switch.** `DATAGRANT_OIDC_ALLOW_INSECURE_LOCALHOST=1` is for offline fixtures only. Production issuers must be `https://`.
 - **Filters still reveal something.** A column in `filter_columns` is not in the view, but the grantee knows every row they see matches the filter (for example `region = 'west'`). A row filter on a column from `columns` leaves that column visible as usual.
 - **Masks leak shape.** NULLs stay NULL under `partial` and `hash`, and `partial` keeps value length. Pick `redact` or `null` when shape matters.
 - **Hashes are linkable within a scope.** Each dataset hashes under its own derived key (`hash_scope`, default the dataset name), so equal values don't match across datasets. Within one scope (every grant on that dataset, or datasets that share a `hash_scope`) equal values still hash equally, and anyone holding the hash key file can recompute any scope's hashes.

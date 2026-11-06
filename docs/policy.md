@@ -12,8 +12,9 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `approval` | yes | `auto` grants immediately when allowed. `two-person` creates a pending request that someone else must approve. |
 | `approvers` | two-person only | List of group names whose members can approve. Required when `approval: two-person`. |
 | `max_duration` | yes | Policy-wide cap on any grant. |
-| `groups` | yes | Map of group name to a list of user names (1 to 256 printable ASCII characters without spaces). Email-style names (containing `@`) fold ASCII `A-Z` to `a-z`; duplicate members in a group or conflicting spellings across groups are policy errors. |
+| `groups` | yes | Map of group name to a list of user names (1 to 256 printable ASCII characters without spaces). Email-style names (containing `@`) fold ASCII `A-Z` to `a-z`; duplicate members in a group or conflicting spellings across groups are policy errors. Empty lists are allowed: in `identity.mode: oidc`, membership can come only from `identity.group_map`. |
 | `datasets` | yes | List of datasets (see below). |
+| `identity` | no | How `request` and `approve` name the caller. Omit it, or set `mode: local`, for OS/`--as-user` names. Set `mode: oidc` to require a verified ID token. See [Identity](#identity). |
 
 ## Datasets
 
@@ -73,4 +74,36 @@ Keywords are case-insensitive. The filter is at most 1000 characters and nests a
   require_row_filter: true
 ```
 
-See [`examples/policy.yaml`](../examples/policy.yaml) for a complete file.
+See [`examples/policy.yaml`](../examples/policy.yaml) for a complete local-mode file, and [`examples/policy-oidc.yaml`](../examples/policy-oidc.yaml) for `identity.mode: oidc`.
+
+## Identity
+
+Optional. When omitted, datagrant behaves as v0.2.0: the caller is the OS user, or `--as-user`. That records a name; it does not prove one.
+
+`datagrant policy check FILE` validates the block offline (no IdP, no database). Unknown keys under `identity` are errors, matching the rest of the file.
+
+| Key | Required | Meaning |
+| --- | :---: | --- |
+| `mode` | no | `local` (default) or `oidc`. |
+| `issuer` | oidc | Exact `iss` match. `https://` URL with a host, no credentials, query or fragment. Trailing slash is kept because comparison is byte-for-byte. Plain `http://127.0.0.1` and `http://localhost` are refused unless `DATAGRANT_OIDC_ALLOW_INSECURE_LOCALHOST=1` (test-only; `policy check` then warns). Other `http://` URLs are always refused. |
+| `audience` | oidc | Non-empty string, or non-empty list of strings. Token `aud` must equal one of these (string) or intersect the list. If `aud` has several values, `azp` is required; whenever `azp` is present it must also be in this list. |
+| `algorithms` | no | Non-empty subset of `RS256`, `ES256`, `EdDSA`. Default: all three. `none`, `HS*`, other `RS*`/`PS*`, and `ES384`/`ES512` are policy errors. |
+| `username_claim` | no | Claim that becomes the requester or approver name. Default `sub`. Must match `[A-Za-z0-9_.-]{1,64}`. When this is `email`, verification also requires `email_verified` to be boolean `true` (the string `"true"` is refused). |
+| `groups_claim` | if mapping | Claim holding IdP group strings. Required when `allowed_groups` or `group_map` is set. Missing claim at runtime means an empty group list. A non-list value is an error. |
+| `allowed_groups` | no | Optional admission gate on **raw** IdP group names. The token must include at least one listed value or authentication fails. This does not grant a policy group. |
+| `group_map` | no | Map of `{idp-group: policy-group}`. Off/empty by default. Every target must exist in `policy.groups`. Unmapped IdP groups, including ones whose names match a policy group, grant nothing. |
+| `max_token_age` | no | Max age of `iat`, `1m`..`24h`. Default `15m`. These identity durations accept `s`/`m`/`h`/`d` (unlike grant `--duration`, which has no seconds). |
+| `clock_skew` | no | `0s`..`5m`. Default `60s`. |
+| `jwks_cache_ttl` | no | JWKS disk cache TTL, `0s`..`24h`. Default `5m`. `0s` fetches every time. |
+
+In `local` mode, any other `identity.*` key is a policy error, so a half-written OIDC block cannot silently fall back.
+
+Effective policy groups for a verified caller are:
+
+```text
+policy.groups_of(username)  union  { group_map[g] for each IdP group g that is a key in group_map }
+```
+
+`groups_of` is the static `policy.groups` membership of the verified username (email-style names folded ASCII `A-Z` to `a-z`). Mapped groups are extra. Static membership still works if you list the verified name in `policy.groups`.
+
+datagrant does not obtain tokens. The IdP issues an ID token; the caller presents it. See [CLI: OIDC identity](cli.md#oidc-identity) and the [OIDC demo](demo-oidc.md).
