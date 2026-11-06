@@ -772,15 +772,23 @@ def test_cache_dir_no_chmod_existing_and_lstat_fstat_checks(
     # L7: cache file owned by a different uid rejected on read
     good_dir = tmp_path / "good_dir"
     verify_oidc_token(tok, cfg, now=NOW, cache_dir=good_dir, env=INSECURE_ENV)
-    assert any(good_dir.glob("*.json"))
+    cfile = next(good_dir.glob("*.json"))
     orig_fstat = os.fstat
+    target_ino = cfile.stat().st_ino
 
     class FakeStat:
         def __init__(self, st: os.stat_result) -> None:
-            self.st_mode = st.st_mode
+            self._st = st
             self.st_uid = st.st_uid + 99
 
-    monkeypatch.setattr(os, "fstat", lambda fd: FakeStat(orig_fstat(fd)))
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._st, name)
+
+    def fake_fstat(fd: int) -> Any:
+        st = orig_fstat(fd)
+        return FakeStat(st) if st.st_ino == target_ino else st
+
+    monkeypatch.setattr(os, "fstat", fake_fstat)
     with pytest.raises(IdentityError, match="not owned by current uid"):
         verify_oidc_token(tok, cfg, now=NOW + 1, cache_dir=good_dir, env=INSECURE_ENV)
 

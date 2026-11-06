@@ -21,6 +21,7 @@ import os
 import re
 import ssl
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -349,7 +350,7 @@ def _check_cache_dir_stat(st: os.stat_result, cdir: Path) -> None:
         raise IdentityError(f"JWKS cache directory {cdir} must not be a symlink")
     if not stat.S_ISDIR(st.st_mode):
         raise IdentityError(f"JWKS cache path {cdir} is not a directory")
-    if os.name == "posix":
+    if sys.platform != "win32":
         euid = os.geteuid()
         if st.st_uid != euid:
             raise IdentityError(f"JWKS cache directory {cdir} is not owned by current uid {euid}")
@@ -385,7 +386,7 @@ def _ensure_cache_dir(cdir: Path) -> None:
     for d in reversed(missing):
         try:
             os.mkdir(d, 0o700)
-            if os.name == "posix":
+            if sys.platform != "win32":
                 os.chmod(d, 0o700)
         except FileExistsError:
             try:
@@ -423,7 +424,7 @@ def _read_cache(path: Path) -> dict[str, Any] | None:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise IdentityError(f"JWKS cache {path} is not a regular file")
-        if os.name == "posix":
+        if sys.platform != "win32":
             euid = os.geteuid()
             if st.st_uid != euid:
                 raise IdentityError(f"JWKS cache {path} is not owned by current uid {euid}")
@@ -468,7 +469,7 @@ def _write_cache(path: Path, doc: Mapping[str, Any]) -> None:
     tmp = Path(name)
     closed = False
     try:
-        if os.name == "posix":
+        if sys.platform != "win32":
             os.fchmod(fd, 0o600)
         payload = json.dumps(doc, sort_keys=True, allow_nan=False).encode("utf-8") + b"\n"
         if os.write(fd, payload) != len(payload):
