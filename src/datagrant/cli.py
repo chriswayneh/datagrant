@@ -944,7 +944,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     }
 
-    def only(*names: str, dir_help: bool = False) -> list[argparse.ArgumentParser]:
+    def only(*names: str, dir_help: bool = False) -> list[_SafeArgumentParser]:
         out = []
         for n in names:
             c = _SafeArgumentParser(add_help=False)
@@ -998,7 +998,9 @@ def build_parser() -> argparse.ArgumentParser:
         "export-pubkey", parents=only("json", "signing_key"), help="print the receipt public key"
     ).set_defaults(fn=cmd_keys_export)
 
-    pc = sub.add_parser("policy", help="policy tools").add_subparsers(dest="sub", required=True, parser_class=_SafeArgumentParser)
+    pc = sub.add_parser("policy", help="policy tools").add_subparsers(
+        dest="sub", required=True, parser_class=_SafeArgumentParser
+    )
     c = pc.add_parser("check", parents=only("json"), help="validate a policy file")
     c.add_argument("file")
     c.set_defaults(fn=cmd_policy_check)
@@ -1021,7 +1023,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("request_id")
     ap.set_defaults(fn=cmd_approve)
 
-    g = sub.add_parser("grant", help="inspect grants").add_subparsers(dest="sub", required=True, parser_class=_SafeArgumentParser)
+    g = sub.add_parser("grant", help="inspect grants").add_subparsers(
+        dest="sub", required=True, parser_class=_SafeArgumentParser
+    )
     gl = g.add_parser("list", parents=only("json", "dsn"), help="list active grants")
     gl.add_argument("--all", action="store_true", help="include revoked/expired")
     gl.set_defaults(fn=cmd_grant_list)
@@ -1038,7 +1042,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="revoke expired grants (run on a schedule)",
     ).set_defaults(fn=cmd_sweep)
 
-    rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(dest="sub", required=True, parser_class=_SafeArgumentParser)
+    rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(
+        dest="sub", required=True, parser_class=_SafeArgumentParser
+    )
     v = rc.add_parser(
         "verify",
         parents=only("json", "signing_key", "receipt_log", "receipt_sink"),

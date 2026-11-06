@@ -819,7 +819,7 @@ def test_jws_like_path_anchor_allows_dotted_directories() -> None:
     normal = Path("/home/alice/my.config.directory/oidc-token")
     assert oidc._safe_path_label(normal) == str(normal)
     # A path segment that itself has 3 base64url parts IS redacted
-    fake_jws = f"{_b64u(b'{\"alg\":\"EdDSA\"}')}.{_b64u(b'{\"sub\":\"alice\"}')}.{_b64u(b'signature')}"
+    fake_jws = ".".join([_b64u(b'{"alg":"EdDSA"}'), _b64u(b'{"sub":"alice"}'), _b64u(b"signature")])
     pasted = Path(f"/tmp/{fake_jws}")
     assert oidc._safe_path_label(pasted) == "<redacted token-like path>"
 
@@ -1389,7 +1389,11 @@ def test_red_team_pr28_m1_l2_l3_regressions(
         alg="EdDSA",
     )
     v_email = verify_oidc_token(
-        mixed_tok, _cfg(idp.issuer, username_claim="email"), now=NOW, cache_dir=tmp_path / "jc", env=INSECURE_ENV
+        mixed_tok,
+        _cfg(idp.issuer, username_claim="email"),
+        now=NOW,
+        cache_dir=tmp_path / "jc",
+        env=INSECURE_ENV,
     )
     assert v_email.username == "alice.user@example.com"
 
@@ -1399,7 +1403,11 @@ def test_red_team_pr28_m1_l2_l3_regressions(
         alg="EdDSA",
     )
     v_sub = verify_oidc_token(
-        mixed_upn, _cfg(idp.issuer, username_claim="sub"), now=NOW, cache_dir=tmp_path / "jc", env=INSECURE_ENV
+        mixed_upn,
+        _cfg(idp.issuer, username_claim="sub"),
+        now=NOW,
+        cache_dir=tmp_path / "jc",
+        env=INSECURE_ENV,
     )
     assert v_sub.username == "alice@example.com"
 
@@ -1434,9 +1442,7 @@ def test_red_team_pr28_m1_l2_l3_regressions(
     # L3: allow_abbrev=False rejects --oidc-token=... (will NOT prefix-match --oidc-token-file!)
     # AND _SafeArgumentParser.error scrubs any JWS / $DATAGRANT_OIDC_TOKEN from usage stderr!
     now_ts = int(time.time())
-    live_tok = keys.sign(
-        _base_claims(idp.issuer, iat=now_ts - 5, exp=now_ts + 300), alg="EdDSA"
-    )
+    live_tok = keys.sign(_base_claims(idp.issuer, iat=now_ts - 5, exp=now_ts + 300), alg="EdDSA")
     capsys.readouterr()
     rc_abb = main(["request", f"--oidc-token={live_tok}"])
     err_abb = capsys.readouterr().err
@@ -1525,8 +1531,16 @@ def test_red_team_pr28_m1_l2_l3_regressions(
     ]:
         meta = {**valid_meta, **bad_patch}
         box[tag] = rq_mod.PendingRequest(
-            tag, base_req, "sha", "SCRAM-SHA-256$x", t_now, t_now + timedelta(hours=1),
-            "pending", None, None, meta,
+            tag,
+            base_req,
+            "sha",
+            "SCRAM-SHA-256$x",
+            t_now,
+            t_now + timedelta(hours=1),
+            "pending",
+            None,
+            None,
+            meta,
         )
         out: list[str] = []
         rc = main(["--json", "approve", "--policy", str(pol_main), tag], out.append)
@@ -1535,8 +1549,16 @@ def test_red_team_pr28_m1_l2_l3_regressions(
     # Changed groups_claim in current policy -> stored idp_groups from old claim are NOT trusted!
     pol_roles = write_pol(gclaim="roles")
     box["gclaim_changed"] = rq_mod.PendingRequest(
-        "gclaim_changed", base_req, "sha", "SCRAM-SHA-256$x", t_now, t_now + timedelta(hours=1),
-        "pending", None, None, dict(valid_meta),  # stored groups_claim == 'groups', policy now 'roles'
+        "gclaim_changed",
+        base_req,
+        "sha",
+        "SCRAM-SHA-256$x",
+        t_now,
+        t_now + timedelta(hours=1),
+        "pending",
+        None,
+        None,
+        dict(valid_meta),  # stored groups_claim == 'groups', policy now 'roles'
     )
     out_g: list[str] = []
     rc_g = main(["--json", "approve", "--policy", str(pol_roles), "gclaim_changed"], out_g.append)
@@ -1544,8 +1566,16 @@ def test_red_team_pr28_m1_l2_l3_regressions(
 
     # Matching metadata succeeds dry-run approve
     box["ok_req"] = rq_mod.PendingRequest(
-        "ok_req", base_req, "sha", "SCRAM-SHA-256$x", t_now, t_now + timedelta(hours=1),
-        "pending", None, None, dict(valid_meta),
+        "ok_req",
+        base_req,
+        "sha",
+        "SCRAM-SHA-256$x",
+        t_now,
+        t_now + timedelta(hours=1),
+        "pending",
+        None,
+        None,
+        dict(valid_meta),
     )
     out_ok: list[str] = []
     assert main(["--json", "approve", "--policy", str(pol_main), "ok_req"], out_ok.append) == 0
