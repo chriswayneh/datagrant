@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from psycopg import sql
@@ -99,6 +100,14 @@ STATE_DDL: tuple[sql.Composed, ...] = (
         " CHECK (status IN ('pending','approved','expired')),"
         " approver text, grant_id text)"
     ).format(sql.Identifier(STATE_SCHEMA)),
+    # v0.3.0: requester and approver identity provenance (local vs OIDC iss/sub/token_sha256).
+    sql.SQL("ALTER TABLE {}.requests ADD COLUMN IF NOT EXISTS requester_identity jsonb").format(
+        sql.Identifier(STATE_SCHEMA)
+    ),
+    sql.SQL(
+        "ALTER TABLE {}.grants ADD COLUMN IF NOT EXISTS requester_identity jsonb,"
+        " ADD COLUMN IF NOT EXISTS approver_identities jsonb"
+    ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
 
@@ -138,6 +147,8 @@ def build_plan(
     now: datetime | None = None,
     approvers: Sequence[str] = (),
     verifier: str | None = None,
+    requester_identity: Mapping[str, Any] | None = None,
+    approver_identities: Sequence[Mapping[str, Any]] | None = None,
 ) -> GrantPlan:
     """Build the SQL for an allowed decision. Pure: no database access."""
     if not decision.allowed:
@@ -145,7 +156,7 @@ def build_plan(
     if decision.approval == "two-person" and not approvers:
         raise GrantError("two-person approval: the grant needs an approver")
     gid = grant_id or secrets.token_hex(6)
-    if not _GRANT_ID_RE.match(gid):
+    if not _GRANT_ID_RE.fullmatch(gid):
         raise GrantError("grant id must be 12 lowercase hex characters")
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
@@ -187,7 +198,7 @@ def build_plan(
         sql.SQL(
             "INSERT INTO {}.grants (id, role_name, view_name, dataset, table_name, requester,"
             " purpose, columns, row_filter, approval, policy_sha256, created_at, expires_at,"
-            " masks, policy_version, approvers)"
+            " masks, policy_version, approvers, requester_identity, approver_identities)"
             " VALUES ({})"
         ).format(
             sql.Identifier(STATE_SCHEMA),
@@ -210,6 +221,16 @@ def build_plan(
                     json.dumps({c: decision.masks[c] for c in req.columns}, sort_keys=True),
                     decision.policy_version,
                     list(approvers),
+                    (
+                        json.dumps(dict(requester_identity), sort_keys=True)
+                        if requester_identity is not None
+                        else None
+                    ),
+                    (
+                        json.dumps([dict(x) for x in approver_identities], sort_keys=True)
+                        if approver_identities is not None
+                        else None
+                    ),
                 )
             ),
         ),
@@ -237,6 +258,10 @@ def build_plan(
             decision.policy_version,
             decision.approval,
             tuple(approvers),
+            dict(requester_identity) if requester_identity is not None else None,
+            tuple(dict(x) for x in approver_identities)
+            if approver_identities is not None
+            else None,
         ),
     )
 

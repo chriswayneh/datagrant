@@ -24,6 +24,7 @@ from datagrant.oidc import (
     IDENTITY_MODES,
     IdentityConfig,
     allow_insecure_localhost,
+    normalize_principal,
     validate_oidc_url,
 )
 from datagrant.rowfilter import RowFilterError, parse_row_filter
@@ -35,6 +36,7 @@ _SMALL_DURATION_RE = re.compile(r"^(\d{1,6})([smhd])$")
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_MEMBER_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
 MAX_POLICY_BYTES = 1_000_000
 
 
@@ -46,7 +48,7 @@ def parse_duration(value: object, where: str = "duration") -> timedelta:
     """Parse '30m', '4h', or '2d' into a positive timedelta."""
     if not isinstance(value, str):
         raise PolicyError(f"{where}: expected a string like '4h', got {type(value).__name__}")
-    m = _DURATION_RE.match(value.strip())
+    m = _DURATION_RE.fullmatch(value.strip())
     if not m or int(m.group(1)) == 0:
         raise PolicyError(f"{where}: invalid duration {value!r} (use e.g. '30m', '4h', '1d')")
     try:
@@ -94,14 +96,17 @@ class Policy:
     ) -> list[str]:
         """Reasons the approver may not approve this requester (empty list = allowed)."""
         reasons = []
-        if approver == requester:
+        if approver == requester or approver.casefold() == requester.casefold():
             reasons.append("approver must be a different person than the requester")
         if not (self.groups_of(approver) | extra_groups) & self.approver_groups:
             reasons.append(f"{approver!r} is not in an approver group")
         return reasons
 
     def groups_of(self, requester: str) -> frozenset[str]:
-        return frozenset(g for g, members in self.groups.items() if requester in members)
+        norm = normalize_principal(requester)
+        return frozenset(
+            g for g, members in self.groups.items() if norm in members or requester in members
+        )
 
 
 @dataclass(frozen=True)
@@ -165,7 +170,7 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
     )
     name = _req(raw, "name", str, where)
     parts = name.split(".")
-    if len(parts) != 2 or not all(_IDENT_RE.match(p) for p in parts):
+    if len(parts) != 2 or not all(_IDENT_RE.fullmatch(p) for p in parts):
         raise PolicyError(f"{where}.name: expected 'schema.table' identifiers, got {name!r}")
     allowed = _str_list(_req(raw, "allowed_groups", list, where), f"{where}.allowed_groups")
     for g in allowed:
@@ -175,7 +180,7 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
     if not cols:
         raise PolicyError(f"{where}.columns: must list at least one column")
     for col, mask in cols.items():
-        if not isinstance(col, str) or not _IDENT_RE.match(col):
+        if not isinstance(col, str) or not _IDENT_RE.fullmatch(col):
             raise PolicyError(f"{where}.columns: invalid column name {col!r}")
         if not isinstance(mask, str) or mask not in MASK_TYPES:
             raise PolicyError(
@@ -183,7 +188,7 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
             )
     fcols = _str_list(raw.get("filter_columns", []), f"{where}.filter_columns")
     for col in fcols:
-        if not _IDENT_RE.match(col):
+        if not _IDENT_RE.fullmatch(col):
             raise PolicyError(f"{where}.filter_columns: invalid column name {col!r}")
         if col in cols:
             raise PolicyError(
@@ -230,7 +235,7 @@ def _parse_seconds_duration(
 ) -> timedelta:
     if not isinstance(value, str):
         raise PolicyError(f"{where}: expected a duration string like '60s' or '5m'")
-    m = _SMALL_DURATION_RE.match(value.strip())
+    m = _SMALL_DURATION_RE.fullmatch(value.strip())
     if not m:
         raise PolicyError(f"{where}: invalid duration {value!r} (use e.g. '0s', '60s', '5m', '1h')")
     td = timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
@@ -297,10 +302,10 @@ def _parse_identity(
             f"{where}.algorithms: must be a non-empty subset of {sorted(ALLOWED_ALGS)}"
         )
     uclaim = raw.get("username_claim", "sub")
-    if not isinstance(uclaim, str) or not _NAME_RE.match(uclaim):
+    if not isinstance(uclaim, str) or not _NAME_RE.fullmatch(uclaim):
         raise PolicyError(f"{where}.username_claim: invalid claim name {uclaim!r}")
     gclaim = raw.get("groups_claim")
-    if gclaim is not None and (not isinstance(gclaim, str) or not _NAME_RE.match(gclaim)):
+    if gclaim is not None and (not isinstance(gclaim, str) or not _NAME_RE.fullmatch(gclaim)):
         raise PolicyError(f"{where}.groups_claim: invalid claim name {gclaim!r}")
     allowed_g = frozenset(_str_list(raw.get("allowed_groups", []), f"{where}.allowed_groups"))
     raw_map = raw.get("group_map", {})
@@ -379,10 +384,31 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         raise PolicyError(f"policy.approval: must be one of {sorted(APPROVAL_MODES)}")
     cap = parse_duration(_req(data, "max_duration", str, "policy"), "policy.max_duration")
     groups: dict[str, frozenset[str]] = {}
+    seen_spellings: dict[str, str] = {}
     for g, members in _req(data, "groups", dict, "policy").items():
-        if not isinstance(g, str) or not _NAME_RE.match(g):
+        if not isinstance(g, str) or not _NAME_RE.fullmatch(g):
             raise PolicyError(f"policy.groups: invalid group name {g!r}")
-        groups[g] = frozenset(_str_list(members, f"policy.groups.{g}"))
+        raw_members = _str_list(members, f"policy.groups.{g}")
+        norm_set: set[str] = set()
+        for m in raw_members:
+            if not _MEMBER_RE.fullmatch(m):
+                raise PolicyError(
+                    f"policy.groups.{g}: invalid member name {m!r} (expected 1..256 printable ASCII chars)"
+                )
+            norm = normalize_principal(m)
+            if norm in norm_set:
+                raise PolicyError(
+                    f"policy.groups.{g}: duplicate member {m!r} (normalized to {norm!r})"
+                )
+            prev_raw = seen_spellings.get(norm)
+            if prev_raw is not None and prev_raw != m:
+                raise PolicyError(
+                    f"policy.groups.{g}: conflicting member spellings {prev_raw!r} and {m!r}"
+                    f" both normalize to {norm!r}"
+                )
+            seen_spellings[norm] = m
+            norm_set.add(norm)
+        groups[g] = frozenset(norm_set)
     datasets: dict[str, Dataset] = {}
     raw_ds = _req(data, "datasets", list, "policy")
     if not raw_ds:
@@ -393,13 +419,13 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
             raise PolicyError(f"{where}: expected a mapping")
         _check_keys(ds, {"name", "database", "tables", "hash_scope"}, where)
         name = _req(ds, "name", str, where)
-        if not _NAME_RE.match(name) or name in datasets:
+        if not _NAME_RE.fullmatch(name) or name in datasets:
             raise PolicyError(f"{where}.name: invalid or duplicate dataset name {name!r}")
         db = _req(ds, "database", str, where)
-        if not _IDENT_RE.match(db):
+        if not _IDENT_RE.fullmatch(db):
             raise PolicyError(f"{where}.database: invalid database name {db!r}")
         scope = ds.get("hash_scope", name)
-        if not isinstance(scope, str) or not _NAME_RE.match(scope):
+        if not isinstance(scope, str) or not _NAME_RE.fullmatch(scope):
             raise PolicyError(f"{where}.hash_scope: invalid hash scope {scope!r}")
         tables: dict[str, TableRule] = {}
         for j, t in enumerate(_req(ds, "tables", list, where)):

@@ -26,7 +26,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from datagrant import __version__, receipt
 from datagrant.keys import (
@@ -50,6 +50,7 @@ class CliError(Exception):
         self.code = code
 
 
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _PW_KV = re.compile(r"(password\s*=\s*)('(?:[^'\\]|\\.)*'|\S+)", re.IGNORECASE)
 _PW_URL = re.compile(r"(\w+://[^:/@\s]*:)[^@\s]*@")
 
@@ -72,6 +73,7 @@ def redact(text: str, dsn: str | None = None) -> str:
 class Ctx:
     args: argparse.Namespace
     out: Callable[[str], None]
+    oidc_token: str | None = None
 
     @property
     def json(self) -> bool:
@@ -85,6 +87,49 @@ def _identity(args: argparse.Namespace) -> tuple[str, str]:
     if getattr(args, "as_user", None):
         return args.as_user, "flag"
     return getpass.getuser(), "os"
+
+
+def _resolve_caller(ctx: Ctx, policy: Any) -> Any:
+    """Resolve and verify the caller against ``policy.identity`` (local or OIDC)."""
+    from datagrant.oidc import (
+        OIDC_TOKEN_ENV,
+        VerifiedIdentity,
+        normalize_principal,
+        read_token_file,
+        verify_oidc_token,
+    )
+
+    args = ctx.args
+    as_user = getattr(args, "as_user", None)
+    token_file = getattr(args, "oidc_token_file", None)
+    cfg = policy.identity
+    if cfg.mode == "local":
+        if token_file is not None:
+            raise CliError(
+                "--oidc-token-file cannot be used when policy.identity.mode is 'local'",
+                EXIT_USAGE,
+            )
+        user, source = _identity(args)
+        return VerifiedIdentity(username=normalize_principal(user), source=source)
+
+    if as_user is not None:
+        raise CliError(
+            "--as-user is not allowed when policy.identity.mode is 'oidc'",
+            EXIT_USAGE,
+        )
+    if token_file is not None:
+        raw_token = read_token_file(token_file)
+        ctx.oidc_token = raw_token
+    else:
+        env_tok = os.environ.get(OIDC_TOKEN_ENV)
+        if not env_tok or not env_tok.strip():
+            raise CliError(
+                f"no OIDC token: pass --oidc-token-file or set ${OIDC_TOKEN_ENV}",
+                EXIT_USAGE,
+            )
+        raw_token = env_tok
+        ctx.oidc_token = raw_token
+    return verify_oidc_token(raw_token, cfg)
 
 
 def _dsn(args: argparse.Namespace) -> str:
@@ -130,17 +175,18 @@ def _log_path(args: argparse.Namespace) -> Path:
     return Path(args.receipt_log) if args.receipt_log else receipt.default_log_path()
 
 
-def _hide_token(text: str) -> str:
+def _hide_token(text: str, extra_oidc_token: str | None = None) -> str:
     from datagrant.oidc import OIDC_TOKEN_ENV, redact_token
     from datagrant.sink import SINK_TOKEN_ENV
 
     tok = os.environ.get(SINK_TOKEN_ENV)
     out = text.replace(tok, "***") if tok else text
-    return redact_token(out, os.environ.get(OIDC_TOKEN_ENV))
+    out = redact_token(out, os.environ.get(OIDC_TOKEN_ENV))
+    return redact_token(out, extra_oidc_token)
 
 
 def _warn(ctx: Ctx, msg: str) -> None:
-    print(f"datagrant: warning: {_hide_token(msg)}", file=sys.stderr)
+    print(f"datagrant: warning: {_hide_token(msg, ctx.oidc_token)}", file=sys.stderr)
 
 
 def _check_outbox(ctx: Ctx, local: Any) -> None:
@@ -298,13 +344,8 @@ def cmd_request(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
-    if policy.identity.mode != "local":
-        raise CliError(
-            f"policy requires identity.mode={policy.identity.mode!r}, which is not yet"
-            " supported on CLI commands",
-            EXIT_FAILED,
-        )
-    user, source = _identity(a)
+    caller = _resolve_caller(ctx, policy)
+    user, source = caller.username, caller.source
     cols = tuple(c.strip() for c in a.columns.split(",") if c.strip())
     req = Request(
         user,
@@ -315,7 +356,7 @@ def cmd_request(ctx: Ctx) -> int:
         a.purpose,
         a.row_filter,
     )
-    decision = evaluate(policy, req)
+    decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
     if not decision.allowed:
         ctx.emit(
             {"allowed": False, "reasons": list(decision.reasons), "requester": user},
@@ -339,6 +380,7 @@ def cmd_request(ctx: Ctx) -> int:
                 catalog=catalog,
                 hash_key=hash_key,
                 approvers=("<approver>",) if two_person else (),
+                requester_identity=caller.receipt_dict(),
             )
             sqls = _redacted_sql(plan)
             what = (
@@ -363,6 +405,7 @@ def cmd_request(ctx: Ctx) -> int:
                 policy_sha256=policy.sha256,
                 verifier=scram_verifier(password),
                 ttl=parse_duration(a.pending_ttl, "--pending-ttl"),
+                requester_identity=caller.request_state_dict(),
             )
             ctx.emit(
                 {
@@ -385,6 +428,8 @@ def cmd_request(ctx: Ctx) -> int:
             password=password,
             catalog=catalog,
             hash_key=hash_key,
+            requester_identity=caller.receipt_dict(),
+            approver_identities=(),
         )
         from datagrant.pg.grant import apply_plan
 
@@ -424,21 +469,82 @@ def cmd_approve(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
-    if policy.identity.mode != "local":
-        raise CliError(
-            f"policy requires identity.mode={policy.identity.mode!r}, which is not yet"
-            " supported on CLI commands",
-            EXIT_FAILED,
-        )
-    approver, source = _identity(a)
+    caller = _resolve_caller(ctx, policy)
+    approver, source = caller.username, caller.source
     with _connect(a) as conn:
         if a.apply:
             ensure_state(conn)
         pending = get_request(conn, a.request_id)
         if pending.status != "pending" or pending.verifier is None:
             raise CliError(f"request {pending.id} is {pending.status}, not pending")
-        reasons = policy.can_approve(approver, pending.request.requester)
-        decision = evaluate(policy, pending.request)  # re-check against the current policy
+        req_meta = pending.requester_identity
+        req_mode = req_meta.get("mode", "local") if isinstance(req_meta, dict) else "local"
+        if req_mode != policy.identity.mode:
+            raise CliError(
+                f"request {pending.id} was created with identity mode {req_mode!r},"
+                f" but current policy uses {policy.identity.mode!r}",
+                EXIT_FAILED,
+            )
+        if policy.identity.mode == "oidc":
+            if (
+                not isinstance(req_meta, dict)
+                or req_meta.get("source") != "oidc"
+                or not isinstance(req_meta.get("iss"), str)
+                or not req_meta["iss"]
+                or not isinstance(req_meta.get("sub"), str)
+                or not req_meta["sub"]
+                or not isinstance(req_meta.get("token_sha256"), str)
+                or not _HEX64_RE.fullmatch(req_meta["token_sha256"])
+            ):
+                raise CliError(
+                    f"request {pending.id} is missing valid verified OIDC metadata",
+                    EXIT_FAILED,
+                )
+            if req_meta["iss"] != policy.identity.issuer:
+                raise CliError(
+                    f"request {pending.id} was issued by {req_meta['iss']!r},"
+                    f" which does not match policy.identity.issuer {policy.identity.issuer!r}",
+                    EXIT_FAILED,
+                )
+            if req_meta.get("username_claim") != policy.identity.username_claim:
+                raise CliError(
+                    f"request {pending.id} used username_claim={req_meta.get('username_claim')!r},"
+                    f" which does not match policy.identity.username_claim"
+                    f" {policy.identity.username_claim!r}",
+                    EXIT_FAILED,
+                )
+        reasons = policy.can_approve(
+            approver, pending.request.requester, extra_groups=caller.mapped_groups
+        )
+        if (
+            policy.identity.mode == "oidc"
+            and isinstance(req_meta, dict)
+            and (caller.iss, caller.sub) == (req_meta.get("iss"), req_meta.get("sub"))
+            and "approver must be a different person than the requester" not in reasons
+        ):
+            reasons.insert(0, "approver must be a different person than the requester")
+        # Re-check requester's recorded IdP groups against CURRENT policy's allowed_groups
+        # and group_map ONLY when stored groups_claim matches current policy.identity.groups_claim.
+        req_extra: frozenset[str] = frozenset()
+        if policy.identity.mode == "oidc" and isinstance(req_meta, dict):
+            same_gclaim = (
+                "groups_claim" in req_meta
+                and req_meta.get("groups_claim") == policy.identity.groups_claim
+            )
+            raw_idp_g = req_meta.get("idp_groups", ()) if same_gclaim else ()
+            idp_gs = (
+                [g for g in raw_idp_g if isinstance(g, str)] if isinstance(raw_idp_g, list) else []
+            )
+            if policy.identity.allowed_groups and not (
+                set(idp_gs) & policy.identity.allowed_groups
+            ):
+                reasons.append(
+                    "request no longer allowed: requester is not in policy.identity.allowed_groups"
+                )
+            req_extra = frozenset(
+                policy.identity.group_map[g] for g in idp_gs if g in policy.identity.group_map
+            )
+        decision = evaluate(policy, pending.request, extra_groups=req_extra)
         if not decision.allowed:
             reasons += [f"request no longer allowed: {r}" for r in decision.reasons]
         if reasons:
@@ -447,6 +553,12 @@ def cmd_approve(ctx: Ctx) -> int:
                 "not approved:\n" + "\n".join(f"  - {r}" for r in reasons),
             )
             return EXIT_FAILED
+        req_receipt_ident: dict[str, Any] = (
+            {k: v for k, v in req_meta.items() if k in ("source", "iss", "sub", "token_sha256")}
+            if isinstance(req_meta, dict) and "source" in req_meta
+            else {"source": "os"}
+        )
+        app_receipt_idents = (caller.approver_receipt_dict(),)
         cols = pending.request.columns
         hash_key = (
             load_hash_key(resolve_key_path("hash", a.hash_key))
@@ -463,6 +575,8 @@ def cmd_approve(ctx: Ctx) -> int:
                 catalog=inspect_table(conn, pending.request.table),
                 hash_key=hash_key,
                 approvers=(approver,),
+                requester_identity=req_receipt_ident,
+                approver_identities=app_receipt_idents,
             )
             sqls = _redacted_sql(plan)
             ctx.emit(
@@ -482,6 +596,8 @@ def cmd_approve(ctx: Ctx) -> int:
             catalog=inspect_table(conn, pending.request.table),
             hash_key=hash_key,
             approvers=(approver,),
+            requester_identity=req_receipt_ident,
+            approver_identities=app_receipt_idents,
         )
         apply_plan(conn, plan, sink, request_id=pending.id, approver=approver)
         _deliver_issued(ctx, conn, plan, sink)
@@ -764,6 +880,22 @@ _GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
 _REVOKING = ("json", "dsn", "signing_key", "receipt_log", *_SINK)
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser with allow_abbrev=False and token/JWS-scrubbed usage errors."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> NoReturn:
+        from datagrant.oidc import _JWS_LIKE_RE
+
+        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(message))
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {clean}", file=sys.stderr)
+        raise SystemExit(EXIT_USAGE)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Each option lives in its own parent so a subcommand only advertises what it uses.
     # Subcommand copies use SUPPRESS so a value given before the subcommand is kept.
@@ -818,41 +950,45 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     }
 
-    def only(*names: str, dir_help: bool = False) -> list[argparse.ArgumentParser]:
+    def only(*names: str, dir_help: bool = False) -> list[_SafeArgumentParser]:
         out = []
         for n in names:
-            c = argparse.ArgumentParser(add_help=False)
+            c = _SafeArgumentParser(add_help=False)
             flags, kw = with_dir[n] if dir_help and n in with_dir else opts[n]
             c.add_argument(*flags, **kw, **sup)
             out.append(c)
         return out
 
-    ident = argparse.ArgumentParser(add_help=False)
+    ident = _SafeArgumentParser(add_help=False)
     ident.add_argument(
         "--as-user",
         help="act as this name instead of the OS user. NOT authentication: for automation/tests",
     )
-    apply = argparse.ArgumentParser(add_help=False)
+    ident.add_argument(
+        "--oidc-token-file",
+        help="0600 file containing the caller's OIDC ID token (beats $DATAGRANT_OIDC_TOKEN)",
+    )
+    apply = _SafeArgumentParser(add_help=False)
     apply.add_argument(
         "--apply", action="store_true", help="make the change (default is a dry run)"
     )
     apply.add_argument(
         "--dry-run", action="store_true", help="no-op: dry run is already the default"
     )
-    pol = argparse.ArgumentParser(add_help=False)
+    pol = _SafeArgumentParser(add_help=False)
     pol.add_argument("--policy", help=f"policy YAML (default ${POLICY_ENV})")
 
-    p = argparse.ArgumentParser(
+    p = _SafeArgumentParser(
         prog="datagrant",
         description="Just-in-time, expiring, masked access to regulated data, with receipts.",
     )
     for flags, kw in opts.values():
         p.add_argument(*flags, **kw)
     p.add_argument("--version", action="version", version=f"datagrant {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=_SafeArgumentParser)
 
     keys = sub.add_parser("keys", help="create or export keys").add_subparsers(
-        dest="sub", required=True
+        dest="sub", required=True, parser_class=_SafeArgumentParser
     )
     k = keys.add_parser(
         "init",
@@ -868,7 +1004,9 @@ def build_parser() -> argparse.ArgumentParser:
         "export-pubkey", parents=only("json", "signing_key"), help="print the receipt public key"
     ).set_defaults(fn=cmd_keys_export)
 
-    pc = sub.add_parser("policy", help="policy tools").add_subparsers(dest="sub", required=True)
+    pc = sub.add_parser("policy", help="policy tools").add_subparsers(
+        dest="sub", required=True, parser_class=_SafeArgumentParser
+    )
     c = pc.add_parser("check", parents=only("json"), help="validate a policy file")
     c.add_argument("file")
     c.set_defaults(fn=cmd_policy_check)
@@ -891,7 +1029,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("request_id")
     ap.set_defaults(fn=cmd_approve)
 
-    g = sub.add_parser("grant", help="inspect grants").add_subparsers(dest="sub", required=True)
+    g = sub.add_parser("grant", help="inspect grants").add_subparsers(
+        dest="sub", required=True, parser_class=_SafeArgumentParser
+    )
     gl = g.add_parser("list", parents=only("json", "dsn"), help="list active grants")
     gl.add_argument("--all", action="store_true", help="include revoked/expired")
     gl.set_defaults(fn=cmd_grant_list)
@@ -908,7 +1048,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="revoke expired grants (run on a schedule)",
     ).set_defaults(fn=cmd_sweep)
 
-    rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(dest="sub", required=True)
+    rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(
+        dest="sub", required=True, parser_class=_SafeArgumentParser
+    )
     v = rc.add_parser(
         "verify",
         parents=only("json", "signing_key", "receipt_log", "receipt_sink"),
@@ -957,6 +1099,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
 
 
 def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) -> int:
+    from datagrant.oidc import IdentityError
     from datagrant.pg.grant import GrantError
     from datagrant.pg.mask import MaskError
     from datagrant.policy import PolicyError
@@ -999,6 +1142,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         return exc.code
     except (
         PolicyError,
+        IdentityError,
         KeyFileError,
         GrantError,
         MaskError,
@@ -1015,7 +1159,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
 
 
 def _err(ctx: Ctx, msg: str, code: int) -> None:
-    msg = _hide_token(msg)
+    msg = _hide_token(msg, ctx.oidc_token)
     if ctx.json:
         ctx.out(json.dumps({"error": msg, "exit_code": code}))
     else:

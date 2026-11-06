@@ -12,7 +12,7 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `approval` | yes | `auto` grants immediately when allowed. `two-person` creates a pending request that someone else must approve. |
 | `approvers` | two-person only | List of group names whose members can approve. Required when `approval: two-person`. |
 | `max_duration` | yes | Policy-wide cap on any grant. |
-| `groups` | yes | Map of group name to a list of user names. |
+| `groups` | yes | Map of group name to a list of user names (1 to 256 printable ASCII characters without spaces). Email-style names (containing `@`) fold ASCII `A-Z` to `a-z`; duplicate members in a group or conflicting spellings across groups are policy errors. |
 | `datasets` | yes | List of datasets (see below). |
 
 ## Datasets

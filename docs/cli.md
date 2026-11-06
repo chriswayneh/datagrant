@@ -25,6 +25,8 @@ Run `datagrant COMMAND --help` for the exact flags of your installed version. Th
 | External receipt sink (`https://` URL, or `file:///` path) | `--receipt-sink` | `DATAGRANT_RECEIPT_SINK` | none (no sink) |
 | Sink mode (`required` or `best-effort`) | `--receipt-sink-mode` | `DATAGRANT_RECEIPT_SINK_MODE` | `best-effort` |
 | Sink bearer token | none | `DATAGRANT_RECEIPT_SINK_TOKEN` | none |
+| OIDC ID token (`identity.mode: oidc`) | `--oidc-token-file` | `DATAGRANT_OIDC_TOKEN` | none |
+| JWKS cache directory | none | `DATAGRANT_JWKS_CACHE_DIR` | `~/.cache/datagrant/jwks` |
 
 Key paths resolve in this order: explicit flag, then environment variable, then `keys init --dir`, then the default directory. Every command uses the same resolver.
 
@@ -49,10 +51,10 @@ Prints the public key hex for `receipts verify --pubkey`.
 ### `policy check FILE`
 Validates a policy offline. No database is involved.
 
-### `request --dataset D --table SCHEMA.TABLE --columns C1,C2 --duration 2h --purpose TEXT [--row-filter EXPR] [--pending-ttl 24h] [--policy FILE] [--as-user NAME] [--apply]`
+### `request --dataset D --table SCHEMA.TABLE --columns C1,C2 --duration 2h --purpose TEXT [--row-filter EXPR] [--pending-ttl 24h] [--policy FILE] [--as-user NAME] [--oidc-token-file FILE] [--apply]`
 Evaluates the request against the policy. With `approval: auto`, `--apply` creates the masked view and an expiring LOGIN role, writes an `issued` receipt, and prints the connection details and the one-time password. With `approval: two-person`, it creates a pending request (default lifetime `--pending-ttl 24h`). The requester gets the password now, the database stores only its SCRAM verifier, and no role exists until approval. If the `issued` receipt can't be written, the grant is revoked at once ("no receipt, no access").
 
-### `approve REQUEST_ID [--policy FILE] [--as-user NAME] [--apply]`
+### `approve REQUEST_ID [--policy FILE] [--as-user NAME] [--oidc-token-file FILE] [--apply]`
 A member of an `approvers` group who is not the requester approves a pending request. The policy is re-evaluated at approval time.
 
 ### `grant list [--all]` and `grant status GRANT_ID`
