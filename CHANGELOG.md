@@ -4,6 +4,14 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+- Optional OIDC identity ([design](docs/design/oidc-identity.md), [policy](docs/policy.md#identity), [CLI](docs/cli.md#oidc-identity), [demo](docs/demo-oidc.md)). Merged on main; v0.3.0 is not tagged yet.
+  - `policy.identity.mode: local` (default, including when `identity` is omitted) keeps OS/`--as-user` names. `mode: oidc` requires an ID token on every `request` and `approve`.
+  - Token input is `--oidc-token-file` (0600, no symlinks, beats env) or `$DATAGRANT_OIDC_TOKEN`. There is no `--oidc-token` flag. In `oidc` mode `--as-user` is refused (exit 2); a missing token is refused (exit 2). In `local` mode `--oidc-token-file` is refused (exit 2) and `$DATAGRANT_OIDC_TOKEN` is ignored.
+  - Verified `username_claim` (default `sub`) becomes the requester or approver. IdP groups grant nothing unless listed in `identity.group_map`. `allowed_groups` is an IdP-side admission gate only.
+  - Two-person `approve` checks identity-mode parity (`local` vs `oidc`, exit 1, no name-only fallback), matching `iss` / `username_claim`, and both the display name and `(iss, sub)` so a renamed email cannot self-approve.
+  - Receipts stay version 1 with additive `identity` and `approver_identities` (`source`, and for OIDC `iss`, `sub`, `token_sha256`). The raw token is never stored. `revoke` and `sweep` still take no identity.
+
 ### Fixed
 - CLI error redaction no longer globally replaces a DSN password shorter than 4 characters, which mangled diagnostics (password `er` turned `server error` into `s***v*** ***ror`). `user:pass@` and `password=` forms are still redacted at every length, so a full DSN does not leak its password.
 

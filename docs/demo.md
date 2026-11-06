@@ -56,3 +56,9 @@ python scripts/demo.py
 To use Docker on Windows, start the container yourself with `docker compose -f scripts/demo-compose.yml up -d --wait` (set `DATAGRANT_DEMO_PG_PASSWORD` first), run the line above, then `docker compose -f scripts/demo-compose.yml down -v`.
 
 CI runs the demo on every push twice: `demo` against the CI Postgres service, and `demo-compose` through `make demo` (Docker compose), which also checks that teardown left no containers or volumes.
+
+## OIDC identity (on main, pending v0.3.0)
+
+`make demo` still uses local identity (`--as-user alice` / `--as-user carol`). That is the v0.2.0 GIF above.
+
+To walk `request` and `approve` with synthetic short-lived ID tokens, no real IdP and no real secrets, see [demo-oidc.md](demo-oidc.md). That write-up is documentation plus copy-paste fixtures; it is not a second `make demo` target.
