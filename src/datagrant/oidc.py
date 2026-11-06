@@ -62,6 +62,7 @@ _JWS_LIKE_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8
 _PRINTABLE_TOKEN_RE = re.compile(r"^[\x21-\x7e]+$")
 _SUB_RE = re.compile(r"^[\x20-\x7e]{1,256}$")
 _USERNAME_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _LOCAL_HOSTS = ("127.0.0.1", "localhost")
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
 
@@ -162,8 +163,8 @@ def validate_oidc_url(
 
 
 def normalize_principal(name: str, *, email_claim: bool = False) -> str:
-    """Casefold email-style usernames so ``Alice@Corp.com`` and ``alice@corp.com`` match."""
-    return name.casefold() if (email_claim or "@" in name) else name
+    """Fold ASCII A-Z to a-z on email-style usernames (never Unicode casefold)."""
+    return name.translate(_ASCII_LOWER) if (email_claim or "@" in name) else name
 
 
 def token_sha256(raw_token: str) -> str:

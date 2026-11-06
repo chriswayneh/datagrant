@@ -1418,7 +1418,7 @@ def test_red_team_pr28_m1_l2_l3_regressions(
             "approval": "two-person",
             "approvers": ["sec"],
             "max_duration": "1h",
-            "groups": {"ml": ["alice@example.com"], "sec": ["Alice@Example.COM"]},
+            "groups": {"ml": ["alice@example.com"], "sec": ["alice@example.com"]},
             "datasets": [
                 {
                     "name": "clinic",
@@ -1666,3 +1666,193 @@ def test_mixed_case_email_members_match_across_policy_and_oidc_tokens(
     )
     assert carol_id.username == "carol@corp.com"
     assert pol.can_approve(carol_id.username, alice_id.username) == []
+
+
+def test_ascii_only_principal_folding_member_validation_and_local_receipt_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant import cli as cli_mod
+    from datagrant import receipt as receipt_mod
+    from datagrant.keys import load_signing_key
+    from datagrant.pg import grant as g_mod
+    from datagrant.pg.mask import ColumnType, TableCatalog
+
+    # 1. normalize_principal folds ONLY ASCII A-Z (never Unicode casefold:
+    # German sharp s \u00df -> ss, Kelvin sign \u212a -> k, Latin long s \u017f -> s, ligature \ufb01 -> fi)
+    assert oidc.normalize_principal("wei\u00df@corp.com") == "wei\u00df@corp.com"
+    assert oidc.normalize_principal("wei\u00df@corp.com") != oidc.normalize_principal(
+        "weiss@corp.com"
+    )
+    assert oidc.normalize_principal("\u212aelvin@corp.com") == "\u212aelvin@corp.com"
+    assert oidc.normalize_principal("\u212aelvin@corp.com") != oidc.normalize_principal(
+        "kelvin@corp.com"
+    )
+    assert oidc.normalize_principal("\u017fean@corp.com") == "\u017fean@corp.com"
+    assert oidc.normalize_principal("\u017fean@corp.com") != oidc.normalize_principal(
+        "sean@corp.com"
+    )
+    assert oidc.normalize_principal("\ufb01nance@corp.com") != oidc.normalize_principal(
+        "finance@corp.com"
+    )
+    assert oidc.normalize_principal("Alice.B@Corp.COM") == "alice.b@corp.com"
+    # Non-email local username preserves ASCII case unless email_claim=True
+    assert oidc.normalize_principal("AliceAdmin") == "AliceAdmin"
+    assert oidc.normalize_principal("AliceAdmin", email_claim=True) == "aliceadmin"
+
+    # Wider Unicode casefold is kept ONLY as a defense-in-depth self-approval deny in can_approve
+    pol_same_across = parse_policy(
+        {
+            "version": 1,
+            "approval": "two-person",
+            "approvers": ["sec"],
+            "max_duration": "1h",
+            "groups": {
+                "ml": ["Alice@Corp.com", "weiss"],
+                "sec": ["Alice@Corp.com", "carol@corp.com"],
+            },
+            "datasets": [
+                {
+                    "name": "clinic",
+                    "database": "clinicdb",
+                    "tables": [
+                        {
+                            "name": "public.p",
+                            "allowed_groups": ["ml"],
+                            "columns": {"id": "passthrough"},
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    # Exact same spelling "Alice@Corp.com" across multiple groups is allowed and normalized
+    assert pol_same_across.groups_of("alice@corp.com") == frozenset({"ml", "sec"})
+    assert any(
+        "different person" in r
+        for r in pol_same_across.can_approve("wei\u00df", "weiss", extra_groups=frozenset({"sec"}))
+    )
+
+    # 2. Non-ASCII / whitespace / oversized group members rejected at policy load
+    for bad_member in (
+        "wei\u00df@corp.com",
+        "\u212aelvin@corp.com",
+        "\u017fean@corp.com",
+        "alice smith",
+        "alice\t",
+        "a" * 257,
+    ):
+        with pytest.raises(PolicyError, match="invalid member name"):
+            parse_policy(
+                {
+                    "version": 1,
+                    "max_duration": "1h",
+                    "groups": {"ml": [bad_member]},
+                    "datasets": [
+                        {
+                            "name": "clinic",
+                            "database": "clinicdb",
+                            "tables": [
+                                {
+                                    "name": "public.p",
+                                    "allowed_groups": ["ml"],
+                                    "columns": {"id": "passthrough"},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    # 3. Duplicate normalized member within a group AND conflicting spellings across groups rejected
+    for bad_groups, match_re in [
+        ({"ml": ["alice", "alice"]}, "duplicate member"),
+        ({"ml": ["Alice@Corp.com", "alice@corp.com"]}, "duplicate member"),
+        ({"ml": ["Alice@Corp.com"], "sec": ["alice@corp.com"]}, "conflicting member spellings"),
+    ]:
+        with pytest.raises(PolicyError, match=match_re):
+            parse_policy(
+                {
+                    "version": 1,
+                    "max_duration": "1h",
+                    "groups": bad_groups,
+                    "datasets": [
+                        {
+                            "name": "clinic",
+                            "database": "clinicdb",
+                            "tables": [
+                                {
+                                    "name": "public.p",
+                                    "allowed_groups": ["ml"],
+                                    "columns": {"id": "passthrough"},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    # 4. Local-mode _resolve_caller normalizes email-style usernames so receipts record the authorized name
+    monkeypatch.setenv("DATAGRANT_DSN", "postgresql://admin:pw@db.example:5432/clinicdb")
+    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
+    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
+    log_path = tmp_path / "local_r.jsonl"
+    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(log_path))
+    assert main(["keys", "init", "--apply"], lambda s: None) == EXIT_OK
+
+    class StubConn:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            return None
+
+    def stub_apply(conn: Any, plan: g_mod.GrantPlan, sink: g_mod.ReceiptSink, **kw: Any) -> None:
+        assert plan.facts is not None
+        receipt_mod.append(sink.log, "issued", plan.facts, sink.key, host="h")
+
+    monkeypatch.setattr(cli_mod, "_connect", lambda a: StubConn())
+    monkeypatch.setattr(g_mod, "ensure_state", lambda c: [])
+    monkeypatch.setattr(
+        "datagrant.pg.mask.inspect_table",
+        lambda c, t: TableCatalog({"id": ColumnType("pg_catalog", "int4")}, "public"),
+    )
+    monkeypatch.setattr(g_mod, "apply_plan", stub_apply)
+
+    pol_file = tmp_path / "local.yaml"
+    pol_file.write_text(
+        "version: 1\napproval: auto\nmax_duration: 2h\n"
+        "groups: {ml: [Alice@Corp.com]}\n"
+        "datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        "      - name: public.p\n        allowed_groups: [ml]\n"
+        "        columns: {id: passthrough}\n"
+    )
+    out: list[str] = []
+    rc = main(
+        [
+            "--json",
+            "request",
+            "--apply",
+            "--policy",
+            str(pol_file),
+            "--as-user",
+            "ALICE@CORP.COM",
+            "--dataset",
+            "clinic",
+            "--table",
+            "public.p",
+            "--columns",
+            "id",
+            "--duration",
+            "1h",
+            "--purpose",
+            "norm-check",
+        ],
+        out.append,
+    )
+    assert rc == EXIT_OK
+    assert json.loads(out[-1])["requester"] == "alice@corp.com"
+    rec = json.loads(log_path.read_text().splitlines()[0])["receipt"]
+    assert rec["requester"] == "alice@corp.com"
+    assert rec["identity"] == {"source": "flag"}
+    skey = load_signing_key(tmp_path / "k" / "signing.key")
+    assert receipt_mod.verify(log_path, skey.private.public_key()).ok

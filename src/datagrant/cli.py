@@ -91,7 +91,13 @@ def _identity(args: argparse.Namespace) -> tuple[str, str]:
 
 def _resolve_caller(ctx: Ctx, policy: Any) -> Any:
     """Resolve and verify the caller against ``policy.identity`` (local or OIDC)."""
-    from datagrant.oidc import OIDC_TOKEN_ENV, VerifiedIdentity, read_token_file, verify_oidc_token
+    from datagrant.oidc import (
+        OIDC_TOKEN_ENV,
+        VerifiedIdentity,
+        normalize_principal,
+        read_token_file,
+        verify_oidc_token,
+    )
 
     args = ctx.args
     as_user = getattr(args, "as_user", None)
@@ -104,7 +110,7 @@ def _resolve_caller(ctx: Ctx, policy: Any) -> Any:
                 EXIT_USAGE,
             )
         user, source = _identity(args)
-        return VerifiedIdentity(username=user, source=source)
+        return VerifiedIdentity(username=normalize_principal(user), source=source)
 
     if as_user is not None:
         raise CliError(

@@ -36,6 +36,7 @@ _SMALL_DURATION_RE = re.compile(r"^(\d{1,6})([smhd])$")
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_MEMBER_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
 MAX_POLICY_BYTES = 1_000_000
 
 
@@ -383,12 +384,31 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         raise PolicyError(f"policy.approval: must be one of {sorted(APPROVAL_MODES)}")
     cap = parse_duration(_req(data, "max_duration", str, "policy"), "policy.max_duration")
     groups: dict[str, frozenset[str]] = {}
+    seen_spellings: dict[str, str] = {}
     for g, members in _req(data, "groups", dict, "policy").items():
         if not isinstance(g, str) or not _NAME_RE.match(g):
             raise PolicyError(f"policy.groups: invalid group name {g!r}")
-        groups[g] = frozenset(
-            normalize_principal(m) for m in _str_list(members, f"policy.groups.{g}")
-        )
+        raw_members = _str_list(members, f"policy.groups.{g}")
+        norm_set: set[str] = set()
+        for m in raw_members:
+            if not _MEMBER_RE.match(m):
+                raise PolicyError(
+                    f"policy.groups.{g}: invalid member name {m!r} (expected 1..256 printable ASCII chars)"
+                )
+            norm = normalize_principal(m)
+            if norm in norm_set:
+                raise PolicyError(
+                    f"policy.groups.{g}: duplicate member {m!r} (normalized to {norm!r})"
+                )
+            prev_raw = seen_spellings.get(norm)
+            if prev_raw is not None and prev_raw != m:
+                raise PolicyError(
+                    f"policy.groups.{g}: conflicting member spellings {prev_raw!r} and {m!r}"
+                    f" both normalize to {norm!r}"
+                )
+            seen_spellings[norm] = m
+            norm_set.add(norm)
+        groups[g] = frozenset(norm_set)
     datasets: dict[str, Dataset] = {}
     raw_ds = _req(data, "datasets", list, "policy")
     if not raw_ds:
