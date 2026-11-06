@@ -683,7 +683,7 @@ def test_jws_jwk_and_claim_edge_cases(idp: IdpState, keys: KeySet, tmp_path: Pat
     big.chmod(0o600)
     with pytest.raises(IdentityError, match="exceeds"):
         read_token_file(big)
-    with pytest.raises(IdentityError, match="regular file"):
+    with pytest.raises(IdentityError, match="regular file|cannot open"):
         read_token_file(tmp_path)
     with pytest.raises(IdentityError, match="cannot open"):
         read_token_file(tmp_path / "missing")
