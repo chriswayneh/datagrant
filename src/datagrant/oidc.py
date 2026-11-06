@@ -161,6 +161,11 @@ def validate_oidc_url(
     raise ValueError(f"{what}: URL must use https")
 
 
+def normalize_principal(name: str, *, email_claim: bool = False) -> str:
+    """Casefold email-style usernames so ``Alice@Corp.com`` and ``alice@corp.com`` match."""
+    return name.casefold() if (email_claim or "@" in name) else name
+
+
 def token_sha256(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("ascii")).hexdigest()
 
@@ -812,8 +817,7 @@ def verify_oidc_token(
         raise IdentityError(f"JWT claim {cfg.username_claim!r} missing or invalid")
     if cfg.username_claim == "email" and claims.get("email_verified") is not True:
         raise IdentityError("JWT email_verified must be boolean true when username_claim is email")
-    if cfg.username_claim == "email" or "@" in raw_user:
-        raw_user = raw_user.lower()
+    raw_user = normalize_principal(raw_user, email_claim=(cfg.username_claim == "email"))
 
     mapped: set[str] = set()
     if cfg.groups_claim is not None:

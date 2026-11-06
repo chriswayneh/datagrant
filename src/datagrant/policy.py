@@ -24,6 +24,7 @@ from datagrant.oidc import (
     IDENTITY_MODES,
     IdentityConfig,
     allow_insecure_localhost,
+    normalize_principal,
     validate_oidc_url,
 )
 from datagrant.rowfilter import RowFilterError, parse_row_filter
@@ -101,7 +102,10 @@ class Policy:
         return reasons
 
     def groups_of(self, requester: str) -> frozenset[str]:
-        return frozenset(g for g, members in self.groups.items() if requester in members)
+        norm = normalize_principal(requester)
+        return frozenset(
+            g for g, members in self.groups.items() if norm in members or requester in members
+        )
 
 
 @dataclass(frozen=True)
@@ -382,7 +386,9 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
     for g, members in _req(data, "groups", dict, "policy").items():
         if not isinstance(g, str) or not _NAME_RE.match(g):
             raise PolicyError(f"policy.groups: invalid group name {g!r}")
-        groups[g] = frozenset(_str_list(members, f"policy.groups.{g}"))
+        groups[g] = frozenset(
+            normalize_principal(m) for m in _str_list(members, f"policy.groups.{g}")
+        )
     datasets: dict[str, Dataset] = {}
     raw_ds = _req(data, "datasets", list, "policy")
     if not raw_ds:

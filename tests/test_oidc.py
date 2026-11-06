@@ -1609,3 +1609,60 @@ def test_red_team_pr28_m1_l2_l3_regressions(
     )
     out_ok: list[str] = []
     assert main(["--json", "approve", "--policy", str(pol_main), "ok_req"], out_ok.append) == 0
+
+
+def test_mixed_case_email_members_match_across_policy_and_oidc_tokens(
+    idp: IdpState, keys: KeySet, tmp_path: Path
+) -> None:
+    # Policy lists mixed-case members `Alice@Corp.com` and `Carol@Corp.com` (no group_map).
+    pol = parse_policy(
+        {
+            "version": 1,
+            "approval": "two-person",
+            "approvers": ["sec"],
+            "max_duration": "2h",
+            "groups": {"ml": ["Alice@Corp.com"], "sec": ["Carol@Corp.com"]},
+            "identity": {
+                "mode": "oidc",
+                "issuer": idp.issuer,
+                "audience": "datagrant-cli",
+                "username_claim": "email",
+            },
+            "datasets": [
+                {
+                    "name": "clinic",
+                    "database": "clinicdb",
+                    "tables": [
+                        {
+                            "name": "public.p",
+                            "allowed_groups": ["ml"],
+                            "columns": {"id": "passthrough"},
+                        }
+                    ],
+                }
+            ],
+        },
+        env=INSECURE_ENV,
+    )
+    # Token-side lower/mixed case ("aLiCe@cOrP.com") matches policy-side "Alice@Corp.com"
+    alice_tok = keys.sign(
+        _base_claims(idp.issuer, sub="u-alice", email="aLiCe@cOrP.com"), alg="EdDSA"
+    )
+    alice_id = verify_oidc_token(
+        alice_tok, pol.identity, now=NOW, cache_dir=tmp_path, env=INSECURE_ENV
+    )
+    assert alice_id.username == "alice@corp.com"
+    assert pol.groups_of(alice_id.username) == frozenset({"ml"})
+    assert pol.groups_of("ALICE@CORP.COM") == frozenset({"ml"})
+    req = Request(alice_id.username, "clinic", "public.p", ("id",), timedelta(hours=1), "debug")
+    assert evaluate(pol, req).allowed
+
+    # Approver token with mixed case ("CAROL@corp.com") matches policy-side "Carol@Corp.com"
+    carol_tok = keys.sign(
+        _base_claims(idp.issuer, sub="u-carol", email="CAROL@corp.com"), alg="EdDSA"
+    )
+    carol_id = verify_oidc_token(
+        carol_tok, pol.identity, now=NOW, cache_dir=tmp_path, env=INSECURE_ENV
+    )
+    assert carol_id.username == "carol@corp.com"
+    assert pol.can_approve(carol_id.username, alice_id.username) == []
