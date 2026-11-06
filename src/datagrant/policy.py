@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -14,12 +15,24 @@ from typing import Any
 
 import yaml
 
+from datagrant.oidc import (
+    ALLOWED_ALGS,
+    DEFAULT_ALGS,
+    DEFAULT_CLOCK_SKEW,
+    DEFAULT_JWKS_CACHE_TTL,
+    DEFAULT_MAX_TOKEN_AGE,
+    IDENTITY_MODES,
+    IdentityConfig,
+    allow_insecure_localhost,
+    validate_oidc_url,
+)
 from datagrant.rowfilter import RowFilterError, parse_row_filter
 
 MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null"})
 APPROVAL_MODES = frozenset({"auto", "two-person"})
 _DURATION_RE = re.compile(r"^(\d{1,6})([mhd])$")
-_UNITS = {"m": "minutes", "h": "hours", "d": "days"}
+_SMALL_DURATION_RE = re.compile(r"^(\d{1,6})([smhd])$")
+_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_POLICY_BYTES = 1_000_000
@@ -74,13 +87,16 @@ class Policy:
     datasets: dict[str, Dataset]
     sha256: str
     approver_groups: frozenset[str] = frozenset()
+    identity: IdentityConfig = field(default_factory=IdentityConfig)
 
-    def can_approve(self, approver: str, requester: str) -> list[str]:
+    def can_approve(
+        self, approver: str, requester: str, extra_groups: frozenset[str] = frozenset()
+    ) -> list[str]:
         """Reasons the approver may not approve this requester (empty list = allowed)."""
         reasons = []
         if approver == requester:
             reasons.append("approver must be a different person than the requester")
-        if not self.groups_of(approver) & self.approver_groups:
+        if not (self.groups_of(approver) | extra_groups) & self.approver_groups:
             reasons.append(f"{approver!r} is not in an approver group")
         return reasons
 
@@ -209,12 +225,151 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
     )
 
 
-def parse_policy(data: object, sha256: str = "") -> Policy:
+def _parse_seconds_duration(
+    value: object, where: str, *, low: timedelta, high: timedelta
+) -> timedelta:
+    if not isinstance(value, str):
+        raise PolicyError(f"{where}: expected a duration string like '60s' or '5m'")
+    m = _SMALL_DURATION_RE.match(value.strip())
+    if not m:
+        raise PolicyError(f"{where}: invalid duration {value!r} (use e.g. '0s', '60s', '5m', '1h')")
+    td = timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
+    if td < low or td > high:
+        raise PolicyError(f"{where}: duration {value!r} out of range ({low}..{high})")
+    return td
+
+
+def _parse_identity(
+    raw: object, groups: set[str], env: Mapping[str, str] | None = None
+) -> IdentityConfig:
+    if raw is None:
+        return IdentityConfig()
+    where = "policy.identity"
+    if not isinstance(raw, dict):
+        raise PolicyError(f"{where}: expected a mapping")
+    _check_keys(
+        raw,
+        {
+            "mode",
+            "issuer",
+            "audience",
+            "algorithms",
+            "username_claim",
+            "groups_claim",
+            "allowed_groups",
+            "group_map",
+            "max_token_age",
+            "clock_skew",
+            "jwks_cache_ttl",
+        },
+        where,
+    )
+    mode = raw.get("mode", "local")
+    if not isinstance(mode, str) or mode not in IDENTITY_MODES:
+        raise PolicyError(f"{where}.mode: must be one of {sorted(IDENTITY_MODES)}")
+    if mode == "local":
+        extra = sorted(set(raw) - {"mode"})
+        if extra:
+            raise PolicyError(f"{where}: OIDC keys {extra} are not allowed when mode is 'local'")
+        return IdentityConfig(mode="local")
+    issuer = _req(raw, "issuer", str, where)
+    try:
+        validate_oidc_url(
+            issuer, f"{where}.issuer", allow_localhost_http=allow_insecure_localhost(env)
+        )
+    except ValueError as exc:
+        raise PolicyError(str(exc)) from None
+    raw_aud = raw.get("audience")
+    aud: tuple[str, ...]
+    if isinstance(raw_aud, str) and raw_aud:
+        aud = (raw_aud,)
+    elif isinstance(raw_aud, list) and raw_aud:
+        aud = tuple(_str_list(raw_aud, f"{where}.audience"))
+    else:
+        raise PolicyError(f"{where}.audience: expected a non-empty string or list of strings")
+    algs = (
+        tuple(_str_list(raw["algorithms"], f"{where}.algorithms"))
+        if "algorithms" in raw
+        else DEFAULT_ALGS
+    )
+    if not algs or any(a not in ALLOWED_ALGS for a in algs):
+        raise PolicyError(
+            f"{where}.algorithms: must be a non-empty subset of {sorted(ALLOWED_ALGS)}"
+        )
+    uclaim = raw.get("username_claim", "sub")
+    if not isinstance(uclaim, str) or not _NAME_RE.match(uclaim):
+        raise PolicyError(f"{where}.username_claim: invalid claim name {uclaim!r}")
+    gclaim = raw.get("groups_claim")
+    if gclaim is not None and (not isinstance(gclaim, str) or not _NAME_RE.match(gclaim)):
+        raise PolicyError(f"{where}.groups_claim: invalid claim name {gclaim!r}")
+    allowed_g = frozenset(_str_list(raw.get("allowed_groups", []), f"{where}.allowed_groups"))
+    raw_map = raw.get("group_map", {})
+    if not isinstance(raw_map, dict):
+        raise PolicyError(f"{where}.group_map: expected a mapping")
+    gmap: dict[str, str] = {}
+    for k, v in raw_map.items():
+        if not isinstance(k, str) or not k or not isinstance(v, str) or not v:
+            raise PolicyError(f"{where}.group_map: keys and values must be non-empty strings")
+        if v not in groups:
+            raise PolicyError(f"{where}.group_map: target group {v!r} is not in policy.groups")
+        gmap[k] = v
+    if (allowed_g or gmap) and gclaim is None:
+        raise PolicyError(
+            f"{where}: groups_claim is required when allowed_groups or group_map is set"
+        )
+    max_age = (
+        _parse_seconds_duration(
+            raw["max_token_age"],
+            f"{where}.max_token_age",
+            low=timedelta(minutes=1),
+            high=timedelta(hours=24),
+        )
+        if "max_token_age" in raw
+        else DEFAULT_MAX_TOKEN_AGE
+    )
+    skew = (
+        _parse_seconds_duration(
+            raw["clock_skew"],
+            f"{where}.clock_skew",
+            low=timedelta(seconds=0),
+            high=timedelta(minutes=5),
+        )
+        if "clock_skew" in raw
+        else DEFAULT_CLOCK_SKEW
+    )
+    ttl = (
+        _parse_seconds_duration(
+            raw["jwks_cache_ttl"],
+            f"{where}.jwks_cache_ttl",
+            low=timedelta(seconds=0),
+            high=timedelta(hours=24),
+        )
+        if "jwks_cache_ttl" in raw
+        else DEFAULT_JWKS_CACHE_TTL
+    )
+    return IdentityConfig(
+        mode="oidc",
+        issuer=issuer,
+        audience=aud,
+        algorithms=frozenset(algs),
+        username_claim=uclaim,
+        groups_claim=gclaim,
+        allowed_groups=allowed_g,
+        group_map=gmap,
+        max_token_age=max_age,
+        clock_skew=skew,
+        jwks_cache_ttl=ttl,
+    )
+
+
+def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | None = None) -> Policy:
     """Validate a decoded policy document and build a Policy."""
     if not isinstance(data, dict):
         raise PolicyError("policy: top level must be a mapping")
     _check_keys(
-        data, {"version", "approval", "approvers", "max_duration", "groups", "datasets"}, "policy"
+        data,
+        {"version", "approval", "approvers", "max_duration", "groups", "datasets", "identity"},
+        "policy",
     )
     version = _req(data, "version", int, "policy")
     if version != 1:
@@ -261,7 +416,8 @@ def parse_policy(data: object, sha256: str = "") -> Policy:
         raise PolicyError(f"policy.approvers: unknown groups {sorted(unknown)}")
     if approval == "two-person" and not approvers:
         raise PolicyError("policy.approvers: two-person approval needs at least one approver group")
-    return Policy(version, approval, cap, groups, datasets, sha256, approvers)
+    ident = _parse_identity(data.get("identity"), set(groups), env=env)
+    return Policy(version, approval, cap, groups, datasets, sha256, approvers, ident)
 
 
 class _StrictLoader(yaml.SafeLoader):
@@ -308,7 +464,9 @@ def load_policy(path: str | Path) -> Policy:
         raise PolicyError(f"policy file {p} is nested too deeply") from None
 
 
-def evaluate(policy: Policy, req: Request) -> Decision:
+def evaluate(
+    policy: Policy, req: Request, *, extra_groups: frozenset[str] = frozenset()
+) -> Decision:
     """Return allow/deny for a request. Deny by default; collect every reason."""
     reasons: list[str] = []
 
@@ -327,7 +485,7 @@ def evaluate(policy: Policy, req: Request) -> Decision:
     rule = ds.tables.get(req.table)
     if rule is None:
         return deny(f"table {req.table!r} is not in dataset {req.dataset!r}")
-    if not policy.groups_of(req.requester) & rule.allowed_groups:
+    if not (policy.groups_of(req.requester) | extra_groups) & rule.allowed_groups:
         reasons.append(f"requester {req.requester!r} is not in an allowed group for {rule.name}")
     bad = [c for c in req.columns if c not in rule.columns]
     if bad:

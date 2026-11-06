@@ -248,18 +248,27 @@ def cmd_keys_export(ctx: Ctx) -> int:
 
 
 def cmd_policy_check(ctx: Ctx) -> int:
+    from datagrant.oidc import INSECURE_LOCALHOST_ENV, allow_insecure_localhost
     from datagrant.policy import load_policy
 
     p = load_policy(ctx.args.file)
+    warnings: list[str] = []
+    if allow_insecure_localhost() and p.identity.mode == "oidc":
+        msg = f"{INSECURE_LOCALHOST_ENV}=1 is set: insecure http:// localhost OIDC URLs are enabled"
+        warnings.append(msg)
+        _warn(ctx, msg)
     tables = sum(len(d.tables) for d in p.datasets.values())
+    payload: dict[str, Any] = {
+        "ok": True,
+        "sha256": p.sha256,
+        "approval": p.approval,
+        "datasets": sorted(p.datasets),
+        "tables": tables,
+    }
+    if warnings:
+        payload["warnings"] = warnings
     ctx.emit(
-        {
-            "ok": True,
-            "sha256": p.sha256,
-            "approval": p.approval,
-            "datasets": sorted(p.datasets),
-            "tables": tables,
-        },
+        payload,
         f"policy OK: {len(p.datasets)} dataset(s), {tables} table(s), approval={p.approval},"
         f" sha256={p.sha256}",
     )
