@@ -36,7 +36,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. | v0.3.0 |
+| OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. Design: [docs/design/oidc-identity.md](docs/design/oidc-identity.md). | v0.3.0 |
 | Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.4.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.
