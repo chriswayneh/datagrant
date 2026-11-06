@@ -956,3 +956,77 @@ def test_recursion_error_from_json_loads_wrapped(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("datagrant.oidc.json.loads", boom)
     with pytest.raises(IdentityError, match="nested too deeply"):
         oidc._strict_json_loads(b"{}", "JWT payload")
+
+
+def test_url_b64u_jwk_and_http_error_branches(
+    idp: IdpState, keys: KeySet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # validate_oidc_url error branches
+    for bad_url in ("", "https://h:notaport", "https:///nohost", "ftp://idp.example"):
+        with pytest.raises(ValueError):
+            oidc.validate_oidc_url(bad_url, "u")
+
+    # _b64u_decode / _b64u_uint error branches
+    with pytest.raises(IdentityError, match="length"):
+        oidc._b64u_decode("abcde", "seg")  # len % 4 == 1
+    with pytest.raises(IdentityError, match="non-canonical"):
+        oidc._b64u_decode("AB", "seg")  # non-zero trailing bits
+    with pytest.raises(IdentityError, match="base64url string"):
+        oidc._b64u_uint(123, "n")
+    with pytest.raises(IdentityError, match="leading zero"):
+        oidc._b64u_uint(_b64u(b"\x00\x01"), "n")
+
+    # read_token_file non-ASCII and whitespace-only
+    na = tmp_path / "nonascii"
+    na.write_bytes(b"\xff\xfe")
+    na.chmod(0o600)
+    with pytest.raises(IdentityError, match="not ASCII"):
+        read_token_file(na)
+    ws = tmp_path / "ws"
+    ws.write_text("   \n")
+    ws.chmod(0o600)
+    with pytest.raises(IdentityError, match="compact JWT"):
+        read_token_file(ws)
+
+    # JWK signature material errors (even RSA exponent, short EC/EdDSA sig/coords, key_ops filter)
+    for jwk_entry, alg, sig_bytes in [
+        ({"kty": "RSA", "kid": "k1", "n": "AQAB", "e": _int_b64u(4)}, "RS256", b"x" * 256),
+        ({"kty": "EC", "crv": "P-384", "kid": "k1", "x": "AA", "y": "AA"}, "ES256", b"x" * 64),
+        ({"kty": "EC", "crv": "P-256", "kid": "k1", "x": "AA", "y": "AA"}, "ES256", b"short"),
+        ({"kty": "EC", "crv": "P-256", "kid": "k1", "x": "AA", "y": "AA"}, "ES256", b"x" * 64),
+        ({"kty": "OKP", "crv": "X25519", "kid": "k1", "x": "AA"}, "EdDSA", b"x" * 64),
+        ({"kty": "OKP", "crv": "Ed25519", "kid": "k1", "x": "AA"}, "EdDSA", b"short"),
+        ({"kty": "OKP", "crv": "Ed25519", "kid": "k1", "x": "AA"}, "EdDSA", b"x" * 64),
+    ]:
+        with pytest.raises(IdentityError):
+            oidc._verify_jws_signature(alg, jwk_entry, b"a.b", sig_bytes)
+
+    assert oidc._usable_jwks_entries([{"kty": "OKP", "key_ops": ["sign"]}]) == []
+    with pytest.raises(IdentityError):
+        oidc._usable_jwks_entries("not-a-list")
+    with pytest.raises(IdentityError):
+        oidc._usable_jwks_entries(["not-a-dict"])
+
+    # Corrupt / oversized cache file returns None cleanly (cross-platform)
+    cdir = tmp_path / "corrupt_cache"
+    cdir.mkdir(mode=0o700)
+    if sys.platform != "win32":
+        cdir.chmod(0o700)
+    cf = cdir / "c.json"
+    cf.write_text("not json")
+    if sys.platform != "win32":
+        cf.chmod(0o600)
+    assert oidc._read_cache(cf) is None
+    cf.write_text('{"fetched_at": "bad"}')
+    assert oidc._read_cache(cf) is None
+    cf.write_bytes(b"x" * (oidc.MAX_HTTP_BYTES * 2 + 10))
+    assert oidc._read_cache(cf) is None
+
+    # Cache write failure on os.replace is wrapped in IdentityError and cleans up temp file
+    monkeypatch.setattr(
+        "datagrant.oidc.os.replace",
+        lambda *a: (_ for _ in ()).throw(OSError(13, "denied")),
+    )
+    with pytest.raises(IdentityError, match="cannot write JWKS cache"):
+        oidc._write_cache(cdir / "out.json", {"k": 1})
+    assert list(cdir.glob(".jwks.*")) == []
