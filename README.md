@@ -14,7 +14,7 @@
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
 
-**Status:** [v0.2.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.2.0) is released ([release notes](docs/release-notes/v0.2.0.md)). It changes `hash` outputs from v0.1.0; see the notes before upgrading. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Status:** [v0.2.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.2.0) is released ([release notes](docs/release-notes/v0.2.0.md)). It changes `hash` outputs from v0.1.0; see the notes before upgrading. OIDC identity is merged on main and is **not** in that tag; v0.3.0 is not released. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
 ## Demo
 
@@ -59,6 +59,8 @@ Only features that ship in v0.2.0 (verified against the CLI and source):
 - [x] **External receipt sink** (v0.2.0). Copy every receipt to an HTTPS webhook or an append-only file elsewhere, with an outbox and `receipts push` for outages, an optional `required` mode, and `receipts verify --sink` to catch local truncation or rewrites.
 - [x] **Dry run by default.** Every command that changes something reports what it would do and changes nothing unless you pass `--apply`.
 - [x] **Honest CLI exit codes.** `0` ok, `1` denied or failed, `2` usage, `3` receipt not written, not delivered to the sink, or unusable outbox, `4` revoke failed. Add `--json` for machine-readable output.
+
+OIDC identity (`policy.identity.mode: oidc`) is merged on main and is **not** in the v0.2.0 release. It is not tagged as v0.3.0 yet. See the [policy identity block](docs/policy.md#identity), [CLI](docs/cli.md#oidc-identity) and the [OIDC request and approve demo](docs/demo-oidc.md).
 
 ## Architecture
 
@@ -127,7 +129,7 @@ Exit codes are `0` for success, `1` for denied or failed, `2` for a usage error,
 
 datagrant narrows and time-boxes access and makes it auditable. It is not an identity provider or a data loss prevention system. Read [docs/security.md](docs/security.md) before using it with real data. In short:
 
-- **Identity is not authentication.** The requester is the operating system user, or whoever `--as-user` names. Anyone with the admin connection string can claim any name, so real two-person control needs datagrant behind a service that signs people in and holds that connection string.
+- **Identity depends on the policy.** Default local mode records the OS user or `--as-user` and is not authentication. Optional `identity.mode: oidc` (on main, pending v0.3.0) verifies an ID token on `request` and `approve`. Anyone who holds the admin connection string can still bypass datagrant. See [docs/security.md](docs/security.md).
 - **Row filters reveal what they match.** A column listed only in `filter_columns` is hidden, but the grantee knows every row matches the filter.
 - **Masking still shows some shape.** You can see whether a value is empty (NULL stays NULL under `partial` and `hash`), and `partial` keeps its length.
 - **Hashed values can be matched** across grants on the same dataset (or datasets sharing a `hash_scope`), but not across datasets.
@@ -141,7 +143,7 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 - [CLI reference](docs/cli.md)
 - [Security model](docs/security.md)
 - [Operations](docs/operations.md)
-- [Demo](docs/demo.md)
+- [Demo](docs/demo.md) and [OIDC request and approve demo](docs/demo-oidc.md)
 - [Changelog](CHANGELOG.md), [roadmap](ROADMAP.md) and [security policy](SECURITY.md)
 
 ## Contributing

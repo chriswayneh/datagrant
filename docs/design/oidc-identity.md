@@ -1,6 +1,6 @@
 # Design: OIDC identity
 
-Status: proposed. Docs only; nothing here is implemented yet. Roadmap item: [OIDC identity](../../ROADMAP.md).
+Status: implemented on main (PRs #26 to #28, plus docs in this PR). v0.3.0 is not tagged. Differences from this proposal: `approve` also binds the pending request to the current `issuer` and `username_claim`; requester groups at approval are remapped from stored `idp_groups` through the current `group_map` / `allowed_groups` when `groups_claim` still matches; token-file problems are exit 1 while missing token and mode-conflicting flags are exit 2; `$DATAGRANT_OIDC_TOKEN` is ignored in local mode (not an error); email-style principals fold ASCII `A-Z` to `a-z`. The [policy](../policy.md#identity) and [CLI](../cli.md#oidc-identity) pages are authoritative. Roadmap item: [OIDC identity](../../ROADMAP.md).
 
 ## Goal
 
@@ -175,4 +175,4 @@ All tests run offline in CI with no external IdP:
 
 1. **PR 2: OIDC verifier and policy config (`src/datagrant/oidc.py`, `policy.py`, `cli.py` warning).** `IdentityConfig` parsing and validation in `policy.py` (`group_map` off by default, `max_token_age` default `15m`, `jwks_cache_ttl` default `5m`, `DATAGRANT_OIDC_ALLOW_INSECURE_LOCALHOST=1` gate plus `policy check` warning), JWS/JWK parsing and `RS256`/`ES256`/`EdDSA` verification with `cryptography`, discovery + JWKS fetch and `0600` cache, token file reader and redaction helper, plus the full unit test suite against the local JWKS server fixture. Not wired into `request`/`approve` yet.
 2. **PR 3: CLI wiring, DB state and receipts.** `--oidc-token-file` and `$DATAGRANT_OIDC_TOKEN` on `request` and `approve`, `--as-user` / mode conflict checks, recorded request identity mode with strict mode-parity check on `approve` (exit 1 on mismatch, no name-only fallback), `(iss, sub)` two-person enforcement, `group_map` evaluation, additive state columns, `identity` and `approver_identities` in receipts, token redaction in CLI errors, and Postgres integration tests.
-3. **PR 4: Docs, demo and v0.3.0 prep.** `docs/policy.md`, `docs/cli.md`, `docs/security.md`, `docs/operations.md`, `README.md`, `CHANGELOG.md`, `ROADMAP.md`, mark this design implemented, and extend the demo if helpful.
+3. **PR 4: Docs, demo and v0.3.0 prep.** `docs/policy.md`, `docs/cli.md`, `docs/security.md`, `docs/operations.md`, `README.md`, `CHANGELOG.md`, `ROADMAP.md`, this design marked implemented on main. Reproducible OIDC request+approve demo in [docs/demo-oidc.md](../demo-oidc.md) (markdown fixtures; `make demo` stays local-identity). v0.3.0 is not tagged.
