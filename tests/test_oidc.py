@@ -7,11 +7,12 @@ import json
 import os
 import sys
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -813,50 +814,308 @@ def test_cache_write_oserror_wrapped_and_skipped_after_good_fetch(
     assert list(cdir.glob("*.json")) == []
 
 
-def test_cli_request_and_approve_refuse_oidc_policy_before_dsn(
-    idp: IdpState, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_jws_like_path_anchor_allows_dotted_directories() -> None:
+    # Anchored (?<![A-Za-z0-9_-]): normal dotted directory segments are NOT misclassified
+    normal = Path("/home/alice/my.config.directory/oidc-token")
+    assert oidc._safe_path_label(normal) == str(normal)
+    # A path segment that itself has 3 base64url parts IS redacted
+    pasted = Path("/tmp/eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl")
+    assert oidc._safe_path_label(pasted) == "<redacted token-like path>"
+
+
+def test_cli_oidc_end_to_end_flows_receipts_and_mode_mismatch(
+    idp: IdpState, keys: KeySet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    # H1: request and approve fail closed (exit 1) immediately on non-local policy.identity,
-    # before touching --dsn (no DSN set at all -> would exit 2 if it got past the gate).
+    from datetime import UTC, datetime
+
+    from datagrant import cli as cli_mod
+    from datagrant import receipt as receipt_mod
+    from datagrant.keys import load_signing_key
+    from datagrant.pg import grant as g_mod
+    from datagrant.pg import requests as rq_mod
+    from datagrant.pg.mask import ColumnType, TableCatalog
+
     monkeypatch.setenv(INSECURE_LOCALHOST_ENV, "1")
-    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
-    pol = tmp_path / "oidc.yaml"
-    pol.write_text(
-        f"version: 1\napproval: two-person\napprovers: [sec]\nmax_duration: 1h\n"
-        f"groups: {{ml: [alice], sec: [carol]}}\n"
-        f"identity:\n  mode: oidc\n  issuer: {idp.issuer}\n  audience: datagrant-cli\n"
-        f"datasets:\n  - name: clinic\n    database: postgres\n    tables:\n"
-        f"      - name: public.t\n        allowed_groups: [ml]\n        columns: {{id: passthrough}}\n"
+    monkeypatch.setenv(oidc.JWKS_CACHE_DIR_ENV, str(tmp_path / "jwks_cache"))
+    monkeypatch.setenv("DATAGRANT_DSN", "postgresql://admin:pw9secret@db.example:5432/clinicdb")
+    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "keys" / "hash.key"))
+    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "keys" / "signing.key"))
+    log_path = tmp_path / "receipts.jsonl"
+    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(log_path))
+    monkeypatch.delenv(oidc.OIDC_TOKEN_ENV, raising=False)
+    assert main(["keys", "init", "--apply"], lambda s: None) == EXIT_OK
+
+    cat = TableCatalog(
+        {"id": ColumnType("pg_catalog", "int4"), "ssn": ColumnType("pg_catalog", "text")},
+        "public",
     )
-    out1: list[str] = []
-    rc1 = main(
+
+    class StubConn:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            return None
+
+    stored_reqs: dict[str, rq_mod.PendingRequest] = {}
+    t_now = datetime(2026, 11, 5, 18, tzinfo=UTC)
+
+    def stub_create(conn: Any, req: Request, **kw: Any) -> rq_mod.PendingRequest:
+        rid = f"req{len(stored_reqs) + 1:09d}"
+        pr = rq_mod.PendingRequest(
+            rid,
+            req,
+            kw["policy_sha256"],
+            kw["verifier"],
+            t_now,
+            t_now + kw["ttl"],
+            "pending",
+            None,
+            None,
+            dict(kw["requester_identity"]) if kw.get("requester_identity") else None,
+        )
+        stored_reqs[rid] = pr
+        return pr
+
+    def stub_apply(conn: Any, plan: g_mod.GrantPlan, sink: g_mod.ReceiptSink, **kw: Any) -> None:
+        assert plan.facts is not None
+        receipt_mod.append(sink.log, "issued", plan.facts, sink.key, host="test-host")
+
+    monkeypatch.setattr(cli_mod, "_connect", lambda a: StubConn())
+    monkeypatch.setattr(g_mod, "ensure_state", lambda c: [])
+    monkeypatch.setattr("datagrant.pg.mask.inspect_table", lambda c, t: cat)
+    monkeypatch.setattr(rq_mod, "create_request", stub_create)
+    monkeypatch.setattr(rq_mod, "get_request", lambda c, rid: stored_reqs[rid])
+    monkeypatch.setattr(g_mod, "apply_plan", stub_apply)
+
+    oidc_two = tmp_path / "oidc-two.yaml"
+    oidc_two.write_text(
+        f"version: 1\napproval: two-person\napprovers: [sec]\nmax_duration: 4h\n"
+        f"groups: {{ml: [], sec: []}}\n"
+        f"identity:\n  mode: oidc\n  issuer: {idp.issuer}\n  audience: datagrant-cli\n"
+        f"  username_claim: email\n  groups_claim: groups\n"
+        f"  group_map: {{idp-ml: ml, idp-sec: sec}}\n"
+        f"datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        f"      - name: public.p\n        allowed_groups: [ml]\n"
+        f"        columns: {{id: passthrough, ssn: hash}}\n"
+    )
+    local_two = tmp_path / "local-two.yaml"
+    local_two.write_text(
+        "version: 1\napproval: two-person\napprovers: [sec]\nmax_duration: 4h\n"
+        "groups: {ml: [alice@example.com], sec: [carol@example.com]}\n"
+        "datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        "      - name: public.p\n        allowed_groups: [ml]\n"
+        "        columns: {id: passthrough, ssn: hash}\n"
+    )
+
+    req_args = [
+        "--dataset",
+        "clinic",
+        "--table",
+        "public.p",
+        "--columns",
+        "id,ssn",
+        "--duration",
+        "1h",
+        "--purpose",
+        "audit-test",
+    ]
+    now_ts = int(time.time())
+
+    # 1. --as-user in oidc mode -> exit 2 before network/DB
+    out: list[str] = []
+    rc = main(
+        ["--json", "request", "--policy", str(oidc_two), "--as-user", "alice", *req_args],
+        out.append,
+    )
+    assert rc == 2 and "--as-user" in json.loads(out[-1])["error"]
+
+    # 2. Missing token in oidc mode -> exit 2
+    out.clear()
+    rc = main(["--json", "request", "--policy", str(oidc_two), *req_args], out.append)
+    assert rc == 2 and "no OIDC token" in json.loads(out[-1])["error"]
+
+    # 3. --oidc-token-file in local mode -> exit 2
+    tf_alice = tmp_path / "alice.jwt"
+    alice_tok = keys.sign(
+        _base_claims(
+            idp.issuer,
+            sub="sub-alice-1",
+            email="alice@example.com",
+            groups=["idp-ml"],
+            iat=now_ts - 5,
+            exp=now_ts + 300,
+        ),
+        alg="EdDSA",
+    )
+    tf_alice.write_text(alice_tok + "\n")
+    tf_alice.chmod(0o600)
+    out.clear()
+    rc = main(
         [
             "--json",
             "request",
             "--policy",
-            str(pol),
-            "--as-user",
-            "alice",
-            "--dataset",
-            "clinic",
-            "--table",
-            "public.t",
-            "--columns",
-            "id",
-            "--duration",
-            "30m",
-            "--purpose",
-            "t",
+            str(local_two),
+            "--oidc-token-file",
+            str(tf_alice),
+            *req_args,
         ],
-        out1.append,
+        out.append,
     )
-    assert rc1 == 1 and "identity.mode='oidc'" in json.loads(out1[-1])["error"]
+    assert rc == 2 and "local" in json.loads(out[-1])["error"]
 
-    out2: list[str] = []
-    rc2 = main(
-        ["--json", "approve", "--policy", str(pol), "--as-user", "carol", "req123"], out2.append
+    # 4. Invalid/expired token -> exit 1 and raw token never in output
+    exp_tok = keys.sign(_base_claims(idp.issuer, iat=now_ts - 600, exp=now_ts - 300), alg="EdDSA")
+    monkeypatch.setenv(oidc.OIDC_TOKEN_ENV, exp_tok)
+    out.clear()
+    rc = main(["--json", "request", "--policy", str(oidc_two), *req_args], out.append)
+    assert rc == 1 and exp_tok not in out[-1]
+    monkeypatch.delenv(oidc.OIDC_TOKEN_ENV, raising=False)
+
+    # 5. Valid OIDC request via --oidc-token-file creates pending request with mode+iss+sub
+    out.clear()
+    rc = main(
+        [
+            "--json",
+            "request",
+            "--apply",
+            "--policy",
+            str(oidc_two),
+            "--oidc-token-file",
+            str(tf_alice),
+            *req_args,
+        ],
+        out.append,
     )
-    assert rc2 == 1 and "identity.mode='oidc'" in json.loads(out2[-1])["error"]
+    p_resp = json.loads(out[-1])
+    assert rc == 0 and p_resp["status"] == "pending" and p_resp["identity_source"] == "oidc"
+    assert alice_tok not in out[-1]
+    rid = p_resp["request_id"]
+    assert stored_reqs[rid].requester_identity == {
+        "mode": "oidc",
+        "source": "oidc",
+        "iss": idp.issuer,
+        "sub": "sub-alice-1",
+        "token_sha256": token_sha256(alice_tok),
+        "idp_groups": ["idp-ml"],
+    }
+
+    # 6. Mode mismatch: approving OIDC request under local policy refuses exit 1 (no fallback)
+    out.clear()
+    rc = main(
+        [
+            "--json",
+            "approve",
+            "--apply",
+            "--policy",
+            str(local_two),
+            "--as-user",
+            "carol@example.com",
+            rid,
+        ],
+        out.append,
+    )
+    assert rc == 1 and "identity mode" in json.loads(out[-1])["error"]
+
+    # And vice versa: local pending request approved under OIDC policy refuses exit 1
+    out.clear()
+    assert (
+        main(
+            [
+                "--json",
+                "request",
+                "--apply",
+                "--policy",
+                str(local_two),
+                "--as-user",
+                "alice@example.com",
+                *req_args,
+            ],
+            out.append,
+        )
+        == 0
+    )
+    local_rid = json.loads(out[-1])["request_id"]
+    carol_tok = keys.sign(
+        _base_claims(
+            idp.issuer,
+            sub="sub-carol-2",
+            email="carol@example.com",
+            groups=["idp-sec"],
+            iat=now_ts - 5,
+            exp=now_ts + 300,
+        ),
+        alg="RS256",
+    )
+    monkeypatch.setenv(oidc.OIDC_TOKEN_ENV, carol_tok)
+    out.clear()
+    rc = main(["--json", "approve", "--apply", "--policy", str(oidc_two), local_rid], out.append)
+    assert rc == 1 and "identity mode" in json.loads(out[-1])["error"]
+
+    # 7. Self-approval blocked by (iss, sub) EVEN if mutable email claim changed!
+    alice_renamed_tok = keys.sign(
+        _base_claims(
+            idp.issuer,
+            sub="sub-alice-1",  # SAME sub as requester!
+            email="alice-new-alias@example.com",
+            groups=["idp-sec"],
+            iat=now_ts - 5,
+            exp=now_ts + 300,
+        ),
+        alg="EdDSA",
+    )
+    monkeypatch.setenv(oidc.OIDC_TOKEN_ENV, alice_renamed_tok)
+    out.clear()
+    rc = main(["--json", "approve", "--apply", "--policy", str(oidc_two), rid], out.append)
+    assert rc == 1 and "different person" in json.dumps(json.loads(out[-1])["reasons"])
+
+    # 8. Unmapped same-named IdP group "sec" on eve's token does NOT grant approver rights
+    eve_unmapped = keys.sign(
+        _base_claims(
+            idp.issuer,
+            sub="sub-eve-3",
+            email="eve@example.com",
+            groups=["sec"],  # matches policy group name, NOT in group_map!
+            iat=now_ts - 5,
+            exp=now_ts + 300,
+        ),
+        alg="EdDSA",
+    )
+    monkeypatch.setenv(oidc.OIDC_TOKEN_ENV, eve_unmapped)
+    out.clear()
+    rc = main(["--json", "approve", "--apply", "--policy", str(oidc_two), rid], out.append)
+    assert rc == 1 and "not in an approver group" in json.dumps(json.loads(out[-1])["reasons"])
+
+    # 9. Valid OIDC approval by carol (via group_map idp-sec -> sec) writes receipt with token_sha256 only
+    monkeypatch.setenv(oidc.OIDC_TOKEN_ENV, carol_tok)
+    out.clear()
+    rc = main(["--json", "approve", "--apply", "--policy", str(oidc_two), rid], out.append)
+    assert rc == 0 and json.loads(out[-1])["status"] == "granted"
+    assert carol_tok not in out[-1] and alice_tok not in out[-1]
+
+    # Prepend a legacy v0.2.0 receipt (no identity / approver_identities fields) and verify chain!
+    skey = load_signing_key(tmp_path / "keys" / "signing.key")
+    raw_log_text = log_path.read_text()
+    assert alice_tok not in raw_log_text and carol_tok not in raw_log_text
+    rec_body = json.loads(raw_log_text.splitlines()[0])["receipt"]
+    assert rec_body["identity"] == {
+        "source": "oidc",
+        "iss": idp.issuer,
+        "sub": "sub-alice-1",
+        "token_sha256": token_sha256(alice_tok),
+    }
+    assert rec_body["approver_identities"] == [
+        {
+            "approver": "carol@example.com",
+            "source": "oidc",
+            "iss": idp.issuer,
+            "sub": "sub-carol-2",
+            "token_sha256": token_sha256(carol_tok),
+        }
+    ]
+    assert receipt_mod.verify(log_path, skey.private.public_key()).ok
+    capsys.readouterr()
 
 
 def test_strict_json_nan_infinity_duplicate_keys_and_deep_nesting(
@@ -1030,3 +1289,74 @@ def test_url_b64u_jwk_and_http_error_branches(
     with pytest.raises(IdentityError, match="cannot write JWKS cache"):
         oidc._write_cache(cdir / "out.json", {"k": 1})
     assert list(cdir.glob(".jwks.*")) == []
+
+
+def test_legacy_receipts_and_new_oidc_receipts_verify_together_and_forbid_raw_tokens(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from datagrant import receipt as receipt_mod
+    from datagrant.keys import init_keys, load_signing_key
+    from datagrant.receipt import GrantFacts, ReceiptError
+
+    _, sp, _ = init_keys(tmp_path / "k")
+    skey = load_signing_key(sp)
+    t0 = datetime(2026, 11, 5, 18, tzinfo=UTC)
+    log = tmp_path / "mixed.jsonl"
+
+    # seq 0: legacy v0.2.0 receipt without identity / approver_identities
+    legacy = GrantFacts(
+        "000000000001",
+        "alice",
+        "clinic",
+        "public.p",
+        ("id",),
+        {"id": "passthrough"},
+        None,
+        "legacy",
+        t0,
+        t0 + timedelta(hours=1),
+        "a" * 64,
+        1,
+        "auto",
+    )
+    b0 = receipt_mod.append(log, "issued", legacy, skey, event_at=t0, host="h")
+    assert "identity" not in b0 and "approver_identities" not in b0
+
+    # seq 1: v0.3.0 OIDC receipt with identity + approver_identities (token_sha256 only)
+    modern = GrantFacts(
+        "000000000002",
+        "alice@example.com",
+        "clinic",
+        "public.p",
+        ("id",),
+        {"id": "passthrough"},
+        None,
+        "oidc",
+        t0,
+        t0 + timedelta(hours=1),
+        "b" * 64,
+        1,
+        "two-person",
+        ("carol@example.com",),
+        {"source": "oidc", "iss": "https://idp.example.com", "sub": "u1", "token_sha256": "c" * 64},
+        (
+            {
+                "approver": "carol@example.com",
+                "source": "oidc",
+                "iss": "https://idp.example.com",
+                "sub": "u2",
+                "token_sha256": "d" * 64,
+            },
+        ),
+    )
+    b1 = receipt_mod.append(log, "issued", modern, skey, event_at=t0, host="h")
+    assert b1["identity"]["token_sha256"] == "c" * 64
+    res = receipt_mod.verify(log, skey.private.public_key())
+    assert res.ok and res.count == 2
+
+    # Forbidden raw-token key names rejected by canonical()
+    for bad_key in ("token", "id_token", "oidc_token", "access_token"):
+        with pytest.raises(ReceiptError, match="secrets"):
+            receipt_mod.canonical({"identity": {bad_key: "secret"}})

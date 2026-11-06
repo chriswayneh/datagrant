@@ -147,6 +147,7 @@ def test_request_two_person_and_approve(
             "pending",
             None,
             None,
+            kw.get("requester_identity"),
         )
         return stored["p"]
 

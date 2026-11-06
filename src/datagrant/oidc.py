@@ -58,7 +58,7 @@ DEFAULT_CLOCK_SKEW = timedelta(seconds=60)
 DEFAULT_JWKS_CACHE_TTL = timedelta(minutes=5)
 
 _B64U_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_JWS_LIKE_RE = re.compile(r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
+_JWS_LIKE_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
 _PRINTABLE_TOKEN_RE = re.compile(r"^[\x21-\x7e]+$")
 _SUB_RE = re.compile(r"^[\x20-\x7e]{1,256}$")
 _USERNAME_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
@@ -97,6 +97,28 @@ class VerifiedIdentity:
     sub: str | None = None
     token_sha256: str | None = None
     mapped_groups: frozenset[str] = frozenset()
+    idp_groups: tuple[str, ...] = ()
+
+    def receipt_dict(self) -> dict[str, str]:
+        out: dict[str, str] = {"source": self.source}
+        if self.source == "oidc":
+            if self.iss is not None:
+                out["iss"] = self.iss
+            if self.sub is not None:
+                out["sub"] = self.sub
+            if self.token_sha256 is not None:
+                out["token_sha256"] = self.token_sha256
+        return out
+
+    def approver_receipt_dict(self) -> dict[str, str]:
+        return {"approver": self.username, **self.receipt_dict()}
+
+    def request_state_dict(self) -> dict[str, Any]:
+        mode = "oidc" if self.source == "oidc" else "local"
+        out: dict[str, Any] = {"mode": mode, **self.receipt_dict()}
+        if self.source == "oidc" and self.idp_groups:
+            out["idp_groups"] = list(self.idp_groups)
+        return out
 
 
 def allow_insecure_localhost(env: Mapping[str, str] | None = None) -> bool:
@@ -809,4 +831,5 @@ def verify_oidc_token(
         sub=sub,
         token_sha256=token_sha256(token),
         mapped_groups=frozenset(mapped),
+        idp_groups=tuple(token_groups) if cfg.groups_claim is not None else (),
     )

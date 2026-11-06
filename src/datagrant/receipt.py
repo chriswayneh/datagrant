@@ -36,7 +36,18 @@ MAX_LINE_BYTES = 64 * 1024
 RECEIPT_LOG_ENV = "DATAGRANT_RECEIPT_LOG"
 Event = Literal["issued", "revoked", "expired", "revoke_failed"]
 EVENTS = ("issued", "revoked", "expired", "revoke_failed")
-_FORBIDDEN_KEYS = {"password", "hash_key", "key", "derived", "secret", "private_key"}
+_FORBIDDEN_KEYS = {
+    "password",
+    "hash_key",
+    "key",
+    "derived",
+    "secret",
+    "private_key",
+    "id_token",
+    "oidc_token",
+    "token",
+    "access_token",
+}
 
 
 class ReceiptError(RuntimeError):
@@ -100,6 +111,8 @@ class GrantFacts:
     policy_version: int
     approval: str
     approvers: Sequence[str] = ()
+    identity: Mapping[str, Any] | None = None
+    approver_identities: Sequence[Mapping[str, Any]] | None = None
 
 
 def receipt_body(
@@ -115,7 +128,7 @@ def receipt_body(
 ) -> dict[str, Any]:
     if event not in EVENTS:
         raise ReceiptError(f"unknown receipt event {event!r}")
-    return {
+    body: dict[str, Any] = {
         "version": RECEIPT_VERSION,
         "event": event,
         "event_at": _utc(event_at or datetime.now(UTC)),
@@ -138,6 +151,11 @@ def receipt_body(
         "prev_receipt_sha256": prev,
         "key_id": key_id,
     }
+    if facts.identity is not None:
+        body["identity"] = dict(facts.identity)
+    if facts.approver_identities is not None:
+        body["approver_identities"] = [dict(x) for x in facts.approver_identities]
+    return body
 
 
 def sign_line(body: Mapping[str, Any], key: SigningKey) -> bytes:
