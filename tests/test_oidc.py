@@ -1444,7 +1444,22 @@ def test_red_team_pr28_m1_l2_l3_regressions(
     now_ts = int(time.time())
     live_tok = keys.sign(_base_claims(idp.issuer, iat=now_ts - 5, exp=now_ts + 300), alg="EdDSA")
     capsys.readouterr()
-    rc_abb = main(["request", f"--oidc-token={live_tok}"])
+    rc_abb = main(
+        [
+            "request",
+            "--dataset",
+            "d",
+            "--table",
+            "s.t",
+            "--columns",
+            "id",
+            "--duration",
+            "1h",
+            "--purpose",
+            "p",
+            f"--oidc-token={live_tok}",
+        ]
+    )
     err_abb = capsys.readouterr().err
     assert rc_abb == 2
     assert "unrecognized arguments" in err_abb
@@ -1453,7 +1468,22 @@ def test_red_team_pr28_m1_l2_l3_regressions(
 
     # Non-JWS secret in $DATAGRANT_OIDC_TOKEN is also scrubbed by _SafeArgumentParser.error
     monkeypatch.setenv(oidc.OIDC_TOKEN_ENV, "super-secret-env-token-xyz")
-    rc_env_err = main(["request", "--bogus=super-secret-env-token-xyz"])
+    rc_env_err = main(
+        [
+            "request",
+            "--dataset",
+            "d",
+            "--table",
+            "s.t",
+            "--columns",
+            "id",
+            "--duration",
+            "1h",
+            "--purpose",
+            "p",
+            "--bogus=super-secret-env-token-xyz",
+        ]
+    )
     err_env = capsys.readouterr().err
     assert rc_env_err == 2 and "super-secret-env-token-xyz" not in err_env and "***" in err_env
 
