@@ -137,7 +137,7 @@ def validate_oidc_url(
     url: str, what: str, *, allow_localhost_http: bool = False
 ) -> urllib.parse.SplitResult:
     """Require ``https://host...`` with no credentials/query/fragment."""
-    if not isinstance(url, str) or not url or not _PRINTABLE_TOKEN_RE.match(url):
+    if not isinstance(url, str) or not url or not _PRINTABLE_TOKEN_RE.fullmatch(url):
         raise ValueError(f"{what}: URL must be a non-empty ASCII string without whitespace")
     try:
         u = urllib.parse.urlsplit(url)
@@ -270,13 +270,13 @@ def read_token_file(path: str | Path) -> str:
         token = buf.decode("ascii").strip()
     except UnicodeDecodeError:
         raise IdentityError(f"OIDC token file {label} is not ASCII") from None
-    if not token or not _PRINTABLE_TOKEN_RE.match(token):
+    if not token or not _PRINTABLE_TOKEN_RE.fullmatch(token):
         raise IdentityError(f"OIDC token file {label} does not contain a compact JWT")
     return token
 
 
 def _b64u_decode(segment: str, what: str) -> bytes:
-    if not segment or not _B64U_RE.match(segment):
+    if not segment or not _B64U_RE.fullmatch(segment):
         raise IdentityError(f"invalid {what} encoding")
     rem = len(segment) % 4
     if rem == 1:
@@ -722,7 +722,7 @@ def verify_oidc_token(
     if (
         not token
         or len(token.encode("utf-8")) > MAX_TOKEN_BYTES
-        or not _PRINTABLE_TOKEN_RE.match(token)
+        or not _PRINTABLE_TOKEN_RE.fullmatch(token)
     ):
         raise IdentityError("OIDC token is empty, oversized, or contains invalid characters")
 
@@ -777,7 +777,7 @@ def verify_oidc_token(
     if not isinstance(iss, str) or iss != cfg.issuer:
         raise IdentityError(f"JWT iss {iss!r} does not match expected issuer {cfg.issuer!r}")
     sub = claims.get("sub")
-    if not isinstance(sub, str) or not _SUB_RE.match(sub):
+    if not isinstance(sub, str) or not _SUB_RE.fullmatch(sub):
         raise IdentityError("JWT missing valid sub claim")
 
     allowed_aud = set(cfg.audience)
@@ -814,7 +814,7 @@ def verify_oidc_token(
         raise IdentityError("JWT nbf is in the future")
 
     raw_user = claims.get(cfg.username_claim)
-    if not isinstance(raw_user, str) or not _USERNAME_RE.match(raw_user):
+    if not isinstance(raw_user, str) or not _USERNAME_RE.fullmatch(raw_user):
         raise IdentityError(f"JWT claim {cfg.username_claim!r} missing or invalid")
     if cfg.username_claim == "email" and claims.get("email_verified") is not True:
         raise IdentityError("JWT email_verified must be boolean true when username_claim is email")

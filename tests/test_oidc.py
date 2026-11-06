@@ -1856,3 +1856,171 @@ def test_ascii_only_principal_folding_member_validation_and_local_receipt_normal
     assert rec["identity"] == {"source": "flag"}
     skey = load_signing_key(tmp_path / "k" / "signing.key")
     assert receipt_mod.verify(log_path, skey.private.public_key()).ok
+
+
+def test_trailing_newline_rejected_across_all_validation_regexes(
+    idp: IdpState, keys: KeySet, tmp_path: Path
+) -> None:
+    from datagrant.pg.grant import GrantError, build_plan
+    from datagrant.pg.mask import ColumnType, TableCatalog
+    from datagrant.policy import Decision
+
+    # 1. _MEMBER_RE: "alice\n" rejected at policy load
+    with pytest.raises(PolicyError, match="invalid member name"):
+        parse_policy(
+            {
+                "version": 1,
+                "max_duration": "1h",
+                "groups": {"ml": ["alice\n"]},
+                "datasets": [
+                    {
+                        "name": "clinic",
+                        "database": "clinicdb",
+                        "tables": [
+                            {
+                                "name": "public.p",
+                                "allowed_groups": ["ml"],
+                                "columns": {"id": "passthrough"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    # 2. _IDENT_RE and _NAME_RE in policy.py: trailing newline rejected on group, dataset, db, column, claim
+    for bad_doc in [
+        {
+            "version": 1,
+            "max_duration": "1h",
+            "groups": {"ml\n": ["alice"]},
+            "datasets": [
+                {
+                    "name": "clinic",
+                    "database": "clinicdb",
+                    "tables": [
+                        {
+                            "name": "public.p",
+                            "allowed_groups": ["ml\n"],
+                            "columns": {"id": "passthrough"},
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "version": 1,
+            "max_duration": "1h",
+            "groups": {"ml": ["alice"]},
+            "datasets": [
+                {
+                    "name": "clinic\n",
+                    "database": "clinicdb",
+                    "tables": [
+                        {
+                            "name": "public.p",
+                            "allowed_groups": ["ml"],
+                            "columns": {"id": "passthrough"},
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "version": 1,
+            "max_duration": "1h",
+            "groups": {"ml": ["alice"]},
+            "datasets": [
+                {
+                    "name": "clinic",
+                    "database": "clinicdb\n",
+                    "tables": [
+                        {
+                            "name": "public.p",
+                            "allowed_groups": ["ml"],
+                            "columns": {"id": "passthrough"},
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "version": 1,
+            "max_duration": "1h",
+            "groups": {"ml": ["alice"]},
+            "datasets": [
+                {
+                    "name": "clinic",
+                    "database": "clinicdb",
+                    "tables": [
+                        {
+                            "name": "public.p\n",
+                            "allowed_groups": ["ml"],
+                            "columns": {"id": "passthrough"},
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "version": 1,
+            "max_duration": "1h",
+            "groups": {"ml": ["alice"]},
+            "identity": {
+                "mode": "oidc",
+                "issuer": "https://idp.example.com",
+                "audience": "a",
+                "username_claim": "email\n",
+            },
+            "datasets": [
+                {
+                    "name": "clinic",
+                    "database": "clinicdb",
+                    "tables": [
+                        {
+                            "name": "public.p",
+                            "allowed_groups": ["ml"],
+                            "columns": {"id": "passthrough"},
+                        }
+                    ],
+                }
+            ],
+        },
+    ]:
+        with pytest.raises(PolicyError):
+            parse_policy(bad_doc)
+
+    # 3. _SUB_RE: "user-alice\n" in JWT sub rejected
+    tok_bad_sub = keys.sign(_base_claims(idp.issuer, sub="user-alice\n"), alg="EdDSA")
+    with pytest.raises(IdentityError, match="sub"):
+        verify_oidc_token(
+            tok_bad_sub,
+            _cfg(idp.issuer, username_claim="email"),
+            now=NOW,
+            cache_dir=tmp_path,
+            env=INSECURE_ENV,
+        )
+
+    # 4. _USERNAME_RE: "alice@example.com\n" in JWT username claim rejected
+    tok_bad_user = keys.sign(_base_claims(idp.issuer, email="alice@example.com\n"), alg="EdDSA")
+    with pytest.raises(IdentityError, match="email"):
+        verify_oidc_token(
+            tok_bad_user,
+            _cfg(idp.issuer, username_claim="email"),
+            now=NOW,
+            cache_dir=tmp_path,
+            env=INSECURE_ENV,
+        )
+
+    # 5. _PRINTABLE_TOKEN_RE / _B64U_RE: trailing newline in URL and base64url segment rejected
+    with pytest.raises(ValueError):
+        oidc.validate_oidc_url("https://idp.example.com\n", "issuer")
+    with pytest.raises(IdentityError):
+        oidc._b64u_decode("YQ\n", "seg")
+
+    # 6. _GRANT_ID_RE: trailing newline in grant_id rejected
+    dec = Decision(True, ("ok",), "auto", "a" * 64, {"id": "passthrough"}, 1, "clinic")
+    r = Request("alice", "clinic", "public.p", ("id",), timedelta(hours=1), "t")
+    cat = TableCatalog({"id": ColumnType("pg_catalog", "int4")}, "public")
+    with pytest.raises(GrantError, match="grant id"):
+        build_plan(dec, r, database="db", password="pw", catalog=cat, grant_id="abcdef012345\n")

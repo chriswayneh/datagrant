@@ -156,7 +156,7 @@ def build_plan(
     if decision.approval == "two-person" and not approvers:
         raise GrantError("two-person approval: the grant needs an approver")
     gid = grant_id or secrets.token_hex(6)
-    if not _GRANT_ID_RE.match(gid):
+    if not _GRANT_ID_RE.fullmatch(gid):
         raise GrantError("grant id must be 12 lowercase hex characters")
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
