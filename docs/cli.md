@@ -11,7 +11,7 @@ Run `datagrant COMMAND --help` for the exact flags of your installed version. Th
 - **Dry run by default.** Any command that changes something (`keys init`, `request`, `approve`, `revoke`, `sweep`, `preflight`) only reports what it would do unless you pass `--apply`. `--dry-run` is accepted as a no-op. Passing both `--apply` and `--dry-run` exits 2.
 - **`--json`** gives machine-readable output and can go before or after the command.
 - **Per-command flags.** Each command accepts only the shared flags it uses (see the table below). Using a flag a command doesn't take, for example `policy check --dsn ...`, exits 2.
-- **Secrets are never echoed.** DSN passwords are redacted from errors. The one-time database password is printed once, to the person it belongs to.
+- **Secrets are never echoed.** DSN `user:pass@` and `password=` forms are redacted from errors at every password length. An extracted DSN password of 4 or more characters is also removed wherever it appears in the message; shorter ones are not globally replaced, so they do not destroy the rest of the text. The one-time database password is printed once, to the person it belongs to.
 
 ## Environment and defaults
 

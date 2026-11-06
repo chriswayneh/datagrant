@@ -4,6 +4,9 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+- CLI error redaction no longer globally replaces a DSN password shorter than 4 characters, which mangled diagnostics (password `er` turned `server error` into `s***v*** ***ror`). `user:pass@` and `password=` forms are still redacted at every length, so a full DSN does not leak its password.
+
 ## [0.2.0] - 2026-11-04
 
 Tighter privacy controls and off-host evidence.

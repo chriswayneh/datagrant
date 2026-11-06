@@ -56,7 +56,7 @@ _PW_URL = re.compile(r"(\w+://[^:/@\s]*:)[^@\s]*@")
 
 
 def redact(text: str, dsn: str | None = None) -> str:
-    """Remove passwords from DSNs/conninfo strings and any literal DSN password."""
+    """Remove passwords from DSN/conninfo forms; also replace extracted passwords of length >= 4."""
     if dsn:
         try:
             import psycopg
@@ -64,7 +64,10 @@ def redact(text: str, dsn: str | None = None) -> str:
             pw = psycopg.conninfo.conninfo_to_dict(dsn).get("password")
         except Exception:  # noqa: BLE001 - malformed DSN: fall back to patterns
             pw = None
-        if isinstance(pw, str) and pw:
+        # Length < 4 matches common English fragments ("er", "in", "db") and
+        # would mangle diagnostics if replaced globally. URI user:pass@ and
+        # password= forms are still stripped below at every length.
+        if isinstance(pw, str) and len(pw) >= 4:
             text = text.replace(pw, "***")
     return _PW_URL.sub(r"\1***@", _PW_KV.sub(r"\1***", text))
 

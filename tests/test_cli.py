@@ -113,11 +113,94 @@ def test_redact(text: str, dsn: str | None) -> None:
     assert "s3cr3t" not in out and "***" in out
 
 
+@pytest.mark.parametrize(
+    ("text", "dsn", "must_keep", "must_drop"),
+    [
+        # length 1: do not globally replace "x" (would turn "extra" into "e***tra")
+        (
+            "exception extra: postgresql://u:x@h/db failed",
+            "postgresql://u:x@h/db",
+            ("exception extra", "postgresql://u:***@h/db"),
+            (":x@", "postgresql://u:x@h/db"),
+        ),
+        # length 2: "er" must not destroy "server error"
+        (
+            "server error: host=db password=er user=a",
+            "host=db password=er user=a",
+            ("server error", "password=***"),
+            ("password=er",),
+        ),
+        # length 3: keep "abc" in diagnostics; still strip URI user:pass@
+        (
+            "role dg_abc cannot connect; postgresql://u:abc@h/db",
+            "postgresql://u:abc@h/db",
+            ("role dg_abc cannot connect", "postgresql://u:***@h/db"),
+            (":abc@", "postgresql://u:abc@h/db"),
+        ),
+        # quoted conninfo, length 2
+        (
+            "bad conninfo password = 'pw' host=db",
+            "host=db password=pw",
+            ("password = ***",),
+            ("password = 'pw'", "password='pw'"),
+        ),
+        # DSN-form patterns with no extracted dsn, short password
+        (
+            "postgresql://admin:pw@db/x failed",
+            None,
+            ("postgresql://admin:***@db/x",),
+            (":pw@",),
+        ),
+        (
+            "host=db password=ab user=admin failed",
+            None,
+            ("password=***",),
+            ("password=ab",),
+        ),
+        # boundary 4: extracted password is replaced everywhere
+        (
+            "server said abcd is wrong",
+            "host=db password=abcd",
+            ("***",),
+            ("abcd",),
+        ),
+        # longer than 4 (existing global-replace behavior)
+        (
+            "server said s3cr3tpw is wrong",
+            "postgresql://u:s3cr3tpw@h/db",
+            ("***",),
+            ("s3cr3tpw", "s3cr3t"),
+        ),
+    ],
+)
+def test_redact_short_password_and_dsn_forms(
+    text: str, dsn: str | None, must_keep: tuple[str, ...], must_drop: tuple[str, ...]
+) -> None:
+    out = redact(text, dsn)
+    for needle in must_keep:
+        assert needle in out, (needle, out)
+    for needle in must_drop:
+        assert needle not in out, (needle, out)
+
+
 def test_connect_error_is_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     dsn = "postgresql://admin:hunter2zz@127.0.0.1:1/db?connect_timeout=1"
     assert main(["sweep", "--apply", "--dsn", dsn]) == EXIT_FAILED
     err = capsys.readouterr().err
     assert "cannot connect" in err and "hunter2zz" not in err
+
+
+def test_connect_error_short_password_redacts_dsn_not_diagnostics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "postgresql://admin:er@127.0.0.1:1/db?connect_timeout=1"
+    assert main(["sweep", "--apply", "--dsn", dsn]) == EXIT_FAILED
+    err = capsys.readouterr().err
+    assert "cannot connect" in err
+    assert "://admin:er@" not in err
+    assert ":er@" not in err
+    # length 2 must not mangle leftover diagnostic words such as "error"
+    assert "errror" not in err and "s***v" not in err
 
 
 def test_json_error_output() -> None:
