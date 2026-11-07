@@ -4,7 +4,7 @@
 datagrant [--json] [--dsn DSN] [--signing-key FILE] [--hash-key FILE] [--receipt-log FILE] [--receipt-sink URL] [--receipt-sink-mode MODE] [--version] COMMAND ...
 ```
 
-Run `datagrant COMMAND --help` for the exact flags of your installed version. This page matches main, including OIDC identity merged in PRs #26 to #28. That work is not in the v0.2.0 tag; v0.3.0 is not released.
+Run `datagrant COMMAND --help` for the exact flags of your installed version. This page matches v0.3.0.
 
 ## Conventions
 
@@ -82,7 +82,7 @@ See [Receipt sink](#receipt-sink) below for how delivery works.
 
 ## OIDC identity
 
-Optional. Design: [design/oidc-identity.md](design/oidc-identity.md). Policy: [policy.md#identity](policy.md#identity). Walkthrough: [demo-oidc.md](demo-oidc.md). Merged on main; not in the v0.2.0 tag.
+Optional. Design: [design/oidc-identity.md](design/oidc-identity.md). Policy: [policy.md#identity](policy.md#identity). Walkthrough: [demo-oidc.md](demo-oidc.md). Since v0.3.0.
 
 **Token acquisition.** datagrant never talks to the IdP token endpoint, never runs a browser login, and never refreshes a token. The caller obtains a short-lived OpenID Connect **ID token** from their issuer (device code, authorization code, workload identity, CI OIDC, or a test mint) and presents it. Access tokens are not ID tokens: verification requires `iss`, `sub`, `aud`, `exp` and `iat` as ID token claims.
 

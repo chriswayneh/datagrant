@@ -57,7 +57,7 @@ To use Docker on Windows, start the container yourself with `docker compose -f s
 
 CI runs the demo on every push twice: `demo` against the CI Postgres service, and `demo-compose` through `make demo` (Docker compose), which also checks that teardown left no containers or volumes.
 
-## OIDC identity (on main, pending v0.3.0)
+## OIDC identity (v0.3.0)
 
 `make demo` still uses local identity (`--as-user alice` / `--as-user carol`). That is the v0.2.0 GIF above.
 

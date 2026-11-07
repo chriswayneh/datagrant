@@ -8,7 +8,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | --- | --- | :---: |
 | v0.1.0 | Expiring, masked, receipted Postgres access from the CLI | ✅ Released |
 | v0.2.0 | Tighter privacy controls and off-host evidence | ✅ Released |
-| v0.3.0 | Real identity | On main, not tagged |
+| v0.3.0 | Real identity | Ready, release pending |
 | v0.4.0+ | More warehouses | Planned |
 
 ## v0.1.0: done
@@ -32,11 +32,16 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | `filter_columns` | Let a row filter use a column without exposing it in the view. | ✅ |
 | External receipt sink | Webhook and `file://` sinks, outbox, `receipts push`, `receipts verify --sink`. Design: [docs/design/receipt-sink.md](docs/design/receipt-sink.md). | ✅ |
 
+## v0.3.0: ready, release pending
+
+| Item | What | Status |
+| --- | --- | :---: |
+| OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. `policy.identity`, `--oidc-token-file` / `$DATAGRANT_OIDC_TOKEN`, mode parity and `(iss, sub)` checks. Design: [docs/design/oidc-identity.md](docs/design/oidc-identity.md). Demo: [docs/demo-oidc.md](docs/demo-oidc.md). | ✅ |
+
 ## Next
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. Done on main (`policy.identity`, `--oidc-token-file` / `$DATAGRANT_OIDC_TOKEN`, mode parity and `(iss, sub)` checks). Not tagged as v0.3.0. Design: [docs/design/oidc-identity.md](docs/design/oidc-identity.md). Demo: [docs/demo-oidc.md](docs/demo-oidc.md). | v0.3.0 |
 | Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.4.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.
