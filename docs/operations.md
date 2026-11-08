@@ -38,7 +38,7 @@ export DATAGRANT_RECEIPT_SINK_MODE=required  # or best-effort (default)
 
 To try everything safely first, see [demo.md](demo.md).
 
-## OIDC identity (on main, pending v0.3.0)
+## OIDC identity (v0.3.0)
 
 Details: [policy](policy.md#identity), [CLI](cli.md#oidc-identity), [security limits](security.md#known-limits), [demo](demo-oidc.md).
 

@@ -1,6 +1,6 @@
 # Design: OIDC identity
 
-Status: implemented on main (PRs #26 to #28, plus docs in this PR). v0.3.0 is not tagged. Differences from this proposal: `approve` also binds the pending request to the current `issuer` and `username_claim`; requester groups at approval are remapped from stored `idp_groups` through the current `group_map` / `allowed_groups` when `groups_claim` still matches; token-file problems are exit 1 while missing token and mode-conflicting flags are exit 2; `$DATAGRANT_OIDC_TOKEN` is ignored in local mode (not an error); email-style principals fold ASCII `A-Z` to `a-z`. The [policy](../policy.md#identity) and [CLI](../cli.md#oidc-identity) pages are authoritative. Roadmap item: [OIDC identity](../../ROADMAP.md).
+Status: implemented in v0.3.0 (PRs #26 to #29). Release pending, not tagged. Differences from this proposal: `approve` also binds the pending request to the current `issuer` and `username_claim`; requester groups at approval are remapped from stored `idp_groups` through the current `group_map` / `allowed_groups` when `groups_claim` still matches; token-file problems are exit 1 while missing token and mode-conflicting flags are exit 2; `$DATAGRANT_OIDC_TOKEN` is ignored in local mode (not an error); email-style principals fold ASCII `A-Z` to `a-z`. The [policy](../policy.md#identity) and [CLI](../cli.md#oidc-identity) pages are authoritative. Roadmap item: [OIDC identity](../../ROADMAP.md).
 
 ## Goal
 
