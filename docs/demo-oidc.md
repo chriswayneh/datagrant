@@ -2,7 +2,7 @@
 
 Walk `request` then `approve` with **synthetic, short-lived ID tokens**. No real IdP, no real secrets, no production issuer.
 
-This is documentation plus copy-paste fixtures. It is not a second `make demo` target (that GIF still uses local `--as-user` identity). The executable counterpart in CI is `tests/integration/test_cli_e2e.py::test_oidc_request_approve_revoke_and_receipts_e2e`. This matches OIDC identity in v0.3.0 (release pending; PRs #26 to #28).
+This is documentation plus copy-paste fixtures. It is not a second `make demo` target (that GIF still uses local `--as-user` identity). The executable counterpart in CI is `tests/integration/test_cli_e2e.py::test_oidc_request_approve_revoke_and_receipts_e2e`. This matches OIDC identity in v0.3.0 (PRs #26 to #28).
 
 ## What this shows
 
