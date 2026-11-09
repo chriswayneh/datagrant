@@ -8,7 +8,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | --- | --- | :---: |
 | v0.1.0 | Expiring, masked, receipted Postgres access from the CLI | ✅ Released |
 | v0.2.0 | Tighter privacy controls and off-host evidence | ✅ Released |
-| v0.3.0 | Real identity | Ready, release pending |
+| v0.3.0 | Real identity | ✅ Released |
 | v0.4.0+ | More warehouses | Planned |
 
 ## v0.1.0: done
@@ -32,7 +32,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | `filter_columns` | Let a row filter use a column without exposing it in the view. | ✅ |
 | External receipt sink | Webhook and `file://` sinks, outbox, `receipts push`, `receipts verify --sink`. Design: [docs/design/receipt-sink.md](docs/design/receipt-sink.md). | ✅ |
 
-## v0.3.0: ready, release pending
+## v0.3.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
