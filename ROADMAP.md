@@ -43,7 +43,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Approvals and policy limits | Policy-wide N-of-M quorum (cap 8), optional distinct-groups SoD on the table's `allowed_groups`, policy-capped pending TTL, `max_columns`, max concurrent grants, denial/expiry receipts on `--apply`. No break-glass (emergency path is a reviewed policy edit to `auto`). Construction is a sequence of small PRs after this design is approved. Design: [docs/design/approvals-policy-limits.md](docs/design/approvals-policy-limits.md). | Design |
+| Approvals and policy limits | Policy-wide N-of-M quorum (cap 8); `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty; policy-capped pending TTL, `max_columns`, max concurrent grants, denial/expiry receipts on `--apply`. No break-glass (emergency path is a reviewed policy edit to `auto`). Construction is a sequence of small PRs after this design is approved. Design: [docs/design/approvals-policy-limits.md](docs/design/approvals-policy-limits.md). | Design |
 
 ## Next
 

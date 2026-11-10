@@ -32,7 +32,7 @@ Out of scope for M2: break-glass, other warehouses (v0.5.0+), a hosted service, 
 | N-of-M quorum (policy-wide only) | **Keep** | Real gap: today N is always 1. Policy-wide `approvals_required` is enough. No per-dataset override (Chris). |
 | Per-dataset `approvals_required` | **Cut** | Chris: quorum is policy-wide only. |
 | Sensitivity labels as a new taxonomy | **Cut** | Policy-wide quorum plus existing `max_duration` already express "this table is hotter". A label vocabulary would be unused config. |
-| Separation of duties: optional `distinct-groups` | **Keep** (optional, default off) | Distinct-person is not enough when requester and approver both sit in the table's `allowed_groups`. Default off so current policies do not break. Intersection is against `allowed_groups` only; sharing a broad group such as `employees` is fine (Chris). |
+| Separation of duties: optional `distinct-groups` | **Keep** (optional, default off) | Distinct-person is not enough when requester and approver share a group that is in the table's `allowed_groups`. Default off so current policies do not break. `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty. |
 | `max_duration` as a new feature | **Already shipped** | Document only. |
 | `max_columns` per table | **Keep** | Cheap. Stops "request every allowed column" when the allow-list is wide. Omit = unlimited (today). |
 | `max_rows` at grant time | **Cut** | Chris: stays out. A `COUNT(*)` on the future view is racy, slow, and still not what the grantee will query. Row limits stay the job of `row_filters`. |
@@ -77,7 +77,7 @@ datasets:
 Validation (`datagrant policy check` enforces all of this offline):
 
 - `approvals_required` is policy-wide only. Positive integer, at most 8 (keeps the pending row small). Illegal when `approval: auto`. If omitted under `two-person`, it is `1` (today). A dataset-level `approvals_required` is an unknown-key error.
-- `separation_of_duties`: `none` or `distinct-groups`. Unknown strings are errors. `distinct-groups` means the approver's policy groups (static plus `group_map`) must not intersect the **table's `allowed_groups`**. Sharing a broad group such as `employees` is fine. It does not replace distinct-person / `(iss, sub)`.
+- `separation_of_duties`: `none` or `distinct-groups`. Unknown strings are errors. `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty. Groups come from static `policy.groups` plus `group_map`. It does not replace distinct-person / `(iss, sub)`.
 - `pending_ttl` uses the existing duration grammar (`m`/`h`/`d`, no seconds), `1m`..`7d`. CLI `--pending-ttl` that exceeds it is a usage error (exit 2) before the database write.
 - `max_concurrent_grants` is a positive integer, policy-wide and/or per dataset. Effective cap is the minimum of those that are set.
 - `max_columns` is a positive integer per table. A request whose unique column count exceeds it is denied. It cannot exceed the size of `columns`.
@@ -143,7 +143,7 @@ Existing 0-4 stay. New conditions map onto them; no exit 5.
 - **Denial receipts grow the log.** `--apply` only. Reasons can still leak that a table or column name exists in policy; that is already true of today's stdout denials.
 - **Concurrent cap races** under two writers. Document single-writer ops; do not add advisory locks in M2 unless tests show a cheap `SELECT ... FOR UPDATE` on a per-requester row is needed.
 - **Quorum does not implement "approver A and approver B from different IdPs".** One policy, one identity mode, same as v0.3.0 mode parity.
-- **SoD `distinct-groups` is table-scoped.** An approver in `sec` and `employees` can still approve a `ml-team` table if they are not in `ml-team`. That is the intended rule, not a bug.
+- **SoD.** `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty. An approver who is only in a different `allowed_groups` entry than the requester is allowed. Sharing a broad group that is not in `allowed_groups` (for example `employees`) is allowed.
 
 ## Compatibility with v0.3.0
 
@@ -154,7 +154,8 @@ Existing 0-4 stay. New conditions map onto them; no exit 5.
 
 ## Test plan (each construction PR)
 
-- Unit tests on `parse_policy` / `evaluate`: omitted keys; bad types; `approvals_required` on `auto`; dataset-level `approvals_required` is an error; `approvals_required` of 9 is an error; `max_columns` boundary (including `max_columns` > len(`columns`)); `pending_ttl` parse; SoD none vs distinct-groups when groups overlap `allowed_groups` vs only a broad group such as `employees`; unknown keys still fail.
+- Unit tests on `parse_policy` / `evaluate`: omitted keys; bad types; `approvals_required` on `auto`; dataset-level `approvals_required` is an error; `approvals_required` of 9 is an error; `max_columns` boundary (including `max_columns` > len(`columns`)); `pending_ttl` parse; unknown keys still fail.
+- `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty. Case: `allowed_groups: [ml-team, analysts]`; requester alice in `ml-team`, approver bob in `analysts` only = allowed; bob also in `ml-team` = refused; both in `employees` only = allowed. `separation_of_duties: none` still allows the refused case.
 - CLI tests: `--pending-ttl` above cap is exit 2; concurrent cap deny; `max_columns` deny; dry-run request does not write a `denied` receipt; `--apply` deny does write one and still exits 1; missing signing key on deny is exit 3 and no pending row.
 - Quorum: first approve leaves pending; second distinct approve issues; same person twice fails; OIDC `(iss, sub)` duplicate fails; `approvers` list on the issued receipt has both names. N is policy-wide.
 - Postgres integration: existing OIDC request/approve/revoke still passes with omitted new keys (compat).
@@ -168,14 +169,14 @@ Same shape as OIDC: one concern per PR, tests and security checks in each, docs 
 2. **Policy limits in `policy.py` + CLI clamp.** Parse/validate `pending_ttl`, `max_columns`, `max_concurrent_grants`. `evaluate()` for column cap. CLI clamps `--pending-ttl` and counts active grants. Tests. No quorum, no new receipt events yet.
 3. **Denial and expiry receipts.** Events `denied`, `not_approved`, `request_expired`. `--apply` only. Fail closed if the log cannot be written. `verify` on mixed v0.3.0 + new logs. Sweep writes `request_expired`.
 4. **Quorum.** Policy-wide `approvals_required` (1..8), `approvals jsonb`, `approval_recorded`, issuing vote creates the grant. Tests including OIDC duplicate voter. Dataset-level key is a parse error.
-5. **Separation of duties (`distinct-groups`).** Optional, default `none`. Intersection is against the table's `allowed_groups` only. Tests with overlapping `allowed_groups` vs a shared broad group, plus OIDC `group_map`.
+5. **Separation of duties (`distinct-groups`).** Optional, default `none`. `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty. Tests as in the test-plan case, plus OIDC `group_map`.
 6. **Docs, demo notes, CHANGELOG Unreleased, v0.4.0 prep (no tag).** `docs/policy.md`, `docs/cli.md`, `docs/security.md`, operations, this design marked implemented.
 
 ## Decisions (Chris, 2026-11-09 CT)
 
 1. **No break-glass in v0.4.0.** Drop that construction PR. Emergency path is a reviewed policy edit to `approval: auto`.
 2. **Quorum is policy-wide only.** No per-dataset `approvals_required` override.
-3. **SoD `distinct-groups`** forbids the approver and requester sharing only the table's `allowed_groups`. Broad groups like `employees` are fine.
+3. `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty.
 4. **Denial and expiry receipts on `--apply` only.** Dry runs do not write.
 5. **Warehouses are v0.5.0+.** v0.4.0 is this milestone only.
 6. **Rate limits and `max_rows` stay out.**
