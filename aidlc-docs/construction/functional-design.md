@@ -111,3 +111,7 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 - `DATAGRANT_DEMO_DSN` skips Docker and uses an existing Postgres. This is how CI (`demo` job) and local testing run it. Windows runs `python scripts/demo.py` directly.
 - `scripts/demo.py` drives the real CLI in-process with `--json`: it seeds synthetic data, then runs keys, policy check, dry run, auto grant with masked rows, two-person approval, revoke with a live session, sweep and receipt verification. It prints `DEMO MARKER:` lines and `DEMO OK`, and exits non-zero on any unexpected result. Keys and receipts live in a temp dir that is deleted on exit, and schema `dg_demo` is dropped.
 - Demo shortcut: the sweep step moves one grant's `expires_at` into the past instead of waiting.
+
+## M2 / v0.4.0: approvals and policy limits (proposed)
+
+Not implemented. Status and construction split: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md). Wait for an approval row in [audit.md](../audit.md) before writing code.

@@ -31,3 +31,9 @@
 ## Risks
 - RLS bypass via view owner (mitigated in U2/U3 tests).
 - Revoke failures (fail closed, retried by sweep).
+
+## Post-v0.3.0: M2 / v0.4.0 (proposed)
+
+v0.1.0 units U1–U8 above stay the approved original plan. Chris authorized a v1.0 plan that names **M2 = approvals and policy limits**, target v0.4.0.
+
+Proposed design (not approved, no code yet): [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). Construction is a sequence of small PRs listed there (policy limits, denial receipts, quorum, SoD, optional break-glass, docs). Do not start those PRs until the design is approved in [audit.md](../audit.md).
