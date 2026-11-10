@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import hashlib
 import json
 import os
 import re
@@ -403,7 +402,7 @@ def _audit_facts(
     policy_sha256: str | None = None,
     approval: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    from datagrant.receipt import GrantFacts, canonical
+    from datagrant.receipt import GrantFacts
 
     now = datetime.now(UTC)
     extra: dict[str, Any] = {}
@@ -424,16 +423,12 @@ def _audit_facts(
         cols = tuple(known)
         if unknown:
             extra["unknown_column_count"] = len(unknown)
-            extra["unknown_columns_sha256"] = hashlib.sha256(canonical(list(unknown))).hexdigest()
         if req.row_filter is None:
             row_filter = None
         elif rule is not None and req.row_filter in rule.row_filters:
             row_filter = req.row_filter
         else:
             row_filter = None
-            extra["row_filter_sha256"] = hashlib.sha256(
-                req.row_filter.encode("utf-8")
-            ).hexdigest()
             extra["row_filter_unlisted"] = True
     return GrantFacts(
         "",

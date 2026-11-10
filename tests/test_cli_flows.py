@@ -640,21 +640,22 @@ def test_denied_receipt_omits_raw_requester_input(setup: dict[str, Any]) -> None
     )
     assert code == cli.EXIT_FAILED and d["allowed"] is False
     raw = (setup["tmp"] / "r.jsonl").read_text()
+    unknown_hash = hashlib.sha256(canonical([leak_col])).hexdigest()
+    filter_hash = hashlib.sha256(leak_filter.encode()).hexdigest()
     assert "pw9secret" not in raw
     assert leak_filter not in raw
     assert "123-45-6789" not in raw
     assert leak_col not in raw
+    assert unknown_hash not in raw
+    assert filter_hash not in raw
     b = _receipts(setup)[0]
     assert b["event"] == "denied"
     assert [c["name"] for c in b["columns"]] == ["id"]
     assert b["row_filter"] is None
     assert "***" in b["purpose"] and "pw9secret" not in b["purpose"]
     assert b["details"]["unknown_column_count"] == 1
-    unknown_hash = hashlib.sha256(canonical([leak_col])).hexdigest()
-    assert b["details"]["unknown_columns_sha256"] == unknown_hash
-    assert b["details"]["row_filter_sha256"] == hashlib.sha256(
-        leak_filter.encode()
-    ).hexdigest()
+    assert "unknown_columns_sha256" not in b["details"]
+    assert "row_filter_sha256" not in b["details"]
     assert b["details"].get("row_filter_unlisted") is True
 
     log = setup["tmp"] / "r.jsonl"
@@ -685,6 +686,8 @@ def test_denied_receipt_omits_raw_requester_input(setup: dict[str, Any]) -> None
     assert kept["row_filter"] == "id = 1"
     assert kept["purpose"] == "ok"
     assert "unknown_column_count" not in kept["details"]
+    assert "row_filter_unlisted" not in kept["details"]
+    assert "unknown_columns_sha256" not in kept["details"]
     assert "row_filter_sha256" not in kept["details"]
 
 
