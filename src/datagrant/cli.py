@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -360,12 +361,37 @@ def _concurrent_reason(conn: Any, policy: Any, requester: str, dataset: str) -> 
     return None
 
 
-def _redacted_reasons(ctx: Ctx, reasons: Sequence[str]) -> list[str]:
+def _redact_text(ctx: Ctx, text: str) -> str:
     dsn = getattr(ctx.args, "dsn", None) or os.environ.get(DSN_ENV)
-    return [_hide_token(redact(str(r), dsn), ctx.oidc_token) for r in reasons]
+    return _hide_token(redact(text, dsn), ctx.oidc_token)
+
+
+def _redacted_reasons(ctx: Ctx, reasons: Sequence[str]) -> list[str]:
+    return [_redact_text(ctx, str(r)) for r in reasons]
+
+
+def _table_rule(policy: Any, req: Any) -> Any:
+    if policy is None:
+        return None
+    ds = getattr(policy, "datasets", {}).get(req.dataset)
+    if ds is None:
+        return None
+    return ds.tables.get(req.table)
+
+
+def _receipt_reasons(reasons: Sequence[str]) -> list[str]:
+    """Drop requester-supplied column names from reasons stored on a receipt."""
+    out: list[str] = []
+    for r in reasons:
+        if r.startswith("columns not allowed:"):
+            out.append("columns not allowed (see details.unknown_column_count)")
+        else:
+            out.append(r)
+    return out
 
 
 def _audit_facts(
+    ctx: Ctx,
     req: Any,
     policy: Any,
     *,
@@ -376,25 +402,48 @@ def _audit_facts(
     expires_at: datetime | None = None,
     policy_sha256: str | None = None,
     approval: str | None = None,
-) -> Any:
-    from datagrant.receipt import GrantFacts
+) -> tuple[Any, dict[str, Any]]:
+    from datagrant.receipt import GrantFacts, canonical
 
     now = datetime.now(UTC)
-    masks: dict[str, str] = {}
-    ds = getattr(policy, "datasets", {}).get(req.dataset) if policy is not None else None
-    if ds is not None:
-        rule = ds.tables.get(req.table)
-        if rule is not None:
-            masks = {c: rule.columns[c] for c in req.columns if c in rule.columns}
+    extra: dict[str, Any] = {}
+    rule = _table_rule(policy, req)
+    if policy is None:
+        cols: tuple[str, ...] = tuple(req.columns)
+        masks: dict[str, str] = {c: "unknown" for c in cols}
+        row_filter = req.row_filter
+    else:
+        if rule is None:
+            known: list[str] = []
+            unknown = list(req.columns)
+            masks = {}
+        else:
+            known = [c for c in req.columns if c in rule.columns]
+            unknown = [c for c in req.columns if c not in rule.columns]
+            masks = {c: rule.columns[c] for c in known}
+        cols = tuple(known)
+        if unknown:
+            extra["unknown_column_count"] = len(unknown)
+            extra["unknown_columns_sha256"] = hashlib.sha256(canonical(list(unknown))).hexdigest()
+        if req.row_filter is None:
+            row_filter = None
+        elif rule is not None and req.row_filter in rule.row_filters:
+            row_filter = req.row_filter
+        else:
+            row_filter = None
+            extra["row_filter_sha256"] = hashlib.sha256(
+                req.row_filter.encode("utf-8")
+            ).hexdigest()
+            extra["row_filter_unlisted"] = True
     return GrantFacts(
         "",
         req.requester,
         req.dataset,
         req.table,
-        tuple(req.columns),
+        cols,
         masks,
-        req.row_filter,
-        req.purpose,
+        row_filter,
+        _redact_text(ctx, req.purpose),
         starts_at or now,
         expires_at or (now + req.duration),
         policy_sha256 if policy_sha256 is not None else policy.sha256,
@@ -403,7 +452,7 @@ def _audit_facts(
         tuple(approvers),
         dict(identity) if identity is not None else None,
         tuple(dict(x) for x in approver_identities) if approver_identities is not None else None,
-    )
+    ), extra
 
 
 def _write_decision_receipt(ctx: Ctx, event: str, facts: Any, details: dict[str, Any]) -> None:
@@ -435,11 +484,12 @@ def _refuse_request(ctx: Ctx, req: Any, policy: Any, reasons: Sequence[str], cal
         "denied:\n" + "\n".join(f"  - {r}" for r in safe),
     )
     if ctx.args.apply:
+        facts, extra = _audit_facts(ctx, req, policy, identity=caller.receipt_dict())
         _write_decision_receipt(
             ctx,
             "denied",
-            _audit_facts(req, policy, identity=caller.receipt_dict()),
-            {"reasons": safe, "phase": "request"},
+            facts,
+            {"reasons": _receipt_reasons(safe), "phase": "request", **extra},
         )
     return EXIT_FAILED
 
@@ -457,19 +507,26 @@ def _write_not_approved(
     """Write a not_approved receipt on --apply. Raises CliError(EXIT_RECEIPT) on failure."""
     if not ctx.args.apply:
         return
+    facts, extra = _audit_facts(
+        ctx,
+        pending.request,
+        policy,
+        identity=_identity_from_pending(pending),
+        approvers=(caller.username,),
+        approver_identities=(caller.approver_receipt_dict(),),
+        starts_at=pending.created_at,
+        expires_at=pending.expires_at,
+    )
     _write_decision_receipt(
         ctx,
         "not_approved",
-        _audit_facts(
-            pending.request,
-            policy,
-            identity=_identity_from_pending(pending),
-            approvers=(caller.username,),
-            approver_identities=(caller.approver_receipt_dict(),),
-            starts_at=pending.created_at,
-            expires_at=pending.expires_at,
-        ),
-        {"reasons": list(reasons), "phase": "approve", "request_id": pending.id},
+        facts,
+        {
+            "reasons": _receipt_reasons(list(reasons)),
+            "phase": "approve",
+            "request_id": pending.id,
+            **extra,
+        },
     )
 
 
@@ -485,8 +542,9 @@ def _refuse_approve(
     return EXIT_FAILED
 
 
-def _facts_from_pending(pending: Any) -> Any:
+def _facts_from_pending(ctx: Ctx, pending: Any) -> tuple[Any, dict[str, Any]]:
     return _audit_facts(
+        ctx,
         pending.request,
         None,
         identity=_identity_from_pending(pending),
@@ -968,13 +1026,14 @@ def cmd_sweep(ctx: Ctx) -> int:
         else:
             for pending in expired:
                 try:
+                    facts, extra = _facts_from_pending(ctx, pending)
                     receipt.append(
                         sink.log,
                         "request_expired",
-                        _facts_from_pending(pending),
+                        facts,
                         sink.key,
                         host=sink.host,
-                        details={"request_id": pending.id},
+                        details={"request_id": pending.id, **extra},
                     )
                 except ReceiptError as exc:
                     request_receipt_error = str(exc)

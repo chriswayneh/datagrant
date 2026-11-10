@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -602,6 +603,89 @@ def test_denied_receipt_apply_only_and_schema(setup: dict[str, Any]) -> None:
     assert b["requester"] == "alice"
     assert b["dataset"] == "clinic"
     assert b["table"] == "public.p"
+
+
+def test_denied_receipt_omits_raw_requester_input(setup: dict[str, Any]) -> None:
+    from datagrant.receipt import canonical
+
+    text = POLICY.format(approval="auto").replace(
+        "        columns: {id: passthrough, ssn: hash}",
+        "        columns: {id: passthrough, ssn: hash}\n"
+        "        row_filters: [\"id = 1\"]",
+    )
+    pol = setup["tmp"] / "deny-input.yaml"
+    pol.write_text(text)
+    leak_filter = "ssn = '123-45-6789'"
+    leak_col = "secret_col"
+    purpose = "review postgresql://admin:pw9secret@db.example:6543/clinicdb"
+    code, d = run(
+        "request",
+        "--apply",
+        "--policy",
+        str(pol),
+        "--dataset",
+        "clinic",
+        "--table",
+        "public.p",
+        "--columns",
+        f"id,{leak_col}",
+        "--duration",
+        "1h",
+        "--purpose",
+        purpose,
+        "--row-filter",
+        leak_filter,
+        "--as-user",
+        "alice",
+    )
+    assert code == cli.EXIT_FAILED and d["allowed"] is False
+    raw = (setup["tmp"] / "r.jsonl").read_text()
+    assert "pw9secret" not in raw
+    assert leak_filter not in raw
+    assert "123-45-6789" not in raw
+    assert leak_col not in raw
+    b = _receipts(setup)[0]
+    assert b["event"] == "denied"
+    assert [c["name"] for c in b["columns"]] == ["id"]
+    assert b["row_filter"] is None
+    assert "***" in b["purpose"] and "pw9secret" not in b["purpose"]
+    assert b["details"]["unknown_column_count"] == 1
+    unknown_hash = hashlib.sha256(canonical([leak_col])).hexdigest()
+    assert b["details"]["unknown_columns_sha256"] == unknown_hash
+    assert b["details"]["row_filter_sha256"] == hashlib.sha256(
+        leak_filter.encode()
+    ).hexdigest()
+    assert b["details"].get("row_filter_unlisted") is True
+
+    log = setup["tmp"] / "r.jsonl"
+    log.write_bytes(b"")
+    code, d = run(
+        "request",
+        "--apply",
+        "--policy",
+        str(pol),
+        "--dataset",
+        "clinic",
+        "--table",
+        "public.p",
+        "--columns",
+        "id,ssn",
+        "--duration",
+        "1h",
+        "--purpose",
+        "ok",
+        "--row-filter",
+        "id = 1",
+        "--as-user",
+        "eve",
+    )
+    assert code == cli.EXIT_FAILED
+    kept = _receipts(setup)[0]
+    assert [c["name"] for c in kept["columns"]] == ["id", "ssn"]
+    assert kept["row_filter"] == "id = 1"
+    assert kept["purpose"] == "ok"
+    assert "unknown_column_count" not in kept["details"]
+    assert "row_filter_sha256" not in kept["details"]
 
 
 def test_denied_receipt_redacts_secrets(
