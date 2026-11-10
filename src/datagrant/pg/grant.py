@@ -136,10 +136,15 @@ def ensure_state(conn: psycopg.Connection) -> list[str]:
 
 
 def count_active_grants(conn: psycopg.Connection, requester: str) -> int:
-    """How many grants this principal currently holds. Revoked and expired do not count."""
+    """How many live grants this principal holds.
+
+    Count is ``status = 'active' AND expires_at > now()``. Revoked grants and
+    grants past ``expires_at`` (swept or not) do not count.
+    """
     row = conn.execute(
         sql.SQL(
             "SELECT count(*) FROM {}.grants WHERE requester = %s AND status = 'active'"
+            " AND expires_at > pg_catalog.now()"
         ).format(sql.Identifier(STATE_SCHEMA)),
         (requester,),
     ).fetchone()

@@ -5,7 +5,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 ## [Unreleased]
 
 ### Added
-- Optional policy limits ([design](docs/design/approvals-policy-limits.md)): `pending_ttl` (`1m`..`7d`) caps `request --pending-ttl` (exit 2 if the flag is longer); `max_columns` per table (denied if the unique column count exceeds it; cannot exceed the size of `columns`); `max_concurrent_grants` policy-wide and/or per dataset (minimum of those set; counts `status = 'active'` grants for that requester on `request` and `approve`; revoked and expired do not count). Omitting the keys keeps v0.3.0 behavior. `policy.version` stays `1`.
+- Optional policy limits ([design](docs/design/approvals-policy-limits.md)): `pending_ttl` (`1m`..`7d`) caps an explicit `request --pending-ttl` in two-person mode (exit 2 if the flag is longer; omitted flag uses `min(24h, policy.pending_ttl)`); `max_columns` per table (denied if the unique column count exceeds it; cannot exceed the size of `columns`); `max_concurrent_grants` policy-wide and/or per dataset (minimum of those set; counts `status = 'active' AND expires_at > now()` for that requester on `request` and `approve`; revoked grants and grants past `expires_at`, swept or not, do not count). Omitting the keys keeps v0.3.0 behavior. `policy.version` stays `1`.
 
 ## [0.3.0] - 2026-11-07
 

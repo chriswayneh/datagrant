@@ -369,15 +369,53 @@ def _write_limits_policy(tmp: Path, extra_top: str = "", extra_table: str = "") 
     return str(path)
 
 
-def test_pending_ttl_above_policy_cap_is_usage(setup: dict[str, Any]) -> None:
+def test_pending_ttl_explicit_too_long_is_usage(setup: dict[str, Any]) -> None:
     pol = _write_limits_policy(setup["tmp"], extra_top="pending_ttl: 4h")
     code, d = run("request", "--policy", pol, *REQ, "--pending-ttl", "8h")
     assert code == cli.EXIT_USAGE and "pending-ttl" in d["error"] and "pending_ttl" in d["error"]
     code, d = run("request", "--apply", "--policy", pol, *REQ, "--pending-ttl", "30d")
     assert code == cli.EXIT_USAGE
-    code, d = run("request", "--policy", pol, *REQ)
-    assert code == cli.EXIT_USAGE
     code, d = run("request", "--policy", pol, *REQ, "--pending-ttl", "4h")
+    assert code == 0 and d["dry_run"]
+    assert not setup["applied"]
+
+
+def test_pending_ttl_omitted_two_person_uses_policy_cap(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _write_limits_policy(setup["tmp"], extra_top="pending_ttl: 4h")
+    stored: dict[str, Any] = {}
+
+    def create(conn: Any, req: Request, **kw: Any) -> PendingRequest:
+        stored["ttl"] = kw["ttl"]
+        return PendingRequest(
+            "dddddddddddd",
+            req,
+            kw["policy_sha256"],
+            kw["verifier"],
+            T,
+            T + kw["ttl"],
+            "pending",
+            None,
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(rq, "create_request", create)
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
+    assert code == 0 and d["status"] == "pending"
+    assert stored["ttl"] == timedelta(hours=4)
+
+
+def test_pending_ttl_omitted_auto_ignores_short_cap(setup: dict[str, Any]) -> None:
+    text = POLICY.format(approval="auto").replace(
+        "max_duration: 8h", "max_duration: 8h\npending_ttl: 4h"
+    )
+    pol = setup["tmp"] / "auto-ttl.yaml"
+    pol.write_text(text)
+    code, d = run("request", "--policy", str(pol), *REQ)
+    assert code == 0 and d["dry_run"]
+    code, d = run("request", "--policy", str(pol), *REQ, "--pending-ttl", "8h")
     assert code == 0 and d["dry_run"]
     assert not setup["applied"]
 
@@ -494,5 +532,26 @@ def test_count_active_grants_sql_only_counts_active() -> None:
     assert g.count_active_grants(Conn(), "alice") == 1
     sql = seen["sql"]
     assert "status = 'active'" in sql
-    assert "revoked" not in sql and "expired" not in sql
+    assert "expires_at > pg_catalog.now()" in sql
+    assert "revoked" not in sql
     assert seen["params"] == ("alice",)
+
+
+def test_count_active_grants_excludes_unswept_expired() -> None:
+    """status=active but expires_at in the past must not match (sweep may not have run)."""
+    seen: dict[str, str] = {}
+
+    class Conn:
+        def execute(self, q: Any, params: Any = None) -> Any:
+            seen["sql"] = q.as_string(None)
+
+            class R:
+                def fetchone(self) -> tuple[int]:
+                    return (0,)
+
+            return R()
+
+    assert g.count_active_grants(Conn(), "alice") == 0
+    sql = seen["sql"]
+    assert "status = 'active'" in sql
+    assert "expires_at > pg_catalog.now()" in sql

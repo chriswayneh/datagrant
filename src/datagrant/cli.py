@@ -25,6 +25,7 @@ import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -358,6 +359,29 @@ def _concurrent_reason(conn: Any, policy: Any, requester: str, dataset: str) -> 
     return None
 
 
+_DEFAULT_PENDING_TTL = timedelta(hours=24)
+
+
+def _request_pending_ttl(policy: Any, pending_ttl_flag: str | None) -> timedelta:
+    """Resolve two-person pending TTL. Auto mode ignores the flag and the cap."""
+    from datagrant.policy import parse_duration
+
+    if policy.approval != "two-person":
+        return _DEFAULT_PENDING_TTL
+    cap = policy.pending_ttl
+    if pending_ttl_flag is None:
+        if cap is not None and cap < _DEFAULT_PENDING_TTL:
+            return cap
+        return _DEFAULT_PENDING_TTL
+    ttl = parse_duration(pending_ttl_flag, "--pending-ttl")
+    if cap is not None and ttl > cap:
+        raise CliError(
+            f"--pending-ttl {pending_ttl_flag} exceeds policy.pending_ttl",
+            EXIT_USAGE,
+        )
+    return ttl
+
+
 def cmd_request(ctx: Ctx) -> int:
     from datagrant.pg.grant import build_plan, ensure_state, new_password
     from datagrant.pg.mask import inspect_table
@@ -367,12 +391,7 @@ def cmd_request(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
-    ttl = parse_duration(a.pending_ttl, "--pending-ttl")
-    if policy.pending_ttl is not None and ttl > policy.pending_ttl:
-        raise CliError(
-            f"--pending-ttl {a.pending_ttl} exceeds policy.pending_ttl",
-            EXIT_USAGE,
-        )
+    ttl = _request_pending_ttl(policy, a.pending_ttl)
     caller = _resolve_caller(ctx, policy)
     user, source = caller.username, caller.source
     cols = tuple(c.strip() for c in a.columns.split(",") if c.strip())
@@ -1069,8 +1088,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--purpose", required=True)
     r.add_argument(
         "--pending-ttl",
-        default="24h",
-        help="two-person: how long a request waits (may not exceed policy.pending_ttl)",
+        default=None,
+        metavar="TTL",
+        help="two-person: how long a request waits (default 24h, or policy.pending_ttl if shorter)",
     )
     r.set_defaults(fn=cmd_request)
 
