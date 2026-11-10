@@ -68,7 +68,7 @@ datasets:
     tables:
       - name: public.patients
         allowed_groups: [ml-team]
-        max_columns: 4         # optional; omit = no extra cap beyond the allow-list
+        max_columns: 1         # optional; must be <= len(columns); omit = no extra cap
         max_duration: 4h
         columns: { patient_id: hash, zip: partial }
 ```
