@@ -262,13 +262,23 @@ def test_new_events_are_signed_chained_and_omit_grant_id(tmp_path: Path, key) ->
             "request_id": "aaaaaaaaaaaa",
         },
         "request_expired": {"request_id": "bbbbbbbbbbbb"},
+        "approval_recorded": {
+            "request_id": "cccccccccccc",
+            "approvals_recorded": 1,
+            "approvals_required": 2,
+        },
     }
     for event, det in details.items():
         receipt.append(log, event, FACTS, key, event_at=T0, host="h", details=det)
     lines = log.read_bytes().splitlines()
     bodies = [json.loads(x)["receipt"] for x in lines]
-    assert [b["event"] for b in bodies] == ["denied", "not_approved", "request_expired"]
-    assert [b["seq"] for b in bodies] == [0, 1, 2]
+    assert [b["event"] for b in bodies] == [
+        "denied",
+        "not_approved",
+        "request_expired",
+        "approval_recorded",
+    ]
+    assert [b["seq"] for b in bodies] == [0, 1, 2, 3]
     for b, (event, det) in zip(bodies, details.items(), strict=True):
         assert "grant_id" not in b
         assert b["details"] == det
@@ -276,7 +286,7 @@ def test_new_events_are_signed_chained_and_omit_grant_id(tmp_path: Path, key) ->
         assert b["version"] == 1
         assert "password" not in b
     res = verify(log, key.private.public_key())
-    assert res.ok and res.count == 3
+    assert res.ok and res.count == 4
 
 
 def test_verify_v030_log_still_ok_with_new_kinds(tmp_path: Path, key) -> None:  # type: ignore[no-untyped-def]
@@ -297,4 +307,19 @@ def test_verify_v030_log_still_ok_with_new_kinds(tmp_path: Path, key) -> None:  
     events = [json.loads(x)["receipt"]["event"] for x in log.read_bytes().splitlines()]
     assert events[:4] == ["issued", "revoked", "expired", "revoke_failed"]
     assert events[4] == "denied"
-    assert "approval_recorded" not in EVENTS
+    receipt.append(
+        log,
+        "approval_recorded",
+        FACTS,
+        key,
+        event_at=T0,
+        host="h",
+        details={
+            "request_id": "aaaaaaaaaaaa",
+            "approvals_recorded": 1,
+            "approvals_required": 2,
+        },
+    )
+    res = verify(log, key.private.public_key())
+    assert res.ok and res.count == 6
+    assert "approval_recorded" in EVENTS

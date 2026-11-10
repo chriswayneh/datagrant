@@ -9,8 +9,9 @@ lines can only be caught against an externally kept head hash (see verify).
 
 Receipts never contain passwords or key material; only the signing key id.
 Writer events: issued, revoked, expired, revoke_failed, denied, not_approved,
-request_expired. ``denied`` / ``not_approved`` / ``request_expired`` omit
-``grant_id``. ``verify`` accepts any signed, chained line (old logs included).
+request_expired, approval_recorded. ``denied`` / ``not_approved`` /
+``request_expired`` / ``approval_recorded`` omit ``grant_id``. ``verify``
+accepts any signed, chained line (old logs included).
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ Event = Literal[
     "denied",
     "not_approved",
     "request_expired",
+    "approval_recorded",
 ]
 EVENTS = (
     "issued",
@@ -54,8 +56,11 @@ EVENTS = (
     "denied",
     "not_approved",
     "request_expired",
+    "approval_recorded",
 )
-_NO_GRANT_EVENTS = frozenset({"denied", "not_approved", "request_expired"})
+_NO_GRANT_EVENTS = frozenset(
+    {"denied", "not_approved", "request_expired", "approval_recorded"}
+)
 _FORBIDDEN_KEYS = {
     "password",
     "hash_key",

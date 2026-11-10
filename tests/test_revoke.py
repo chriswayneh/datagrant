@@ -204,6 +204,8 @@ def test_requests_module_sql() -> None:
         "pending",
         None,
         None,
+        None,
+        "[]",
     )
     c = FakeConn(lambda text, params: [row] if "FROM" in text and "requests" in text else [])
     p = rq.create_request(c, req, policy_sha256="sha", verifier="V", now=now)  # type: ignore[arg-type]

@@ -94,6 +94,7 @@ class Policy:
     identity: IdentityConfig = field(default_factory=IdentityConfig)
     pending_ttl: timedelta | None = None
     max_concurrent_grants: int | None = None
+    approvals_required: int = 1
 
     def concurrent_grant_cap(self, dataset: str) -> int | None:
         """Minimum of the policy-wide and dataset caps that are set, or None."""
@@ -414,6 +415,7 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
             "identity",
             "pending_ttl",
             "max_concurrent_grants",
+            "approvals_required",
         },
         "policy",
     )
@@ -503,6 +505,16 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         if "max_concurrent_grants" in data
         else None
     )
+    approvals_required = 1
+    if "approvals_required" in data:
+        if approval != "two-person":
+            raise PolicyError("policy.approvals_required: only valid when approval is two-person")
+        raw_n = data["approvals_required"]
+        if isinstance(raw_n, bool) or not isinstance(raw_n, int):
+            raise PolicyError("policy.approvals_required: expected an integer")
+        if raw_n < 1 or raw_n > 8:
+            raise PolicyError("policy.approvals_required: must be an integer from 1 to 8")
+        approvals_required = raw_n
     return Policy(
         version,
         approval,
@@ -514,6 +526,7 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         ident,
         pending_ttl,
         max_cg,
+        approvals_required,
     )
 
 

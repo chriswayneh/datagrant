@@ -108,6 +108,10 @@ STATE_DDL: tuple[sql.Composed, ...] = (
         "ALTER TABLE {}.grants ADD COLUMN IF NOT EXISTS requester_identity jsonb,"
         " ADD COLUMN IF NOT EXISTS approver_identities jsonb"
     ).format(sql.Identifier(STATE_SCHEMA)),
+    # M2 quorum: durable votes on a pending request (additive, default empty).
+    sql.SQL(
+        "ALTER TABLE {}.requests ADD COLUMN IF NOT EXISTS approvals jsonb NOT NULL DEFAULT '[]'::jsonb"
+    ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
 

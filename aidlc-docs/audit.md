@@ -34,3 +34,4 @@ Append-only. Never edit past entries. Format: date (UTC), stage, actor, action, 
 | 2026-11-09 CT | Inception | Chris Hickman (maintainer) | Merged M2 design PR #33 at `ffb02d3`. | **M2 design approved** |
 | 2026-11-09 CT | Construction | executor (Cursor cloud agent) | M2 construction PR 2 of 6: policy limits (`pending_ttl`, `max_columns`, `max_concurrent_grants`). No quorum, SoD, denial receipts, or version bump. | **in review** |
 | 2026-11-10 CT | Construction | executor (Cursor cloud agent) | M2 construction PR 3 of 6: denial and request-expiry receipts (`denied`, `not_approved`, `request_expired`) on `--apply` only. No quorum, SoD, or version bump. | **in review** |
+| 2026-11-10 CT | Construction | executor (Cursor cloud agent) | M2 construction: quorum (`approvals_required` 1..8, `approval_recorded`, durable `requests.approvals` jsonb, Nth vote issues). No SoD, no break-glass, no version bump. | **in review** |
