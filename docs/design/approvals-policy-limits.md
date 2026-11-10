@@ -1,6 +1,6 @@
 # Design: approvals and policy limits (v0.4.0 / M2)
 
-Status: proposed. Not implemented. This is the M2 design and execution plan from the v1.0 plan Chris authorized (approvals and policy limits, target v0.4.0). Construction must not start until this document is approved in [audit.md](../../aidlc-docs/audit.md). Roadmap: [ROADMAP.md](../../ROADMAP.md).
+Status: proposed. Not implemented. This is the M2 design and execution plan from the v1.0 plan Chris authorized (approvals and policy limits, target v0.4.0). Scope below includes Chris's decisions (2026-11-09 CT). Construction must not start until this document is approved in [audit.md](../../aidlc-docs/audit.md). Roadmap: [ROADMAP.md](../../ROADMAP.md).
 
 Grounded in the v0.3.0 code on `main` (`src/datagrant/policy.py`, `cli.py`, `pg/requests.py`, `pg/grant.py`, `receipt.py`).
 
@@ -10,7 +10,7 @@ v0.3.0 can prove *who* asked and who approved (OIDC), but the approval *workflow
 
 M2 tightens **approvals** and **policy-enforced limits** without turning datagrant into a ticket system or an identity provider. Default omitted keys keep v0.3.0 behavior so existing policies and receipt logs keep working.
 
-Out of scope for M2: other warehouses (proposed v0.5.0+), a hosted service, ticketing, SSO beyond the existing OIDC CLI boundary, and anything that only the holder of `DATAGRANT_DSN` could bypass anyway without a real enforcement point.
+Out of scope for M2: break-glass, other warehouses (v0.5.0+), a hosted service, ticketing, SSO beyond the existing OIDC CLI boundary, and anything that only the holder of `DATAGRANT_DSN` could bypass anyway without a real enforcement point. Emergency access in v0.4.0 is a reviewed policy edit to `approval: auto`.
 
 ## What is already true (do not rebuild)
 
@@ -29,19 +29,21 @@ Out of scope for M2: other warehouses (proposed v0.5.0+), a hosted service, tick
 
 | Candidate | Verdict | Why |
 | --- | --- | --- |
-| N-of-M quorum (policy-wide, optional per-dataset override) | **Keep** | Real gap: today N is always 1. Sensitive datasets often want 2. Per-dataset override avoids a second policy file. |
-| Sensitivity labels as a new taxonomy | **Cut** | Per-dataset `approvals_required` and existing `max_duration` already express "this table is hotter". A label vocabulary would be unused config. |
-| Separation of duties: optional no-shared-group | **Keep** (optional, default off) | Distinct-person is not enough when requester and approver are both in `ml-team` and `ml-team` is also an approver group. Default off so current policies do not break. |
+| N-of-M quorum (policy-wide only) | **Keep** | Real gap: today N is always 1. Policy-wide `approvals_required` is enough. No per-dataset override (Chris). |
+| Per-dataset `approvals_required` | **Cut** | Chris: quorum is policy-wide only. |
+| Sensitivity labels as a new taxonomy | **Cut** | Policy-wide quorum plus existing `max_duration` already express "this table is hotter". A label vocabulary would be unused config. |
+| Separation of duties: optional `distinct-groups` | **Keep** (optional, default off) | Distinct-person is not enough when requester and approver both sit in the table's `allowed_groups`. Default off so current policies do not break. Intersection is against `allowed_groups` only; sharing a broad group such as `employees` is fine (Chris). |
 | `max_duration` as a new feature | **Already shipped** | Document only. |
 | `max_columns` per table | **Keep** | Cheap. Stops "request every allowed column" when the allow-list is wide. Omit = unlimited (today). |
-| `max_rows` at grant time | **Cut** | A `COUNT(*)` on the future view is racy, slow, and still not what the grantee will query. Row limits stay the job of `row_filters`. |
+| `max_rows` at grant time | **Cut** | Chris: stays out. A `COUNT(*)` on the future view is racy, slow, and still not what the grantee will query. Row limits stay the job of `row_filters`. |
 | `max_concurrent_grants` per principal | **Keep** | Count `datagrant.grants` rows with `status = 'active'` for that requester. Re-check at approve time. Same-transaction for `auto`. |
-| Request rate limits (N per hour) | **Cut** | No daemon. Anyone with the admin DSN skips the CLI. A clock table would look like security and not be. |
+| Request rate limits (N per hour) | **Cut** | Chris: stays out. No daemon. Anyone with the admin DSN skips the CLI. A clock table would look like security and not be. |
 | Policy-capped pending TTL | **Keep** | Promotes `--pending-ttl` to a policy max. CLI may only shorten. |
-| Break-glass | **Keep, default off, needs a yes from Chris** | Narrow: listed groups, mandatory `--reason` (bounded text), still OIDC/local identity, still a receipt with `details.break_glass`. Does not skip identity. Does not mint a second admin DSN. |
-| Denial reasons in receipts | **Keep** ( `--apply` only) | Compliance asked for evidence of "who was refused". Dry runs stay silent in the log. |
+| Break-glass | **Cut** | Chris: not in v0.4.0. Emergency path is a reviewed policy edit to `approval: auto`. |
+| Denial and expiry receipts | **Keep** (`--apply` only) | Chris: `--apply` only. Dry runs stay silent in the log. |
 | `policy check` for the new keys | **Keep** | Same PR as schema. |
 | v0.3.0 policy and receipt compatibility | **Keep** (hard requirement) | Omit new keys; old JSONL verifies. |
+| Other warehouses | **Cut** (later) | Chris: v0.5.0+. |
 
 ## Policy configuration
 
@@ -51,19 +53,18 @@ Out of scope for M2: other warehouses (proposed v0.5.0+), a hosted service, tick
 version: 1
 approval: two-person
 approvers: [sec]
-approvals_required: 1          # optional; default 1; only legal when approval is two-person
+approvals_required: 2          # optional; default 1; only legal when approval is two-person; 1..8
 separation_of_duties: none     # optional; none (default) or distinct-groups
 pending_ttl: 24h               # optional; cap for --pending-ttl; default 24h if omitted
 max_concurrent_grants: 3       # optional; omit = no cap
 max_duration: 8h               # already required
-# break_glass_groups: [sec]    # optional; omit = no break-glass
 groups:
+  employees: [alice, carol, dave]
   ml-team: [alice]
-  sec: [carol]
+  sec: [carol, dave]
 datasets:
   - name: clinic
     database: clinicdb
-    approvals_required: 2      # optional override; only when policy approval is two-person
     max_concurrent_grants: 1   # optional; tighter of policy-wide and dataset
     tables:
       - name: public.patients
@@ -75,19 +76,17 @@ datasets:
 
 Validation (`datagrant policy check` enforces all of this offline):
 
-- `approvals_required` is a positive integer, at most 8 (keeps the pending row small). Illegal when `approval: auto`. If omitted under `two-person`, it is `1` (today).
-- Dataset `approvals_required` is the same type, and is a policy error under `auto`. It may be higher or lower than the policy-wide value; the dataset value wins for requests on that dataset.
-- `separation_of_duties`: `none` or `distinct-groups`. Unknown strings are errors. `distinct-groups` means the approver's policy groups (static plus `group_map`) must not intersect the requester's. It does not replace distinct-person / `(iss, sub)`.
+- `approvals_required` is policy-wide only. Positive integer, at most 8 (keeps the pending row small). Illegal when `approval: auto`. If omitted under `two-person`, it is `1` (today). A dataset-level `approvals_required` is an unknown-key error.
+- `separation_of_duties`: `none` or `distinct-groups`. Unknown strings are errors. `distinct-groups` means the approver's policy groups (static plus `group_map`) must not intersect the **table's `allowed_groups`**. Sharing a broad group such as `employees` is fine. It does not replace distinct-person / `(iss, sub)`.
 - `pending_ttl` uses the existing duration grammar (`m`/`h`/`d`, no seconds), `1m`..`7d`. CLI `--pending-ttl` that exceeds it is a usage error (exit 2) before the database write.
 - `max_concurrent_grants` is a positive integer, policy-wide and/or per dataset. Effective cap is the minimum of those that are set.
 - `max_columns` is a positive integer per table. A request whose unique column count exceeds it is denied. It cannot exceed the size of `columns`.
-- `break_glass_groups` is a list of existing `policy.groups` names. Empty/omitted means the CLI flag is refused (exit 2). Members still need a valid caller identity.
 
 ## Evaluation and CLI
 
 `evaluate()` grows new deny reasons; it stays deny-by-default and still returns every reason. Concurrent-grant counting needs a database read, so it lives in `cmd_request` / `cmd_approve` next to the existing catalog lookup, not inside pure `evaluate()`. The count is `status = 'active'` only (revoked and expired do not count). Two `auto` `--apply` races are accepted as a residual (CLI is one writer in the documented ops model); the insert stays in the existing grant transaction.
 
-**Quorum (`approvals_required` > 1).** `datagrant.requests` gains an additive `approvals jsonb` (list of `{approver, at, identity}` objects) and keeps `status` in `pending|approved|expired`. Each `approve --apply`:
+**Quorum (`approvals_required` > 1).** Policy-wide N. `datagrant.requests` gains an additive `approvals jsonb` (list of `{approver, at, identity}` objects) and keeps `status` in `pending|approved|expired`. Each `approve --apply`:
 
 1. Re-runs today's identity, SoD, and policy checks.
 2. Refuses a second vote from the same person (name and, in OIDC, `(iss, sub)`).
@@ -97,17 +96,7 @@ Validation (`datagrant policy check` enforces all of this offline):
 
 Dry-run `approve` reports whether this caller would be vote 1 of N or the issuing vote.
 
-**Break-glass (only if Chris says yes).** `request --break-glass --reason TEXT --apply` in `two-person` policy:
-
-- `--reason` required, 8..512 printable characters, stored in the receipt `details.reason` (and grant `details`), never in argv-adjacent logs beyond the receipt.
-- Caller must be in `break_glass_groups`.
-- Still evaluates the request (dataset, columns, duration, concurrent cap). It does **not** skip OIDC, duration caps, or `max_concurrent_grants`.
-- It *does* skip waiting for quorum: the grant is issued immediately with `approval: two-person` plus `details.break_glass: true`.
-- `auto` policies refuse `--break-glass` (exit 2): there is nothing to break.
-
-There is no separate review command. Review is `receipts verify` plus grepping `details.break_glass` (and `--json`).
-
-**Denial receipts** only on `--apply` that actually refused (policy deny, SoD, quorum-ineligible, expired pending, concurrent cap). Dry runs do not write. Signing key required; if the receipt cannot be written, exit 3 and **do not** create a pending row or grant (fail closed, same as issued).
+**Denial and expiry receipts** only on `--apply` that actually refused (policy deny, SoD, quorum-ineligible, expired pending, concurrent cap) or on `sweep` when a pending request expires. Dry runs do not write. Signing key required; if a denial/not_approved/approval_recorded receipt cannot be written, exit 3 and **do not** create a pending row or grant (fail closed, same as issued).
 
 ## Receipt schema
 
@@ -122,7 +111,7 @@ New events (writer allow-list only):
 | `approval_recorded` | quorum vote that did not yet issue | omitted; `details.request_id` | `details.approvals_recorded`, `details.approvals_required` |
 | `request_expired` | `sweep` expires a pending request | omitted; `details.request_id` | Evidence that a password was issued to the requester and never approved |
 
-`issued` gains optional `details.break_glass` and `details.reason` when used. `approvers` and `approver_identities` already lists; quorum fills them with every voter.
+`approvers` and `approver_identities` already lists; quorum fills them with every voter. No break-glass fields.
 
 Forbidden keys stay (no passwords, no raw tokens). Reasons are policy text, not row values.
 
@@ -142,18 +131,19 @@ Existing 0-4 stay. New conditions map onto them; no exit 5.
 | Situation | Exit |
 | :---: | :---: |
 | Policy deny, SoD fail, concurrent cap, quorum ineligible, expired pending | 1 |
-| `--pending-ttl` above policy cap, `--break-glass` without `--reason` or on `auto`, `--break-glass` when `break_glass_groups` omitted | 2 |
+| `--pending-ttl` above policy cap | 2 |
 | Denied/not_approved/approval_recorded/request_expired receipt could not be written | 3 |
 | Usage / identity flag conflicts | 2 (unchanged) |
 
 ## Threat model notes
 
-- **DSN holders still bypass the CLI.** Limits, quorum, SoD, and break-glass are workflow controls unless datagrant runs on a bastion that holds `DATAGRANT_DSN` (same OIDC story). Document that in security limits, do not pretend otherwise.
+- **DSN holders still bypass the CLI.** Limits, quorum, and SoD are workflow controls unless datagrant runs on a bastion that holds `DATAGRANT_DSN` (same OIDC story). Document that in security limits, do not pretend otherwise.
 - **Local identity still lets anyone named `--as-user` vote.** Quorum of 2 in `identity.mode: local` is two claimed names, not two people. OIDC is what makes N-of-M real.
-- **Break-glass is a loaded gun.** Mandatory reason and a distinctive receipt are the review hook. If Chris does not want it in v0.4.0, drop PR 6; the rest of M2 does not depend on it.
+- **No break-glass in v0.4.0.** A reviewed policy edit to `auto` is the emergency path. That edit is itself an auditable git change; it is not a CLI shortcut.
 - **Denial receipts grow the log.** `--apply` only. Reasons can still leak that a table or column name exists in policy; that is already true of today's stdout denials.
 - **Concurrent cap races** under two writers. Document single-writer ops; do not add advisory locks in M2 unless tests show a cheap `SELECT ... FOR UPDATE` on a per-requester row is needed.
 - **Quorum does not implement "approver A and approver B from different IdPs".** One policy, one identity mode, same as v0.3.0 mode parity.
+- **SoD `distinct-groups` is table-scoped.** An approver in `sec` and `employees` can still approve a `ml-team` table if they are not in `ml-team`. That is the intended rule, not a bug.
 
 ## Compatibility with v0.3.0
 
@@ -164,30 +154,29 @@ Existing 0-4 stay. New conditions map onto them; no exit 5.
 
 ## Test plan (each construction PR)
 
-- Unit tests on `parse_policy` / `evaluate`: omitted keys; bad types; `approvals_required` on `auto`; `max_columns` boundary; `pending_ttl` parse; SoD none vs distinct-groups on overlapping groups; unknown keys still fail.
+- Unit tests on `parse_policy` / `evaluate`: omitted keys; bad types; `approvals_required` on `auto`; dataset-level `approvals_required` is an error; `approvals_required` of 9 is an error; `max_columns` boundary (including `max_columns` > len(`columns`)); `pending_ttl` parse; SoD none vs distinct-groups when groups overlap `allowed_groups` vs only a broad group such as `employees`; unknown keys still fail.
 - CLI tests: `--pending-ttl` above cap is exit 2; concurrent cap deny; `max_columns` deny; dry-run request does not write a `denied` receipt; `--apply` deny does write one and still exits 1; missing signing key on deny is exit 3 and no pending row.
-- Quorum: first approve leaves pending; second distinct approve issues; same person twice fails; OIDC `(iss, sub)` duplicate fails; `approvers` list on the issued receipt has both names.
+- Quorum: first approve leaves pending; second distinct approve issues; same person twice fails; OIDC `(iss, sub)` duplicate fails; `approvers` list on the issued receipt has both names. N is policy-wide.
 - Postgres integration: existing OIDC request/approve/revoke still passes with omitted new keys (compat).
 - No real IdP, no real PHI/PII. Fictional names only.
 
 ## Follow-up PRs (construction, after this design is approved)
 
-Same shape as OIDC: one concern per PR, tests and security checks in each, docs last.
+Same shape as OIDC: one concern per PR, tests and security checks in each, docs last. No break-glass PR.
 
 1. **This PR.** Design, ROADMAP, audit pointer. No runtime.
 2. **Policy limits in `policy.py` + CLI clamp.** Parse/validate `pending_ttl`, `max_columns`, `max_concurrent_grants`. `evaluate()` for column cap. CLI clamps `--pending-ttl` and counts active grants. Tests. No quorum, no new receipt events yet.
 3. **Denial and expiry receipts.** Events `denied`, `not_approved`, `request_expired`. `--apply` only. Fail closed if the log cannot be written. `verify` on mixed v0.3.0 + new logs. Sweep writes `request_expired`.
-4. **Quorum.** `approvals_required`, `approvals jsonb`, `approval_recorded`, issuing vote creates the grant. Policy-wide and per-dataset. Tests including OIDC duplicate voter.
-5. **Separation of duties (`distinct-groups`).** Optional, default `none`. Tests with overlapping vs disjoint groups, OIDC `group_map`.
-6. **Break-glass (only if Chris says yes).** Flag, reason bounds, group check, `details.break_glass` on `issued`. Tests for `auto` refuse, missing reason, identity still required.
-7. **Docs, demo notes, CHANGELOG Unreleased, v0.4.0 prep (no tag).** `docs/policy.md`, `docs/cli.md`, `docs/security.md`, operations, this design marked implemented.
+4. **Quorum.** Policy-wide `approvals_required` (1..8), `approvals jsonb`, `approval_recorded`, issuing vote creates the grant. Tests including OIDC duplicate voter. Dataset-level key is a parse error.
+5. **Separation of duties (`distinct-groups`).** Optional, default `none`. Intersection is against the table's `allowed_groups` only. Tests with overlapping `allowed_groups` vs a shared broad group, plus OIDC `group_map`.
+6. **Docs, demo notes, CHANGELOG Unreleased, v0.4.0 prep (no tag).** `docs/policy.md`, `docs/cli.md`, `docs/security.md`, operations, this design marked implemented.
 
-## Open questions for Chris
+## Decisions (Chris, 2026-11-09 CT)
 
-1. Is **break-glass** in v0.4.0, or drop PR 6 and leave emergency access as "edit the policy to `auto` under review"?
-2. Should **quorum** be policy-wide only, or is the per-dataset override worth the extra key?
-3. For **distinct-groups** SoD: is "no shared policy group at all" the rule you want, or should we only forbid sharing the table's `allowed_groups` (so both can still sit in `employees`)?
-4. Should **denial receipts** fire on `--apply` only (this design) or also on dry-run (noisier log)?
-5. Confirm **warehouses** move to v0.5.0+ so v0.4.0 is this milestone only.
-6. Confirm **rate limits** and **max_rows** stay out.
-7. Any cap other than 8 on `approvals_required`?
+1. **No break-glass in v0.4.0.** Drop that construction PR. Emergency path is a reviewed policy edit to `approval: auto`.
+2. **Quorum is policy-wide only.** No per-dataset `approvals_required` override.
+3. **SoD `distinct-groups`** forbids the approver and requester sharing only the table's `allowed_groups`. Broad groups like `employees` are fine.
+4. **Denial and expiry receipts on `--apply` only.** Dry runs do not write.
+5. **Warehouses are v0.5.0+.** v0.4.0 is this milestone only.
+6. **Rate limits and `max_rows` stay out.**
+7. **`approvals_required` is capped at 8.**

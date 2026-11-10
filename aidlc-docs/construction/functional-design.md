@@ -114,4 +114,4 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 
 ## M2 / v0.4.0: approvals and policy limits (proposed)
 
-Not implemented. Status and construction split: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md). Wait for an approval row in [audit.md](../audit.md) before writing code.
+Not implemented. Status, Chris's decisions, and construction split (no break-glass): [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md). Wait for an approval row in [audit.md](../audit.md) before writing code.

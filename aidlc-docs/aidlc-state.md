@@ -11,7 +11,7 @@
 | Construction | NFR requirements / design | Covered in functional design and docs/security.md |
 | Construction | Code generation | ✅ U1–U8, v0.2.0, v0.3.0 done |
 | Construction | Build and test | ✅ CI: lint/type/test matrix, Postgres integration, demo, demo-compose |
-| Construction | M2 / v0.4.0 design | Proposed: [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md) |
+| Construction | M2 / v0.4.0 design | Proposed (Chris decisions recorded): [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md) |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
 **Current stage:** v0.3.0 released. Next construction is M2 (approvals and policy limits, target v0.4.0), gated on design approval in [audit.md](audit.md). Inception (U1–U8) approved 2026-11-02.
