@@ -298,6 +298,7 @@ def apply_plan(
     *,
     request_id: str | None = None,
     approver: str | None = None,
+    approvals: Sequence[Mapping[str, Any]] | None = None,
 ) -> None:
     """Execute a plan atomically; any failure rolls everything back.
 
@@ -324,14 +325,30 @@ def apply_plan(
                 )
             if request_id is not None:
                 # Claim the pending request in the same transaction: exactly one approval wins.
-                claimed = conn.execute(
-                    sql.SQL(
-                        "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
-                        " verifier = NULL WHERE id = %s AND status = 'pending'"
-                        " AND expires_at > pg_catalog.now() RETURNING id"
-                    ).format(sql.Identifier(STATE_SCHEMA)),
-                    (approver, plan.grant_id, request_id),
-                ).fetchone()
+                # The Nth quorum vote is written here too so a failed apply rolls it back.
+                if approvals is not None:
+                    claimed = conn.execute(
+                        sql.SQL(
+                            "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
+                            " verifier = NULL, approvals = %s::jsonb WHERE id = %s AND status = 'pending'"
+                            " AND expires_at > pg_catalog.now() RETURNING id"
+                        ).format(sql.Identifier(STATE_SCHEMA)),
+                        (
+                            approver,
+                            plan.grant_id,
+                            json.dumps([dict(v) for v in approvals], sort_keys=True),
+                            request_id,
+                        ),
+                    ).fetchone()
+                else:
+                    claimed = conn.execute(
+                        sql.SQL(
+                            "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
+                            " verifier = NULL WHERE id = %s AND status = 'pending'"
+                            " AND expires_at > pg_catalog.now() RETURNING id"
+                        ).format(sql.Identifier(STATE_SCHEMA)),
+                        (approver, plan.grant_id, request_id),
+                    ).fetchone()
                 if claimed is None:
                     raise GrantError(f"request {request_id} is not pending (or has expired)")
             for stmt in plan.statements:

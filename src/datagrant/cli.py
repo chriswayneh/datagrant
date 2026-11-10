@@ -735,7 +735,8 @@ def cmd_approve(ctx: Ctx) -> int:
     from datagrant.pg.mask import inspect_table
     from datagrant.pg.requests import (
         already_voted,
-        drop_last_approval,
+        drop_approval,
+        eligible_votes,
         get_request,
         record_approval,
     )
@@ -842,13 +843,23 @@ def cmd_approve(ctx: Ctx) -> int:
             else {"source": "os"}
         )
         required = policy.approvals_required
-        votes = list(pending.approvals)
         ident = caller.approver_receipt_dict()
-        already = already_voted(votes, approver, ident)
-        projected = len(votes) if already else len(votes) + 1
+        issuer = policy.identity.issuer if policy.identity.mode == "oidc" else None
+
+        def _voter_ok(name: str) -> bool:
+            return not policy.can_approve(name, pending.request.requester)
+
+        counted, _ignored = eligible_votes(
+            pending.approvals,
+            policy_sha256=policy.sha256,
+            issuer=issuer,
+            can_approve=_voter_ok,
+        )
+        already = already_voted(counted, approver, ident)
+        projected = len(counted) if already else len(counted) + 1
         would_issue = projected >= required
-        voter_names = [str(v.get("approver")) for v in votes]
-        voter_idents = [_vote_receipt_ident(v) for v in votes]
+        voter_names = [str(v.get("approver")) for v in counted]
+        voter_idents = [_vote_receipt_ident(v) for v in counted]
         if not already:
             voter_names.append(approver)
             voter_idents.append(ident)
@@ -931,8 +942,64 @@ def cmd_approve(ctx: Ctx) -> int:
                 approvals_required=1,
             )
 
-        result = record_approval(
-            conn, pending.id, approver=approver, identity=ident, required=required
+        result = None
+        issued = None
+        with conn.transaction():
+            result = record_approval(
+                conn,
+                pending.id,
+                approver=approver,
+                identity=ident,
+                required=required,
+                policy_sha256=policy.sha256,
+                issuer=issuer,
+                can_approve=_voter_ok,
+                persist_if_final=False,
+            )
+            if result.is_final:
+                counted_final, _ign = eligible_votes(
+                    result.pending.approvals,
+                    policy_sha256=policy.sha256,
+                    issuer=issuer,
+                    can_approve=_voter_ok,
+                )
+                names = tuple(str(v.get("approver")) for v in counted_final)
+                idents = tuple(_vote_receipt_ident(v) for v in counted_final)
+                issued = build_plan(
+                    decision,
+                    pending.request,
+                    database=policy.datasets[pending.request.dataset].database,
+                    password=new_password(),
+                    verifier=pending.verifier,
+                    catalog=inspect_table(conn, pending.request.table),
+                    hash_key=hash_key,
+                    approvers=names,
+                    requester_identity=req_receipt_ident,
+                    approver_identities=idents,
+                )
+                apply_plan(
+                    conn,
+                    issued,
+                    sink,
+                    request_id=pending.id,
+                    approver=approver,
+                    approvals=result.pending.approvals,
+                )
+                _deliver_issued(ctx, conn, issued, sink)
+        if issued is not None:
+            return _print_grant(
+                ctx,
+                issued,
+                None,
+                pending.request.requester,
+                source,
+                approvals_recorded=len(issued.facts.approvers) if issued.facts else required,
+                approvals_required=required,
+            )
+        if result is None:
+            raise CliError("internal error: missing approval result", EXIT_FAILED)
+        extra_ignored = (
+            {"ignored_approvals": list(result.ignored)} if result.ignored else {}
         )
         if result.already:
             ctx.emit(
@@ -943,77 +1010,56 @@ def cmd_approve(ctx: Ctx) -> int:
                     "approvals_recorded": result.recorded,
                     "approvals_required": result.required,
                     "approvals": f"{result.recorded}/{result.required}",
+                    **extra_ignored,
                 },
                 f"{approver} already approved request {pending.id}"
                 f" ({result.recorded}/{result.required})",
             )
             return EXIT_OK
-        if not result.is_final:
-            try:
-                facts, extra = _audit_facts(
-                    ctx,
-                    pending.request,
-                    policy,
-                    identity=_identity_from_pending(pending),
-                    approvers=tuple(str(v.get("approver")) for v in result.pending.approvals),
-                    approver_identities=tuple(
-                        _vote_receipt_ident(v) for v in result.pending.approvals
-                    ),
-                    starts_at=pending.created_at,
-                    expires_at=pending.expires_at,
-                )
-                _write_decision_receipt(
-                    ctx,
-                    "approval_recorded",
-                    facts,
-                    {
-                        "request_id": pending.id,
-                        "approvals_recorded": result.recorded,
-                        "approvals_required": result.required,
-                        "phase": "approve",
-                        **extra,
-                    },
-                )
-            except CliError:
-                drop_last_approval(conn, pending.id)
-                raise
-            ctx.emit(
+        try:
+            facts, extra = _audit_facts(
+                ctx,
+                pending.request,
+                policy,
+                identity=_identity_from_pending(pending),
+                approvers=tuple(str(v.get("approver")) for v in result.pending.approvals),
+                approver_identities=tuple(
+                    _vote_receipt_ident(v) for v in result.pending.approvals
+                ),
+                starts_at=pending.created_at,
+                expires_at=pending.expires_at,
+            )
+            _write_decision_receipt(
+                ctx,
+                "approval_recorded",
+                facts,
                 {
-                    "status": "pending",
                     "request_id": pending.id,
                     "approvals_recorded": result.recorded,
                     "approvals_required": result.required,
-                    "approvals": f"{result.recorded}/{result.required}",
+                    "phase": "approve",
+                    **extra,
                 },
-                f"approval recorded for request {pending.id}"
-                f" ({result.recorded}/{result.required})",
             )
-            return EXIT_OK
-        names = tuple(str(v.get("approver")) for v in result.pending.approvals)
-        idents = tuple(_vote_receipt_ident(v) for v in result.pending.approvals)
-        plan = build_plan(
-            decision,
-            pending.request,
-            database=policy.datasets[pending.request.dataset].database,
-            password=new_password(),
-            verifier=pending.verifier,
-            catalog=inspect_table(conn, pending.request.table),
-            hash_key=hash_key,
-            approvers=names,
-            requester_identity=req_receipt_ident,
-            approver_identities=idents,
+        except CliError:
+            drop_approval(conn, pending.id, approver=approver, identity=ident)
+            raise
+        ignored_note = (
+            f"; not counted: {', '.join(result.ignored)}" if result.ignored else ""
         )
-        apply_plan(conn, plan, sink, request_id=pending.id, approver=approver)
-        _deliver_issued(ctx, conn, plan, sink)
-        return _print_grant(
-            ctx,
-            plan,
-            None,
-            pending.request.requester,
-            source,
-            approvals_recorded=len(names),
-            approvals_required=required,
+        ctx.emit(
+            {
+                "status": "pending",
+                "request_id": pending.id,
+                "approvals_recorded": result.recorded,
+                "approvals_required": result.required,
+                "approvals": f"{result.recorded}/{result.required}",
+                **extra_ignored,
+            },
+            f"approval recorded for request {pending.id}"
+            f" ({result.recorded}/{result.required}){ignored_note}",
         )
+        return EXIT_OK
 
 
 _GRANT_COLS = (

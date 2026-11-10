@@ -224,6 +224,8 @@ def test_record_approval_oidc_duplicate_by_iss_sub() -> None:
                 "sub": "sub-1",
                 "token_sha256": "a" * 64,
             },
+            "policy_sha256": "",
+            "iss": "https://idp.example",
         }
     ]
 
@@ -423,8 +425,18 @@ def test_record_approval_already_at_n_does_not_append() -> None:
 
     now = datetime(2026, 1, 1, tzinfo=UTC)
     votes = [
-        {"approver": "carol", "at": now.isoformat(), "identity": {"source": "flag"}},
-        {"approver": "dave", "at": now.isoformat(), "identity": {"source": "flag"}},
+        {
+            "approver": "carol",
+            "at": now.isoformat(),
+            "identity": {"source": "flag"},
+            "policy_sha256": "",
+        },
+        {
+            "approver": "dave",
+            "at": now.isoformat(),
+            "identity": {"source": "flag"},
+            "policy_sha256": "",
+        },
     ]
     conn = _lock_row(approvals=json.dumps(votes), now=now)
     out = rq.record_approval(
@@ -434,20 +446,77 @@ def test_record_approval_already_at_n_does_not_append() -> None:
     assert conn.updated == []
 
 
-def test_drop_last_approval_removes_newest_vote() -> None:
+def test_drop_approval_removes_caller_not_newest() -> None:
     from datagrant.pg import requests as rq
 
     now = datetime(2026, 1, 1, tzinfo=UTC)
     votes = [
-        {"approver": "carol", "at": now.isoformat(), "identity": {"source": "flag"}},
-        {"approver": "dave", "at": now.isoformat(), "identity": {"source": "flag"}},
+        {
+            "approver": "alice",
+            "at": now.isoformat(),
+            "identity": {"source": "flag"},
+            "policy_sha256": "",
+        },
+        {
+            "approver": "bob",
+            "at": now.isoformat(),
+            "identity": {"source": "flag"},
+            "policy_sha256": "",
+        },
     ]
     conn = _lock_row(approvals=json.dumps(votes), now=now)
-    rq.drop_last_approval(conn, "r1")  # type: ignore[arg-type]
+    rq.drop_approval(conn, "r1", approver="alice", identity={"source": "flag"})
     kept = json.loads(conn.updated[0])
-    assert [v["approver"] for v in kept] == ["carol"]
+    assert [v["approver"] for v in kept] == ["bob"]
     missing = _lock_row(status="missing")
-    rq.drop_last_approval(missing, "r1")  # type: ignore[arg-type]
+    rq.drop_approval(missing, "r1", approver="alice", identity={"source": "flag"})
+
+
+def test_unstamped_votes_are_not_counted() -> None:
+    from datagrant.pg import requests as rq
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    votes = [{"approver": "carol", "at": now.isoformat(), "identity": {"source": "flag"}}]
+    conn = _lock_row(approvals=json.dumps(votes), now=now)
+    out = rq.record_approval(
+        conn,
+        "r1",
+        approver="dave",
+        identity={"source": "flag"},
+        required=2,
+        now=now,
+        policy_sha256="newsha",
+    )
+    assert out.recorded == 1 and out.is_final is False
+    assert out.ignored == ("carol",)
+
+
+def test_stale_policy_sha_and_ineligible_voter_ignored() -> None:
+    from datagrant.pg import requests as rq
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    votes = [
+        {
+            "approver": "alice",
+            "at": now.isoformat(),
+            "identity": {"source": "flag"},
+            "policy_sha256": "oldsha",
+        }
+    ]
+    conn = _lock_row(approvals=json.dumps(votes), now=now)
+    out = rq.record_approval(
+        conn,
+        "r1",
+        approver="bob",
+        identity={"source": "flag"},
+        required=2,
+        now=now,
+        policy_sha256="newsha",
+        can_approve=lambda name: name == "bob",
+    )
+    assert out.recorded == 1 and out.is_final is False and out.ignored == ("alice",)
+    stored = json.loads(conn.updated[0])
+    assert [v["approver"] for v in stored] == ["alice", "bob"]
 
 
 def test_approval_recorded_in_events_and_verifies(tmp_path: Path) -> None:

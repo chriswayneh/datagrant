@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -51,6 +51,7 @@ class ApprovalRecord:
     already: bool
     is_final: bool
     added: bool
+    ignored: tuple[str, ...] = ()
 
 
 def create_request(
@@ -155,6 +156,44 @@ def already_voted(
     return False
 
 
+def eligible_votes(
+    votes: Sequence[Mapping[str, Any]],
+    *,
+    policy_sha256: str,
+    issuer: str | None = None,
+    can_approve: Callable[[str], bool] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split stored votes into those that still count and those that do not.
+
+    A vote counts only when it carries ``policy_sha256`` equal to the current
+    policy, an OIDC ``iss`` that matches when ``issuer`` is set, and
+    ``can_approve(name)`` is true (current policy). Unstamped votes do not count.
+    """
+    ok = can_approve or (lambda _name: True)
+    counted: list[dict[str, Any]] = []
+    ignored: list[dict[str, Any]] = []
+    for raw in votes:
+        v = dict(raw)
+        if v.get("policy_sha256") != policy_sha256:
+            ignored.append(v)
+            continue
+        if issuer is not None:
+            stamp_iss = v.get("iss")
+            ident_raw = v.get("identity")
+            if not isinstance(stamp_iss, str) and isinstance(ident_raw, dict):
+                inner_iss = ident_raw.get("iss")
+                stamp_iss = inner_iss if isinstance(inner_iss, str) else None
+            if stamp_iss != issuer:
+                ignored.append(v)
+                continue
+        name = v.get("approver")
+        if not isinstance(name, str) or not ok(name):
+            ignored.append(v)
+            continue
+        counted.append(v)
+    return counted, ignored
+
+
 def get_request(conn: psycopg.Connection, request_id: str) -> PendingRequest:
     with conn.transaction():
         conn.execute(_SAFE_PATH)
@@ -169,6 +208,15 @@ def get_request(conn: psycopg.Connection, request_id: str) -> PendingRequest:
     return _pending_from_row(r)
 
 
+def _write_approvals(conn: psycopg.Connection, request_id: str, votes: Sequence[Mapping[str, Any]]) -> None:
+    conn.execute(
+        sql.SQL("UPDATE {}.requests SET approvals = %s::jsonb WHERE id = %s").format(
+            sql.Identifier(STATE_SCHEMA)
+        ),
+        (json.dumps([dict(v) for v in votes], sort_keys=True), request_id),
+    )
+
+
 def record_approval(
     conn: psycopg.Connection,
     request_id: str,
@@ -177,8 +225,17 @@ def record_approval(
     identity: Mapping[str, Any] | None,
     required: int,
     now: datetime | None = None,
+    policy_sha256: str = "",
+    issuer: str | None = None,
+    can_approve: Callable[[str], bool] | None = None,
+    persist_if_final: bool = True,
 ) -> ApprovalRecord:
-    """Append a distinct vote under ``SELECT ... FOR UPDATE``. Idempotent per person."""
+    """Append a distinct vote under ``SELECT ... FOR UPDATE``. Idempotent per person.
+
+    When ``persist_if_final`` is false, a vote that would issue is returned in
+    memory but not written, so the caller can store it in the same transaction
+    that creates the grant.
+    """
     now = now or datetime.now(UTC)
     required = max(required, 1)
     ident = _safe_identity(identity)
@@ -196,24 +253,41 @@ def record_approval(
         if pending.status != "pending" or pending.verifier is None:
             raise GrantError(f"request {request_id} is not pending (or has expired)")
         votes = [dict(v) for v in pending.approvals]
-        if already_voted(votes, approver, ident):
-            n = len(votes)
-            return ApprovalRecord(pending, n, required, True, n >= required, False)
-        if len(votes) >= required:
-            n = len(votes)
-            return ApprovalRecord(pending, n, required, False, True, False)
-        vote = {
+        counted, ignored = eligible_votes(
+            votes, policy_sha256=policy_sha256, issuer=issuer, can_approve=can_approve
+        )
+        ignored_names = tuple(
+            str(v.get("approver")) for v in ignored if isinstance(v.get("approver"), str)
+        )
+        if already_voted(counted, approver, ident):
+            n = len(counted)
+            return ApprovalRecord(
+                pending, n, required, True, n >= required, False, ignored_names
+            )
+        if len(counted) >= required:
+            n = len(counted)
+            return ApprovalRecord(
+                pending, n, required, False, True, False, ignored_names
+            )
+        vote: dict[str, Any] = {
             "approver": approver,
             "at": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "identity": ident,
+            "policy_sha256": policy_sha256,
         }
+        if issuer is not None:
+            vote["iss"] = issuer
         votes.append(vote)
-        conn.execute(
-            sql.SQL("UPDATE {}.requests SET approvals = %s::jsonb WHERE id = %s").format(
-                sql.Identifier(STATE_SCHEMA)
-            ),
-            (json.dumps(votes, sort_keys=True), request_id),
+        counted2, ignored2 = eligible_votes(
+            votes, policy_sha256=policy_sha256, issuer=issuer, can_approve=can_approve
         )
+        ignored_names = tuple(
+            str(v.get("approver")) for v in ignored2 if isinstance(v.get("approver"), str)
+        )
+        n = len(counted2)
+        is_final = n >= required
+        if not (is_final and not persist_if_final):
+            _write_approvals(conn, request_id, votes)
         updated = PendingRequest(
             pending.id,
             pending.request,
@@ -227,12 +301,17 @@ def record_approval(
             pending.requester_identity,
             tuple(votes),
         )
-        n = len(votes)
-        return ApprovalRecord(updated, n, required, False, n >= required, True)
+        return ApprovalRecord(updated, n, required, False, is_final, True, ignored_names)
 
 
-def drop_last_approval(conn: psycopg.Connection, request_id: str) -> None:
-    """Remove the newest vote (receipt for a partial approval could not be written)."""
+def drop_approval(
+    conn: psycopg.Connection,
+    request_id: str,
+    *,
+    approver: str,
+    identity: Mapping[str, Any] | None,
+) -> None:
+    """Remove the caller's vote under ``FOR UPDATE`` (failed ``approval_recorded``)."""
     with conn.transaction():
         conn.execute(_SAFE_PATH)
         r = conn.execute(
@@ -246,13 +325,12 @@ def drop_last_approval(conn: psycopg.Connection, request_id: str) -> None:
         pending = _pending_from_row(r)
         if pending.status != "pending" or not pending.approvals:
             return
-        votes = [dict(v) for v in pending.approvals[:-1]]
-        conn.execute(
-            sql.SQL("UPDATE {}.requests SET approvals = %s::jsonb WHERE id = %s").format(
-                sql.Identifier(STATE_SCHEMA)
-            ),
-            (json.dumps(votes, sort_keys=True), request_id),
-        )
+        kept = [
+            dict(v)
+            for v in pending.approvals
+            if not already_voted([v], approver, identity)
+        ]
+        _write_approvals(conn, request_id, kept)
 
 
 def expire_requests(conn: psycopg.Connection) -> list[str]:
