@@ -25,6 +25,7 @@ import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -338,6 +339,49 @@ def _needs_hash(decision: Any, cols: Sequence[str]) -> bool:
     return any(decision.masks.get(c) == "hash" for c in cols)
 
 
+def _concurrent_reason(conn: Any, policy: Any, requester: str, dataset: str) -> str | None:
+    cap = policy.concurrent_grant_cap(dataset)
+    if cap is None:
+        return None
+    from psycopg.errors import UndefinedTable
+
+    from datagrant.pg.grant import count_active_grants
+
+    try:
+        n = count_active_grants(conn, requester)
+    except UndefinedTable:
+        n = 0
+    if n >= cap:
+        return (
+            f"requester {requester!r} already has {n} active grant(s) "
+            f"(max_concurrent_grants is {cap})"
+        )
+    return None
+
+
+_DEFAULT_PENDING_TTL = timedelta(hours=24)
+
+
+def _request_pending_ttl(policy: Any, pending_ttl_flag: str | None) -> timedelta:
+    """Resolve two-person pending TTL. Auto mode ignores the flag and the cap."""
+    from datagrant.policy import parse_duration
+
+    if policy.approval != "two-person":
+        return _DEFAULT_PENDING_TTL
+    cap = policy.pending_ttl
+    if pending_ttl_flag is None:
+        if cap is not None and cap < _DEFAULT_PENDING_TTL:
+            return cap
+        return _DEFAULT_PENDING_TTL
+    ttl = parse_duration(pending_ttl_flag, "--pending-ttl")
+    if cap is not None and ttl > cap:
+        raise CliError(
+            f"--pending-ttl {pending_ttl_flag} exceeds policy.pending_ttl",
+            EXIT_USAGE,
+        )
+    return ttl
+
+
 def cmd_request(ctx: Ctx) -> int:
     from datagrant.pg.grant import build_plan, ensure_state, new_password
     from datagrant.pg.mask import inspect_table
@@ -347,6 +391,7 @@ def cmd_request(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
+    ttl = _request_pending_ttl(policy, a.pending_ttl)
     caller = _resolve_caller(ctx, policy)
     user, source = caller.username, caller.source
     cols = tuple(c.strip() for c in a.columns.split(",") if c.strip())
@@ -372,6 +417,17 @@ def cmd_request(ctx: Ctx) -> int:
     )
     with _connect(a) as conn:
         catalog = inspect_table(conn, req.table)
+        if a.apply:
+            sink = _sink(a)  # no signing key, no grant
+            _check_outbox(ctx, sink)
+            ensure_state(conn)
+        cap_reason = _concurrent_reason(conn, policy, user, req.dataset)
+        if cap_reason:
+            ctx.emit(
+                {"allowed": False, "reasons": [cap_reason], "requester": user},
+                "denied:\n" + f"  - {cap_reason}",
+            )
+            return EXIT_FAILED
         if not a.apply:
             # No password is generated in a dry run; the verifier slot is a placeholder.
             plan = build_plan(
@@ -397,9 +453,6 @@ def cmd_request(ctx: Ctx) -> int:
                 + "\n".join(x + ";" for x in sqls),
             )
             return EXIT_OK
-        sink = _sink(a)  # no signing key, no grant
-        _check_outbox(ctx, sink)
-        ensure_state(conn)
         password = new_password()
         if two_person:
             pending = create_request(
@@ -407,7 +460,7 @@ def cmd_request(ctx: Ctx) -> int:
                 req,
                 policy_sha256=policy.sha256,
                 verifier=scram_verifier(password),
-                ttl=parse_duration(a.pending_ttl, "--pending-ttl"),
+                ttl=ttl,
                 requester_identity=caller.request_state_dict(),
             )
             ctx.emit(
@@ -551,6 +604,16 @@ def cmd_approve(ctx: Ctx) -> int:
         if not decision.allowed:
             reasons += [f"request no longer allowed: {r}" for r in decision.reasons]
         if reasons:
+            ctx.emit(
+                {"approved": False, "reasons": reasons},
+                "not approved:\n" + "\n".join(f"  - {r}" for r in reasons),
+            )
+            return EXIT_FAILED
+        cap_reason = _concurrent_reason(
+            conn, policy, pending.request.requester, pending.request.dataset
+        )
+        if cap_reason:
+            reasons.append(cap_reason)
             ctx.emit(
                 {"approved": False, "reasons": reasons},
                 "not approved:\n" + "\n".join(f"  - {r}" for r in reasons),
@@ -1023,7 +1086,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--row-filter")
     r.add_argument("--duration", required=True, help="e.g. 30m, 2h")
     r.add_argument("--purpose", required=True)
-    r.add_argument("--pending-ttl", default="24h", help="two-person: how long a request waits")
+    r.add_argument(
+        "--pending-ttl",
+        default=None,
+        metavar="TTL",
+        help="two-person: how long a request waits (default 24h, or policy.pending_ttl if shorter)",
+    )
     r.set_defaults(fn=cmd_request)
 
     ap = sub.add_parser(

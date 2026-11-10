@@ -356,3 +356,202 @@ def test_global_flag_that_does_not_apply_is_usage_error(argv: list[str]) -> None
 def test_subcommands_do_not_advertise_unused_flags(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["policy", "check", "--dsn", "x", "f"]) == cli.EXIT_USAGE
     assert cli.main(["grant", "list", "--signing-key", "x"]) == cli.EXIT_USAGE
+
+
+def _write_limits_policy(tmp: Path, extra_top: str = "", extra_table: str = "") -> str:
+    text = POLICY.format(approval="two-person")
+    if extra_top:
+        text = text.replace("max_duration: 8h", "max_duration: 8h\n" + extra_top)
+    if extra_table:
+        text = text.replace("        columns: {id: passthrough, ssn: hash}", extra_table)
+    path = tmp / "limits.yaml"
+    path.write_text(text)
+    return str(path)
+
+
+def test_pending_ttl_explicit_too_long_is_usage(setup: dict[str, Any]) -> None:
+    pol = _write_limits_policy(setup["tmp"], extra_top="pending_ttl: 4h")
+    code, d = run("request", "--policy", pol, *REQ, "--pending-ttl", "8h")
+    assert code == cli.EXIT_USAGE and "pending-ttl" in d["error"] and "pending_ttl" in d["error"]
+    code, d = run("request", "--apply", "--policy", pol, *REQ, "--pending-ttl", "30d")
+    assert code == cli.EXIT_USAGE
+    code, d = run("request", "--policy", pol, *REQ, "--pending-ttl", "4h")
+    assert code == 0 and d["dry_run"]
+    assert not setup["applied"]
+
+
+def test_pending_ttl_omitted_two_person_uses_policy_cap(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _write_limits_policy(setup["tmp"], extra_top="pending_ttl: 4h")
+    stored: dict[str, Any] = {}
+
+    def create(conn: Any, req: Request, **kw: Any) -> PendingRequest:
+        stored["ttl"] = kw["ttl"]
+        return PendingRequest(
+            "dddddddddddd",
+            req,
+            kw["policy_sha256"],
+            kw["verifier"],
+            T,
+            T + kw["ttl"],
+            "pending",
+            None,
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(rq, "create_request", create)
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
+    assert code == 0 and d["status"] == "pending"
+    assert stored["ttl"] == timedelta(hours=4)
+
+
+def test_pending_ttl_omitted_auto_ignores_short_cap(setup: dict[str, Any]) -> None:
+    text = POLICY.format(approval="auto").replace(
+        "max_duration: 8h", "max_duration: 8h\npending_ttl: 4h"
+    )
+    pol = setup["tmp"] / "auto-ttl.yaml"
+    pol.write_text(text)
+    code, d = run("request", "--policy", str(pol), *REQ)
+    assert code == 0 and d["dry_run"]
+    code, d = run("request", "--policy", str(pol), *REQ, "--pending-ttl", "8h")
+    assert code == 0 and d["dry_run"]
+    assert not setup["applied"]
+
+
+def test_pending_ttl_omitted_allows_long_cli_ttl(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = str(setup["tmp"] / "two-person.yaml")
+    stored: dict[str, Any] = {}
+
+    def create(conn: Any, req: Request, **kw: Any) -> PendingRequest:
+        stored["ttl"] = kw["ttl"]
+        return PendingRequest(
+            "bbbbbbbbbbbb",
+            req,
+            kw["policy_sha256"],
+            kw["verifier"],
+            T,
+            T + kw["ttl"],
+            "pending",
+            None,
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(rq, "create_request", create)
+    code, d = run("request", "--apply", "--policy", pol, *REQ, "--pending-ttl", "30d")
+    assert code == 0 and d["status"] == "pending"
+    assert stored["ttl"] == timedelta(days=30)
+
+
+def test_max_columns_denied_exit_1(setup: dict[str, Any]) -> None:
+    pol = _write_limits_policy(
+        setup["tmp"],
+        extra_table="        max_columns: 1\n        columns: {id: passthrough, ssn: hash}",
+    )
+    code, d = run("request", "--policy", pol, *REQ)
+    assert code == cli.EXIT_FAILED and d["allowed"] is False
+    assert any("max_columns" in r for r in d["reasons"])
+    assert not setup["applied"]
+    one_col = (*REQ[:5], "id", *REQ[6:])
+    code, d = run("request", "--policy", pol, *one_col)
+    assert code == 0 and d["dry_run"]
+
+
+def test_concurrent_cap_denied_on_request_and_approve(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _write_limits_policy(setup["tmp"], extra_top="max_concurrent_grants: 2")
+    monkeypatch.setattr(g, "count_active_grants", lambda c, requester: 2)
+    code, d = run("request", "--policy", pol, *REQ)
+    assert code == cli.EXIT_FAILED and d["allowed"] is False
+    assert any("max_concurrent_grants" in r for r in d["reasons"])
+    assert not setup["applied"]
+
+    stored: dict[str, Any] = {}
+
+    def create(conn: Any, req: Request, **kw: Any) -> PendingRequest:
+        stored["p"] = PendingRequest(
+            "cccccccccccc",
+            req,
+            kw["policy_sha256"],
+            kw["verifier"],
+            T,
+            T + kw["ttl"],
+            "pending",
+            None,
+            None,
+            None,
+        )
+        return stored["p"]
+
+    monkeypatch.setattr(g, "count_active_grants", lambda c, requester: 0)
+    monkeypatch.setattr(rq, "create_request", create)
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: stored["p"])
+    code, d = run("request", "--apply", "--policy", pol, *REQ, "--pending-ttl", "1h")
+    assert code == 0 and d["status"] == "pending"
+    monkeypatch.setattr(g, "count_active_grants", lambda c, requester: 2)
+    code, d = run("approve", "--apply", "cccccccccccc", "--policy", pol, "--as-user", "carol")
+    assert code == cli.EXIT_FAILED and d["approved"] is False
+    assert any("max_concurrent_grants" in r for r in d["reasons"])
+    assert not setup["applied"]
+
+
+def test_concurrent_cap_treats_missing_grants_table_as_zero(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from psycopg.errors import UndefinedTable
+
+    pol = _write_limits_policy(setup["tmp"], extra_top="max_concurrent_grants: 1")
+
+    def missing(conn: Any, requester: str) -> int:
+        raise UndefinedTable("grants")
+
+    monkeypatch.setattr(g, "count_active_grants", missing)
+    code, d = run("request", "--policy", pol, *REQ)
+    assert code == 0 and d["dry_run"]
+
+
+def test_count_active_grants_sql_only_counts_active() -> None:
+    seen: dict[str, Any] = {}
+
+    class Conn:
+        def execute(self, q: Any, params: Any = None) -> Any:
+            seen["sql"] = q.as_string(None)
+            seen["params"] = params
+
+            class R:
+                def fetchone(self) -> tuple[int]:
+                    return (1,)
+
+            return R()
+
+    assert g.count_active_grants(Conn(), "alice") == 1
+    sql = seen["sql"]
+    assert "status = 'active'" in sql
+    assert "expires_at > pg_catalog.now()" in sql
+    assert "revoked" not in sql
+    assert seen["params"] == ("alice",)
+
+
+def test_count_active_grants_excludes_unswept_expired() -> None:
+    """status=active but expires_at in the past must not match (sweep may not have run)."""
+    seen: dict[str, str] = {}
+
+    class Conn:
+        def execute(self, q: Any, params: Any = None) -> Any:
+            seen["sql"] = q.as_string(None)
+
+            class R:
+                def fetchone(self) -> tuple[int]:
+                    return (0,)
+
+            return R()
+
+    assert g.count_active_grants(Conn(), "alice") == 0
+    sql = seen["sql"]
+    assert "status = 'active'" in sql
+    assert "expires_at > pg_catalog.now()" in sql

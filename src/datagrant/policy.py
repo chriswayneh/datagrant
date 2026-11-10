@@ -66,6 +66,7 @@ class TableRule:
     require_row_filter: bool
     max_duration: timedelta
     filter_columns: frozenset[str] = frozenset()
+    max_columns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class Dataset:
     database: str
     tables: dict[str, TableRule]
     hash_scope: str = ""
+    max_concurrent_grants: int | None = None
 
     def __post_init__(self) -> None:
         if not self.hash_scope:
@@ -90,6 +92,14 @@ class Policy:
     sha256: str
     approver_groups: frozenset[str] = frozenset()
     identity: IdentityConfig = field(default_factory=IdentityConfig)
+    pending_ttl: timedelta | None = None
+    max_concurrent_grants: int | None = None
+
+    def concurrent_grant_cap(self, dataset: str) -> int | None:
+        """Minimum of the policy-wide and dataset caps that are set, or None."""
+        ds = self.datasets[dataset]
+        caps = [c for c in (self.max_concurrent_grants, ds.max_concurrent_grants) if c is not None]
+        return min(caps) if caps else None
 
     def can_approve(
         self, approver: str, requester: str, extra_groups: frozenset[str] = frozenset()
@@ -146,6 +156,12 @@ def _check_keys(d: dict[str, Any], allowed: set[str], where: str) -> None:
         raise PolicyError(f"{where}: unknown key(s) {sorted(extra)}")
 
 
+def _positive_int(val: object, where: str) -> int:
+    if isinstance(val, bool) or not isinstance(val, int) or val < 1:
+        raise PolicyError(f"{where}: expected a positive integer")
+    return val
+
+
 def _str_list(val: object, where: str) -> list[str]:
     if not isinstance(val, list) or not all(isinstance(x, str) and x for x in val):
         raise PolicyError(f"{where}: expected a list of non-empty strings")
@@ -165,6 +181,7 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
             "row_filters",
             "require_row_filter",
             "max_duration",
+            "max_columns",
         },
         where,
     )
@@ -225,8 +242,22 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
     )
     if max_d > cap:
         raise PolicyError(f"{where}.max_duration exceeds the policy-wide max_duration")
+    max_cols: int | None = None
+    if "max_columns" in raw:
+        max_cols = _positive_int(raw["max_columns"], f"{where}.max_columns")
+        if max_cols > len(cols):
+            raise PolicyError(
+                f"{where}.max_columns cannot exceed the number of columns ({len(cols)})"
+            )
     return TableRule(
-        name, frozenset(allowed), dict(cols), tuple(filters), require, max_d, frozenset(fcols)
+        name,
+        frozenset(allowed),
+        dict(cols),
+        tuple(filters),
+        require,
+        max_d,
+        frozenset(fcols),
+        max_cols,
     )
 
 
@@ -373,7 +404,17 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         raise PolicyError("policy: top level must be a mapping")
     _check_keys(
         data,
-        {"version", "approval", "approvers", "max_duration", "groups", "datasets", "identity"},
+        {
+            "version",
+            "approval",
+            "approvers",
+            "max_duration",
+            "groups",
+            "datasets",
+            "identity",
+            "pending_ttl",
+            "max_concurrent_grants",
+        },
         "policy",
     )
     version = _req(data, "version", int, "policy")
@@ -417,7 +458,9 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         where = f"policy.datasets[{i}]"
         if not isinstance(ds, dict):
             raise PolicyError(f"{where}: expected a mapping")
-        _check_keys(ds, {"name", "database", "tables", "hash_scope"}, where)
+        _check_keys(
+            ds, {"name", "database", "tables", "hash_scope", "max_concurrent_grants"}, where
+        )
         name = _req(ds, "name", str, where)
         if not _NAME_RE.fullmatch(name) or name in datasets:
             raise PolicyError(f"{where}.name: invalid or duplicate dataset name {name!r}")
@@ -435,7 +478,12 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
             tables[rule.name] = rule
         if not tables:
             raise PolicyError(f"{where}.tables: must define at least one table")
-        datasets[name] = Dataset(name, db, tables, scope)
+        ds_cap = (
+            _positive_int(ds["max_concurrent_grants"], f"{where}.max_concurrent_grants")
+            if "max_concurrent_grants" in ds
+            else None
+        )
+        datasets[name] = Dataset(name, db, tables, scope, ds_cap)
     approvers = frozenset(_str_list(data.get("approvers", []), "policy.approvers"))
     unknown = approvers - set(groups)
     if unknown:
@@ -443,7 +491,30 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
     if approval == "two-person" and not approvers:
         raise PolicyError("policy.approvers: two-person approval needs at least one approver group")
     ident = _parse_identity(data.get("identity"), set(groups), env=env)
-    return Policy(version, approval, cap, groups, datasets, sha256, approvers, ident)
+    pending_ttl: timedelta | None = None
+    if "pending_ttl" in data:
+        pending_ttl = parse_duration(data["pending_ttl"], "policy.pending_ttl")
+        if pending_ttl < timedelta(minutes=1) or pending_ttl > timedelta(days=7):
+            raise PolicyError(
+                f"policy.pending_ttl: duration {data['pending_ttl']!r} out of range (1m..7d)"
+            )
+    max_cg = (
+        _positive_int(data["max_concurrent_grants"], "policy.max_concurrent_grants")
+        if "max_concurrent_grants" in data
+        else None
+    )
+    return Policy(
+        version,
+        approval,
+        cap,
+        groups,
+        datasets,
+        sha256,
+        approvers,
+        ident,
+        pending_ttl,
+        max_cg,
+    )
 
 
 class _StrictLoader(yaml.SafeLoader):
@@ -518,6 +589,9 @@ def evaluate(
         reasons.append(f"columns not allowed: {', '.join(sorted(set(bad)))}")
     if len(set(req.columns)) != len(req.columns):
         reasons.append("duplicate columns requested")
+    nuniq = len(set(req.columns))
+    if rule.max_columns is not None and nuniq > rule.max_columns:
+        reasons.append(f"request has {nuniq} columns (max_columns is {rule.max_columns})")
     if req.duration <= timedelta(0):
         reasons.append("duration must be positive")
     elif req.duration > rule.max_duration:
