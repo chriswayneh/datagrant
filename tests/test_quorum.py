@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -512,7 +513,7 @@ def test_stale_policy_sha_and_ineligible_voter_ignored() -> None:
         required=2,
         now=now,
         policy_sha256="newsha",
-        can_approve=lambda name: name == "bob",
+        can_approve=lambda vote: vote.get("approver") == "bob",
     )
     assert out.recorded == 1 and out.is_final is False and out.ignored == ("alice",)
     stored = json.loads(conn.updated[0])
@@ -569,3 +570,170 @@ def test_approval_recorded_in_events_and_verifies(tmp_path: Path) -> None:
     assert bodies[1]["approver_identities"][0]["approver"] == "carol"
     res = verify(log, key.private.public_key())
     assert res.ok and res.count == 2
+
+
+def test_mapped_groups_count_group_map_only_voter() -> None:
+    from datagrant.pg import requests as rq
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    votes: list[dict[str, Any]] = []
+
+    class Cur:
+        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+            self.rows = rows
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self.rows[0] if self.rows else None
+
+    class Conn:
+        def transaction(self) -> Any:
+            import contextlib
+
+            @contextlib.contextmanager
+            def _tx() -> Any:
+                yield
+
+            return _tx()
+
+        def execute(self, q: Any, params: Any = None) -> Cur:
+            text = q.as_string(None)
+            if "FOR UPDATE" in text:
+                return Cur(
+                    [
+                        (
+                            "r1",
+                            "alice",
+                            "clinic",
+                            "public.p",
+                            ["id"],
+                            None,
+                            3600,
+                            "x",
+                            "sha",
+                            "V",
+                            now,
+                            now + timedelta(hours=1),
+                            "pending",
+                            None,
+                            None,
+                            None,
+                            json.dumps(votes),
+                        )
+                    ]
+                )
+            if "UPDATE" in text and params:
+                votes.clear()
+                votes.extend(json.loads(params[0]) if isinstance(params[0], str) else params[0])
+            return Cur([])
+
+    def ok(vote: Mapping[str, Any]) -> bool:
+        extra = rq.mapped_groups_of(vote)
+        return "sec" in extra
+
+    conn = Conn()
+    out = rq.record_approval(
+        conn,  # type: ignore[arg-type]
+        "r1",
+        approver="carol",
+        identity={"source": "oidc", "iss": "https://idp.example", "sub": "c1"},
+        required=2,
+        now=now,
+        policy_sha256="newsha",
+        can_approve=ok,
+        mapped_groups=("sec",),
+    )
+    assert out.recorded == 1 and out.ignored == ()
+    assert votes[0]["mapped_groups"] == ["sec"]
+    counted, ignored = rq.eligible_votes(
+        votes, policy_sha256="newsha", can_approve=ok
+    )
+    assert [v["approver"] for v in counted] == ["carol"] and ignored == []
+
+
+def test_repeat_ignored_vote_replaces_does_not_grow() -> None:
+    from datagrant.pg import requests as rq
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    votes: list[dict[str, Any]] = []
+
+    class Cur:
+        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+            self.rows = rows
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self.rows[0] if self.rows else None
+
+    class Conn:
+        def transaction(self) -> Any:
+            import contextlib
+
+            @contextlib.contextmanager
+            def _tx() -> Any:
+                yield
+
+            return _tx()
+
+        def execute(self, q: Any, params: Any = None) -> Cur:
+            text = q.as_string(None)
+            if "FOR UPDATE" in text:
+                return Cur(
+                    [
+                        (
+                            "r1",
+                            "erin",
+                            "clinic",
+                            "public.p",
+                            ["id"],
+                            None,
+                            3600,
+                            "x",
+                            "sha",
+                            "V",
+                            now,
+                            now + timedelta(hours=1),
+                            "pending",
+                            None,
+                            None,
+                            None,
+                            json.dumps(votes),
+                        )
+                    ]
+                )
+            if "UPDATE" in text and params:
+                votes.clear()
+                votes.extend(json.loads(params[0]) if isinstance(params[0], str) else params[0])
+            return Cur([])
+
+    conn = Conn()
+    first = rq.record_approval(
+        conn,  # type: ignore[arg-type]
+        "r1",
+        approver="alice",
+        identity={"source": "flag"},
+        required=2,
+        now=now,
+        policy_sha256="aaa",
+    )
+    assert first.recorded == 1 and len(votes) == 1
+    second = rq.record_approval(
+        conn,  # type: ignore[arg-type]
+        "r1",
+        approver="alice",
+        identity={"source": "flag"},
+        required=2,
+        now=now,
+        policy_sha256="bbb",
+    )
+    assert second.recorded == 1 and len(votes) == 1
+    assert votes[0]["policy_sha256"] == "bbb"
+    third = rq.record_approval(
+        conn,  # type: ignore[arg-type]
+        "r1",
+        approver="alice",
+        identity={"source": "flag"},
+        required=2,
+        now=now,
+        policy_sha256="bbb",
+        can_approve=lambda vote: False,
+    )
+    assert third.already is True and len(votes) == 1

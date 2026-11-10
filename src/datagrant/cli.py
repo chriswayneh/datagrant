@@ -738,6 +738,7 @@ def cmd_approve(ctx: Ctx) -> int:
         drop_approval,
         eligible_votes,
         get_request,
+        mapped_groups_of,
         record_approval,
     )
     from datagrant.policy import evaluate
@@ -846,8 +847,14 @@ def cmd_approve(ctx: Ctx) -> int:
         ident = caller.approver_receipt_dict()
         issuer = policy.identity.issuer if policy.identity.mode == "oidc" else None
 
-        def _voter_ok(name: str) -> bool:
-            return not policy.can_approve(name, pending.request.requester)
+        def _voter_ok(vote: Mapping[str, Any]) -> bool:
+            name = vote.get("approver")
+            if not isinstance(name, str):
+                return False
+            extra = mapped_groups_of(vote)
+            return not policy.can_approve(
+                name, pending.request.requester, extra_groups=extra
+            )
 
         counted, _ignored = eligible_votes(
             pending.approvals,
@@ -942,51 +949,52 @@ def cmd_approve(ctx: Ctx) -> int:
                 approvals_required=1,
             )
 
-        result = None
-        issued = None
-        with conn.transaction():
-            result = record_approval(
+        result = record_approval(
+            conn,
+            pending.id,
+            approver=approver,
+            identity=ident,
+            required=required,
+            policy_sha256=policy.sha256,
+            issuer=issuer,
+            can_approve=_voter_ok,
+            persist_if_final=False,
+            mapped_groups=tuple(sorted(caller.mapped_groups)),
+        )
+        if result.is_final:
+            counted_final, _ign = eligible_votes(
+                result.pending.approvals,
+                policy_sha256=policy.sha256,
+                issuer=issuer,
+                can_approve=_voter_ok,
+            )
+            names = tuple(str(v.get("approver")) for v in counted_final)
+            idents = tuple(_vote_receipt_ident(v) for v in counted_final)
+            issued = build_plan(
+                decision,
+                pending.request,
+                database=policy.datasets[pending.request.dataset].database,
+                password=new_password(),
+                verifier=pending.verifier,
+                catalog=inspect_table(conn, pending.request.table),
+                hash_key=hash_key,
+                approvers=names,
+                requester_identity=req_receipt_ident,
+                approver_identities=idents,
+            )
+            apply_plan(
                 conn,
-                pending.id,
+                issued,
+                sink,
+                request_id=pending.id,
                 approver=approver,
-                identity=ident,
+                approvals=result.pending.approvals,
                 required=required,
                 policy_sha256=policy.sha256,
                 issuer=issuer,
                 can_approve=_voter_ok,
-                persist_if_final=False,
             )
-            if result.is_final:
-                counted_final, _ign = eligible_votes(
-                    result.pending.approvals,
-                    policy_sha256=policy.sha256,
-                    issuer=issuer,
-                    can_approve=_voter_ok,
-                )
-                names = tuple(str(v.get("approver")) for v in counted_final)
-                idents = tuple(_vote_receipt_ident(v) for v in counted_final)
-                issued = build_plan(
-                    decision,
-                    pending.request,
-                    database=policy.datasets[pending.request.dataset].database,
-                    password=new_password(),
-                    verifier=pending.verifier,
-                    catalog=inspect_table(conn, pending.request.table),
-                    hash_key=hash_key,
-                    approvers=names,
-                    requester_identity=req_receipt_ident,
-                    approver_identities=idents,
-                )
-                apply_plan(
-                    conn,
-                    issued,
-                    sink,
-                    request_id=pending.id,
-                    approver=approver,
-                    approvals=result.pending.approvals,
-                )
-                _deliver_issued(ctx, conn, issued, sink)
-        if issued is not None:
+            _deliver_issued(ctx, conn, issued, sink)
             return _print_grant(
                 ctx,
                 issued,
@@ -996,8 +1004,6 @@ def cmd_approve(ctx: Ctx) -> int:
                 approvals_recorded=len(issued.facts.approvers) if issued.facts else required,
                 approvals_required=required,
             )
-        if result is None:
-            raise CliError("internal error: missing approval result", EXIT_FAILED)
         extra_ignored = (
             {"ignored_approvals": list(result.ignored)} if result.ignored else {}
         )
@@ -1016,15 +1022,21 @@ def cmd_approve(ctx: Ctx) -> int:
                 f" ({result.recorded}/{result.required})",
             )
             return EXIT_OK
+        counted_partial, _ign_partial = eligible_votes(
+            result.pending.approvals,
+            policy_sha256=policy.sha256,
+            issuer=issuer,
+            can_approve=_voter_ok,
+        )
         try:
             facts, extra = _audit_facts(
                 ctx,
                 pending.request,
                 policy,
                 identity=_identity_from_pending(pending),
-                approvers=tuple(str(v.get("approver")) for v in result.pending.approvals),
+                approvers=tuple(str(v.get("approver")) for v in counted_partial),
                 approver_identities=tuple(
-                    _vote_receipt_ident(v) for v in result.pending.approvals
+                    _vote_receipt_ident(v) for v in counted_partial
                 ),
                 starts_at=pending.created_at,
                 expires_at=pending.expires_at,

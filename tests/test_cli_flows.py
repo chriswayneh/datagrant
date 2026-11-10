@@ -17,6 +17,8 @@ from datagrant import cli
 from datagrant.pg import grant as g
 from datagrant.pg import requests as rq
 from datagrant.pg import revoke as rv
+
+_REAL_APPLY_PLAN = g.apply_plan
 from datagrant.pg.mask import ColumnType, TableCatalog
 from datagrant.pg.requests import PendingRequest
 from datagrant.policy import Request
@@ -1096,7 +1098,10 @@ class VoteConn:
         self.rid = rid
         self.requester = requester
         self.votes: list[dict[str, Any]] = []
-        self._snaps: list[list[dict[str, Any]]] = []
+        self.status = "pending"
+        self.depth = 0
+        self.commits = 0
+        self._snaps: list[tuple[list[dict[str, Any]], str]] = []
         self.queries: list[Any] = []
 
     def _row(self) -> tuple[Any, ...]:
@@ -1113,7 +1118,7 @@ class VoteConn:
             "SCRAM-SHA-256$x",
             T,
             T + timedelta(hours=24),
-            "pending",
+            self.status,
             None,
             None,
             None,
@@ -1122,21 +1127,36 @@ class VoteConn:
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
-        self._snaps.append(copy.deepcopy(self.votes))
+        self._snaps.append((copy.deepcopy(self.votes), self.status))
+        self.depth += 1
         try:
             yield
-            self._snaps.pop()
         except BaseException:
-            self.votes = self._snaps.pop()
+            self.votes, self.status = self._snaps.pop()
+            self.depth -= 1
             raise
+        self._snaps.pop()
+        self.depth -= 1
+        if self.depth == 0:
+            self.commits += 1
 
     def execute(self, q: Any, params: Any = None) -> Any:
         self.queries.append((q, params))
         text = q.as_string(None) if hasattr(q, "as_string") else str(q)
-        rows = [self._row()] if "requests" in text and "SELECT" in text else []
-        if text.lstrip().upper().startswith("UPDATE") and "approvals" in text and params:
-            raw = params[0]
-            self.votes = json.loads(raw) if isinstance(raw, str) else list(raw)
+        if "current_database" in text:
+            rows: list[tuple[Any, ...]] = [("clinicdb",)]
+        elif "requests" in text and "SELECT" in text:
+            rows = [self._row()]
+        else:
+            rows = []
+        if text.lstrip().upper().startswith("UPDATE") and "requests" in text and params:
+            for p in params:
+                if isinstance(p, str) and p.lstrip().startswith("["):
+                    self.votes = json.loads(p)
+                    break
+            if "approved" in text:
+                self.status = "approved"
+            rows = [(self.rid,)]
 
         class C:
             def fetchall(self) -> list[tuple[Any, ...]]:
@@ -1223,3 +1243,123 @@ def test_request_pending_json_includes_approvals_required(
     assert code == 0 and d["status"] == "pending"
     assert d["approvals_recorded"] == 0 and d["approvals_required"] == 2
     assert d["approvals"] == "0/2"
+
+
+def test_issued_receipt_written_only_after_grant_commits(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import datagrant.receipt as recmod
+    from datagrant.pg.revoke import RevokeResult
+    from datagrant.sink import SinkConfig, SinkError
+
+    monkeypatch.setattr(g, "apply_plan", _REAL_APPLY_PLAN)
+    pol = _quorum_policy(setup, n=2)
+    conn = VoteConn()
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    depths: list[int] = []
+    real_append = recmod.append
+
+    def spy_append(*a: Any, **k: Any) -> Any:
+        depths.append(conn.depth)
+        return real_append(*a, **k)
+
+    monkeypatch.setattr(recmod, "append", spy_append)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert depths and all(x == 0 for x in depths)
+
+    class Boom:
+        name = "boom"
+
+        def deliver(self, line: bytes) -> None:
+            raise SinkError("down")
+
+        def head(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "_remote", lambda args: SinkConfig(Boom(), "required"))
+    revoke_depths: list[int] = []
+
+    def fake_revoke(c: Any, gid: str, reason: str, sink: Any = None) -> RevokeResult:
+        revoke_depths.append(c.depth)
+        return RevokeResult(gid, "revoked", 1, None)
+
+    monkeypatch.setattr("datagrant.pg.revoke.revoke", fake_revoke)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == cli.EXIT_RECEIPT
+    err = d.get("error", "")
+    assert "STILL ACTIVE" not in err
+    assert "grant revoked" in err
+    assert [v["approver"] for v in conn.votes] == ["carol", "dave"]
+    assert conn.status == "approved"
+    assert all(x == 0 for x in depths)
+    assert revoke_depths == [0]
+    events = [b["event"] for b in _receipts(setup)]
+    assert "issued" in events
+
+
+def test_oidc_group_map_only_approver_reaches_quorum(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant.oidc import VerifiedIdentity
+
+    text = (
+        POLICY.format(approval="two-person")
+        .replace("approvers: [sec]", "approvers: [sec]\napprovals_required: 2")
+        .replace("sec: [carol]", "sec: []")
+    )
+    path = setup["tmp"] / "oidc-quorum.yaml"
+    path.write_text(text)
+
+    def resolve(ctx: Any, policy: Any) -> VerifiedIdentity:
+        user = ctx.args.as_user
+        return VerifiedIdentity(
+            username=user,
+            source="oidc",
+            iss="https://idp.example",
+            sub=f"sub-{user}",
+            token_sha256="a" * 64,
+            mapped_groups=frozenset({"sec"}),
+        )
+
+    conn = VoteConn()
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    monkeypatch.setattr(cli, "_resolve_caller", resolve)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(path), "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert conn.votes[0]["mapped_groups"] == ["sec"]
+    bodies = _receipts(setup)
+    assert bodies[0]["event"] == "approval_recorded"
+    assert [x["approver"] for x in bodies[0]["approver_identities"]] == ["carol"]
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(path), "--as-user", "dave")
+    assert code == 0 and d["status"] == "granted"
+    assert d["approvals"] == "2/2"
+    plan, _, _kw = setup["applied"][0]
+    assert plan.facts.approvers == ("carol", "dave")
+
+
+def test_ignored_voter_repeat_does_not_grow_approvals(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp = setup["tmp"]
+    text = (
+        "version: 1\napproval: two-person\napprovers: [dba]\napprovals_required: 2\n"
+        "max_duration: 8h\ngroups:\n  ml: [erin]\n  dba: [alice, bob]\n"
+        "datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        "      - name: public.p\n        allowed_groups: [ml]\n"
+        "        columns: {id: passthrough, ssn: hash}\n"
+    )
+    pol1 = tmp / "grow1.yaml"
+    pol1.write_text(text)
+    pol2 = tmp / "grow2.yaml"
+    pol2.write_text(text.replace("dba: [alice, bob]", "dba: [alice, bob]\npending_ttl: 12h"))
+    conn = VoteConn(requester="erin")
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol1), "--as-user", "alice")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert len(conn.votes) == 1
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol2), "--as-user", "alice")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert len(conn.votes) == 1
+    assert conn.votes[0]["policy_sha256"] != "p" * 64
+    assert conn.votes[0]["approver"] == "alice"
