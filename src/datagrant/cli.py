@@ -1,7 +1,8 @@
 """datagrant command line (unit U6).
 
 Exit codes: 0 ok, 1 denied/failed, 2 usage, 3 receipt could not be written
-(access change still happened), 4 revoke failed (grant still active; retried
+(a grant/request change still happened, or a denial receipt could not be
+written so nothing was issued), 4 revoke failed (grant still active; retried
 by the next sweep).
 
 Every command that changes something (keys init, request, approve, revoke,
@@ -25,7 +26,7 @@ import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -359,6 +360,196 @@ def _concurrent_reason(conn: Any, policy: Any, requester: str, dataset: str) -> 
     return None
 
 
+def _redact_text(ctx: Ctx, text: str) -> str:
+    dsn = getattr(ctx.args, "dsn", None) or os.environ.get(DSN_ENV)
+    return _hide_token(redact(text, dsn), ctx.oidc_token)
+
+
+def _redacted_reasons(ctx: Ctx, reasons: Sequence[str]) -> list[str]:
+    return [_redact_text(ctx, str(r)) for r in reasons]
+
+
+def _table_rule(policy: Any, req: Any) -> Any:
+    if policy is None:
+        return None
+    ds = getattr(policy, "datasets", {}).get(req.dataset)
+    if ds is None:
+        return None
+    return ds.tables.get(req.table)
+
+
+def _receipt_reasons(reasons: Sequence[str]) -> list[str]:
+    """Drop requester-supplied column names from reasons stored on a receipt."""
+    out: list[str] = []
+    for r in reasons:
+        if r.startswith("columns not allowed:"):
+            out.append("columns not allowed (see details.unknown_column_count)")
+        else:
+            out.append(r)
+    return out
+
+
+def _audit_facts(
+    ctx: Ctx,
+    req: Any,
+    policy: Any,
+    *,
+    identity: Any = None,
+    approvers: Sequence[str] = (),
+    approver_identities: Sequence[Any] | None = None,
+    starts_at: datetime | None = None,
+    expires_at: datetime | None = None,
+    policy_sha256: str | None = None,
+    approval: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    from datagrant.receipt import GrantFacts
+
+    now = datetime.now(UTC)
+    extra: dict[str, Any] = {}
+    rule = _table_rule(policy, req)
+    if policy is None:
+        cols: tuple[str, ...] = tuple(req.columns)
+        masks: dict[str, str] = {c: "unknown" for c in cols}
+        row_filter = req.row_filter
+    else:
+        if rule is None:
+            known: list[str] = []
+            unknown = list(req.columns)
+            masks = {}
+        else:
+            known = [c for c in req.columns if c in rule.columns]
+            unknown = [c for c in req.columns if c not in rule.columns]
+            masks = {c: rule.columns[c] for c in known}
+        cols = tuple(known)
+        if unknown:
+            extra["unknown_column_count"] = len(unknown)
+        if req.row_filter is None:
+            row_filter = None
+        elif rule is not None and req.row_filter in rule.row_filters:
+            row_filter = req.row_filter
+        else:
+            row_filter = None
+            extra["row_filter_unlisted"] = True
+    return GrantFacts(
+        "",
+        req.requester,
+        req.dataset,
+        req.table,
+        cols,
+        masks,
+        row_filter,
+        _redact_text(ctx, req.purpose),
+        starts_at or now,
+        expires_at or (now + req.duration),
+        policy_sha256 if policy_sha256 is not None else policy.sha256,
+        getattr(policy, "version", 1) if policy is not None else 1,
+        approval if approval is not None else getattr(policy, "approval", "two-person"),
+        tuple(approvers),
+        dict(identity) if identity is not None else None,
+        tuple(dict(x) for x in approver_identities) if approver_identities is not None else None,
+    ), extra
+
+
+def _write_decision_receipt(ctx: Ctx, event: str, facts: Any, details: dict[str, Any]) -> None:
+    """Append a denial/expiry receipt. Missing key or write failure is exit 3."""
+    from datagrant.receipt import ReceiptError
+
+    try:
+        sink = _sink(ctx.args)
+    except KeyFileError as exc:
+        raise CliError(str(exc), EXIT_RECEIPT) from None
+    try:
+        receipt.append(
+            sink.log,
+            event,  # type: ignore[arg-type]
+            facts,
+            sink.key,
+            host=sink.host,
+            details=details,
+        )
+    except ReceiptError as exc:
+        raise CliError(str(exc), EXIT_RECEIPT) from None
+    _deliver_quick(ctx, sink)
+
+
+def _refuse_request(ctx: Ctx, req: Any, policy: Any, reasons: Sequence[str], caller: Any) -> int:
+    safe = _redacted_reasons(ctx, reasons)
+    ctx.emit(
+        {"allowed": False, "reasons": safe, "requester": req.requester},
+        "denied:\n" + "\n".join(f"  - {r}" for r in safe),
+    )
+    if ctx.args.apply:
+        facts, extra = _audit_facts(ctx, req, policy, identity=caller.receipt_dict())
+        _write_decision_receipt(
+            ctx,
+            "denied",
+            facts,
+            {"reasons": _receipt_reasons(safe), "phase": "request", **extra},
+        )
+    return EXIT_FAILED
+
+
+def _identity_from_pending(pending: Any) -> dict[str, Any] | None:
+    meta = getattr(pending, "requester_identity", None)
+    if isinstance(meta, dict) and "source" in meta:
+        return {k: v for k, v in meta.items() if k in ("source", "iss", "sub", "token_sha256")}
+    return None
+
+
+def _write_not_approved(
+    ctx: Ctx, pending: Any, policy: Any, reasons: Sequence[str], caller: Any
+) -> None:
+    """Write a not_approved receipt on --apply. Raises CliError(EXIT_RECEIPT) on failure."""
+    if not ctx.args.apply:
+        return
+    facts, extra = _audit_facts(
+        ctx,
+        pending.request,
+        policy,
+        identity=_identity_from_pending(pending),
+        approvers=(caller.username,),
+        approver_identities=(caller.approver_receipt_dict(),),
+        starts_at=pending.created_at,
+        expires_at=pending.expires_at,
+    )
+    _write_decision_receipt(
+        ctx,
+        "not_approved",
+        facts,
+        {
+            "reasons": _receipt_reasons(list(reasons)),
+            "phase": "approve",
+            "request_id": pending.id,
+            **extra,
+        },
+    )
+
+
+def _refuse_approve(
+    ctx: Ctx, pending: Any, policy: Any, reasons: Sequence[str], caller: Any
+) -> int:
+    safe = _redacted_reasons(ctx, reasons)
+    ctx.emit(
+        {"approved": False, "reasons": safe},
+        "not approved:\n" + "\n".join(f"  - {r}" for r in safe),
+    )
+    _write_not_approved(ctx, pending, policy, safe, caller)
+    return EXIT_FAILED
+
+
+def _facts_from_pending(ctx: Ctx, pending: Any) -> tuple[Any, dict[str, Any]]:
+    return _audit_facts(
+        ctx,
+        pending.request,
+        None,
+        identity=_identity_from_pending(pending),
+        starts_at=pending.created_at,
+        expires_at=pending.expires_at,
+        policy_sha256=pending.policy_sha256,
+        approval="two-person",
+    )
+
+
 _DEFAULT_PENDING_TTL = timedelta(hours=24)
 
 
@@ -406,11 +597,7 @@ def cmd_request(ctx: Ctx) -> int:
     )
     decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
     if not decision.allowed:
-        ctx.emit(
-            {"allowed": False, "reasons": list(decision.reasons), "requester": user},
-            "denied:\n" + "\n".join(f"  - {r}" for r in decision.reasons),
-        )
-        return EXIT_FAILED
+        return _refuse_request(ctx, req, policy, decision.reasons, caller)
     two_person = decision.approval == "two-person"
     hash_key = (
         load_hash_key(resolve_key_path("hash", a.hash_key)) if _needs_hash(decision, cols) else None
@@ -423,11 +610,7 @@ def cmd_request(ctx: Ctx) -> int:
             ensure_state(conn)
         cap_reason = _concurrent_reason(conn, policy, user, req.dataset)
         if cap_reason:
-            ctx.emit(
-                {"allowed": False, "reasons": [cap_reason], "requester": user},
-                "denied:\n" + f"  - {cap_reason}",
-            )
-            return EXIT_FAILED
+            return _refuse_request(ctx, req, policy, [cap_reason], caller)
         if not a.apply:
             # No password is generated in a dry run; the verifier slot is a placeholder.
             plan = build_plan(
@@ -532,15 +715,22 @@ def cmd_approve(ctx: Ctx) -> int:
             ensure_state(conn)
         pending = get_request(conn, a.request_id)
         if pending.status != "pending" or pending.verifier is None:
-            raise CliError(f"request {pending.id} is {pending.status}, not pending")
+            return _refuse_approve(
+                ctx,
+                pending,
+                policy,
+                [f"request {pending.id} is {pending.status}, not pending"],
+                caller,
+            )
         req_meta = pending.requester_identity
         req_mode = req_meta.get("mode", "local") if isinstance(req_meta, dict) else "local"
         if req_mode != policy.identity.mode:
-            raise CliError(
+            msg = (
                 f"request {pending.id} was created with identity mode {req_mode!r},"
-                f" but current policy uses {policy.identity.mode!r}",
-                EXIT_FAILED,
+                f" but current policy uses {policy.identity.mode!r}"
             )
+            _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+            raise CliError(msg, EXIT_FAILED)
         if policy.identity.mode == "oidc":
             if (
                 not isinstance(req_meta, dict)
@@ -552,23 +742,24 @@ def cmd_approve(ctx: Ctx) -> int:
                 or not isinstance(req_meta.get("token_sha256"), str)
                 or not _HEX64_RE.fullmatch(req_meta["token_sha256"])
             ):
-                raise CliError(
-                    f"request {pending.id} is missing valid verified OIDC metadata",
-                    EXIT_FAILED,
-                )
+                msg = f"request {pending.id} is missing valid verified OIDC metadata"
+                _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                raise CliError(msg, EXIT_FAILED)
             if req_meta["iss"] != policy.identity.issuer:
-                raise CliError(
+                msg = (
                     f"request {pending.id} was issued by {req_meta['iss']!r},"
-                    f" which does not match policy.identity.issuer {policy.identity.issuer!r}",
-                    EXIT_FAILED,
+                    f" which does not match policy.identity.issuer {policy.identity.issuer!r}"
                 )
+                _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                raise CliError(msg, EXIT_FAILED)
             if req_meta.get("username_claim") != policy.identity.username_claim:
-                raise CliError(
+                msg = (
                     f"request {pending.id} used username_claim={req_meta.get('username_claim')!r},"
                     f" which does not match policy.identity.username_claim"
-                    f" {policy.identity.username_claim!r}",
-                    EXIT_FAILED,
+                    f" {policy.identity.username_claim!r}"
                 )
+                _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                raise CliError(msg, EXIT_FAILED)
         reasons = policy.can_approve(
             approver, pending.request.requester, extra_groups=caller.mapped_groups
         )
@@ -604,21 +795,12 @@ def cmd_approve(ctx: Ctx) -> int:
         if not decision.allowed:
             reasons += [f"request no longer allowed: {r}" for r in decision.reasons]
         if reasons:
-            ctx.emit(
-                {"approved": False, "reasons": reasons},
-                "not approved:\n" + "\n".join(f"  - {r}" for r in reasons),
-            )
-            return EXIT_FAILED
+            return _refuse_approve(ctx, pending, policy, reasons, caller)
         cap_reason = _concurrent_reason(
             conn, policy, pending.request.requester, pending.request.dataset
         )
         if cap_reason:
-            reasons.append(cap_reason)
-            ctx.emit(
-                {"approved": False, "reasons": reasons},
-                "not approved:\n" + "\n".join(f"  - {r}" for r in reasons),
-            )
-            return EXIT_FAILED
+            return _refuse_approve(ctx, pending, policy, [cap_reason], caller)
         req_receipt_ident: dict[str, Any] = (
             {k: v for k, v in req_meta.items() if k in ("source", "iss", "sub", "token_sha256")}
             if isinstance(req_meta, dict) and "source" in req_meta
@@ -800,8 +982,9 @@ def cmd_revoke(ctx: Ctx) -> int:
 
 def cmd_sweep(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state
-    from datagrant.pg.requests import expire_requests
+    from datagrant.pg.requests import expire_stale_requests
     from datagrant.pg.revoke import sweep
+    from datagrant.receipt import ReceiptError
 
     if not ctx.args.apply:
         with _connect(ctx.args) as conn:
@@ -829,7 +1012,26 @@ def cmd_sweep(ctx: Ctx) -> int:
     with _connect(ctx.args) as conn:
         ensure_state(conn)
         results = sweep(conn, sink)
-        expired_requests = expire_requests(conn)
+        expired = expire_stale_requests(conn)
+    expired_requests = [p.id for p in expired]
+    request_receipt_error: str | None = None
+    if expired:
+        if sink is None:
+            request_receipt_error = key_problem or "signing key unavailable"
+        else:
+            for pending in expired:
+                try:
+                    facts, extra = _facts_from_pending(ctx, pending)
+                    receipt.append(
+                        sink.log,
+                        "request_expired",
+                        facts,
+                        sink.key,
+                        host=sink.host,
+                        details={"request_id": pending.id, **extra},
+                    )
+                except ReceiptError as exc:
+                    request_receipt_error = str(exc)
     delivery = _deliver_quick(ctx, sink)
     lines = [
         f"grant {r.grant_id}: {r.outcome}"
@@ -838,8 +1040,10 @@ def cmd_sweep(ctx: Ctx) -> int:
         for r in results
     ]
     lines += [f"request {rid}: expired" for rid in expired_requests]
-    if key_problem and results:
+    if key_problem and (results or expired_requests):
         lines.append(f"receipts not written: {key_problem}")
+    elif request_receipt_error:
+        lines.append(f"receipts not written: {request_receipt_error}")
     ctx.emit(
         {
             "results": [_result_dict(r) for r in results],
@@ -849,7 +1053,10 @@ def cmd_sweep(ctx: Ctx) -> int:
         },
         "\n".join(lines) or "nothing to sweep",
     )
-    return _exit_for(results, key_problem)
+    code = _exit_for(results, key_problem)
+    if code == EXIT_OK and expired_requests and (key_problem or request_receipt_error):
+        return EXIT_RECEIPT
+    return code
 
 
 def cmd_receipts_verify(ctx: Ctx) -> int:

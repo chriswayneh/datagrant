@@ -9,7 +9,7 @@ import pytest
 
 from datagrant import receipt
 from datagrant.keys import KeyFileError, init_keys, load_public_key, load_signing_key
-from datagrant.receipt import GrantFacts, ReceiptError, canonical, verify
+from datagrant.receipt import EVENTS, GrantFacts, ReceiptError, canonical, verify
 
 T0 = datetime(2026, 11, 2, 18, 0, tzinfo=UTC)
 FACTS = GrantFacts(
@@ -250,3 +250,51 @@ def test_append_missing_parent_dir_is_receipt_error(tmp_path: Path, key) -> None
     blocker.write_text("x")
     with pytest.raises(ReceiptError, match="cannot open receipt log"):
         receipt.append(blocker / "sub" / "r.jsonl", "issued", FACTS, key)
+
+
+def test_new_events_are_signed_chained_and_omit_grant_id(tmp_path: Path, key) -> None:  # type: ignore[no-untyped-def]
+    log = tmp_path / "r.jsonl"
+    details = {
+        "denied": {"reasons": ["not in an allowed group"], "phase": "request"},
+        "not_approved": {
+            "reasons": ["approver must be a different person than the requester"],
+            "phase": "approve",
+            "request_id": "aaaaaaaaaaaa",
+        },
+        "request_expired": {"request_id": "bbbbbbbbbbbb"},
+    }
+    for event, det in details.items():
+        receipt.append(log, event, FACTS, key, event_at=T0, host="h", details=det)
+    lines = log.read_bytes().splitlines()
+    bodies = [json.loads(x)["receipt"] for x in lines]
+    assert [b["event"] for b in bodies] == ["denied", "not_approved", "request_expired"]
+    assert [b["seq"] for b in bodies] == [0, 1, 2]
+    for b, (event, det) in zip(bodies, details.items(), strict=True):
+        assert "grant_id" not in b
+        assert b["details"] == det
+        assert b["event"] == event
+        assert b["version"] == 1
+        assert "password" not in b
+    res = verify(log, key.private.public_key())
+    assert res.ok and res.count == 3
+
+
+def test_verify_v030_log_still_ok_with_new_kinds(tmp_path: Path, key) -> None:  # type: ignore[no-untyped-def]
+    log = tmp_path / "mixed.jsonl"
+    for event in ("issued", "revoked", "expired", "revoke_failed"):
+        receipt.append(log, event, FACTS, key, event_at=T0, host="h")
+    receipt.append(
+        log,
+        "denied",
+        FACTS,
+        key,
+        event_at=T0,
+        host="h",
+        details={"reasons": ["max_columns"], "phase": "request"},
+    )
+    res = verify(log, key.private.public_key())
+    assert res.ok and res.count == 5
+    events = [json.loads(x)["receipt"]["event"] for x in log.read_bytes().splitlines()]
+    assert events[:4] == ["issued", "revoked", "expired", "revoke_failed"]
+    assert events[4] == "denied"
+    assert "approval_recorded" not in EVENTS

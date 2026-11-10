@@ -280,8 +280,8 @@ def run(dsn: str, work: Path) -> None:
         step("verify the signed, hash-chained receipts")
         v = dg("receipts", "verify")
         check(
-            v["ok"] and v["count"] == 6,
-            "receipts did not verify (expect issued x3, revoked x2, expired)",
+            v["ok"] and v["count"] == 7,
+            "receipts did not verify (expect issued x3, revoked x2, expired, not_approved)",
         )
         dg("receipts", "verify", "--expect-head", v["head_sha256"])
         print(f"record this head hash outside the host: {v['head_sha256']}")
@@ -289,7 +289,7 @@ def run(dsn: str, work: Path) -> None:
 
         step("external receipt sink: push the outbox, verify against it, catch truncation")
         p0 = dg("receipts", "push", "--receipt-sink", sink)  # dry run
-        check(p0["pending"] == 6, "outbox should hold every receipt")
+        check(p0["pending"] == 7, "outbox should hold every receipt")
         dg("receipts", "push", "--apply", "--receipt-sink", sink)
         ok = dg("receipts", "verify", "--sink", sink)
         check(ok["ok"] and ok["undelivered"] == 0, "sink should match the local log")
@@ -304,7 +304,7 @@ def run(dsn: str, work: Path) -> None:
         print("also deleted the local outbox cursor; the off-host sink still has every receipt")
         bad = dg("receipts", "verify", "--sink", sink, expect=1)
         check(
-            "sink is ahead" in (bad["error"] or "") and bad["sink_seq"] == 5,
+            "sink is ahead" in (bad["error"] or "") and bad["sink_seq"] == 6,
             "the sink did not catch the truncation",
         )
         print(f"FAILED as expected: {bad['error']}")
