@@ -135,6 +135,17 @@ def ensure_state(conn: psycopg.Connection) -> list[str]:
     return preflight(conn)
 
 
+def count_active_grants(conn: psycopg.Connection, requester: str) -> int:
+    """How many grants this principal currently holds. Revoked and expired do not count."""
+    row = conn.execute(
+        sql.SQL(
+            "SELECT count(*) FROM {}.grants WHERE requester = %s AND status = 'active'"
+        ).format(sql.Identifier(STATE_SCHEMA)),
+        (requester,),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def build_plan(
     decision: Decision,
     req: Request,

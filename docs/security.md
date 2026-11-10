@@ -21,7 +21,8 @@ datagrant narrows, time-boxes and records access to regulated tables in Postgres
 
 ## What it defends
 
-- **Over-broad access.** Only policy-listed columns and exact-match row filters. Deny by default, with reasons.
+- **Over-broad access.** Only policy-listed columns and exact-match row filters. Optional `max_columns` stops a request that takes every allowed column. Deny by default, with reasons.
+- **Too many live grants.** Optional `max_concurrent_grants` counts `datagrant.grants` rows with `status = 'active'` for that requester (revoked and expired do not count) on `request` and again on `approve`. `--pending-ttl` cannot exceed `policy.pending_ttl` when that key is set (exit 2).
 - **Standing access.** Every grant has an expiry. `sweep` revokes it, and `VALID UNTIL` is a database-side backstop for new logins.
 - **Raw-table reads.** The grantee role gets `SELECT` on one masked `security_barrier` view only, not on the base table.
 - **SQL injection via policy or request.** Identifiers and literals are composed with `psycopg.sql`, row filters are parsed against a small grammar, and grant DDL runs with a pinned `search_path` and `pg_catalog`-qualified functions.
@@ -57,4 +58,5 @@ datagrant narrows, time-boxes and records access to regulated tables in Postgres
 - **One database per revoke.** `DROP OWNED` covers the current database only. datagrant grants within one database, so don't grant the temporary role anything elsewhere by hand.
 - **`VALID UNTIL` is a backstop.** It blocks new logins but doesn't end open sessions. `sweep` does, so schedule it.
 - **One key per log.** A receipt log is verified with one public key. Rotating the signing key means starting a new log.
-- **Operators are trusted.** Anyone holding the admin DSN, the policy and the keys can read data directly or rewrite history. datagrant doesn't protect against them.
+- **Operators are trusted.** Anyone holding the admin DSN, the policy and the keys can read data directly or rewrite history. datagrant doesn't protect against them. `pending_ttl`, `max_columns` and `max_concurrent_grants` are CLI workflow controls, same as two-person approval in local mode.
+- **Concurrent-cap races.** Two `auto --apply` writers can both pass the active-grant count and both insert. The documented ops model is one writer. Revoked and expired rows are not counted, so they cannot be used to inflate or dodge the cap.

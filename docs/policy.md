@@ -12,6 +12,8 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `approval` | yes | `auto` grants immediately when allowed. `two-person` creates a pending request that someone else must approve. |
 | `approvers` | two-person only | List of group names whose members can approve. Required when `approval: two-person`. |
 | `max_duration` | yes | Policy-wide cap on any grant. |
+| `pending_ttl` | no | Cap on `request --pending-ttl` (`1m`..`7d`, same duration grammar as grants). Omit it for v0.3.0 behavior: the CLI default is still `24h` and a caller may pass a longer `--pending-ttl`. When set, a longer `--pending-ttl` is a usage error (exit 2) before any database write. |
+| `max_concurrent_grants` | no | Positive integer. Cap on how many `status = 'active'` grants one requester may hold. Omit it for no cap. The effective cap for a request is the minimum of this value and the dataset's `max_concurrent_grants` among those that are set. Revoked and expired grants do not count. |
 | `groups` | yes | Map of group name to a list of user names (1 to 256 printable ASCII characters without spaces). Email-style names (containing `@`) fold ASCII `A-Z` to `a-z`; duplicate members in a group or conflicting spellings across groups are policy errors. Empty lists are allowed: in `identity.mode: oidc`, membership can come only from `identity.group_map`. |
 | `datasets` | yes | List of datasets (see below). |
 | `identity` | no | How `request` and `approve` name the caller. Omit it, or set `mode: local`, for OS/`--as-user` names. Set `mode: oidc` to require a verified ID token. See [Identity](#identity). |
@@ -24,6 +26,7 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `database` | Postgres database name. A grant is refused if the DSN connects to a different database. |
 | `tables` | List of tables. |
 | `hash_scope` | Optional. Name of the hash scope (`[A-Za-z0-9_.-]`, up to 64 characters). Defaults to the dataset name, so each dataset hashes differently. Give two datasets the same `hash_scope` only when their hashes should be joinable. |
+| `max_concurrent_grants` | Optional positive integer. Tighter of this and the policy-wide cap, if either is set. Count is the requester's active grants (all datasets). |
 
 ## Tables
 
@@ -36,6 +39,7 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `row_filters` | no | Allowed row filters. A request's `--row-filter` must exactly match one entry. |
 | `require_row_filter` | no | `true` means a request without a row filter is denied. Needs at least one `row_filters` entry. |
 | `max_duration` | no | Per-table cap. It may not exceed the policy-wide `max_duration`. |
+| `max_columns` | no | Positive integer. A request whose unique column count exceeds it is denied. It cannot exceed the size of `columns`. Omit it for no extra cap beyond the allow-list. |
 
 ## Durations
 
