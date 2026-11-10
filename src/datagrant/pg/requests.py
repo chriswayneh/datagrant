@@ -116,3 +116,11 @@ def expire_requests(conn: psycopg.Connection) -> list[str]:
             ).format(sql.Identifier(STATE_SCHEMA))
         ).fetchall()
     return sorted(r[0] for r in rows)
+
+
+def expire_stale_requests(conn: psycopg.Connection) -> list[PendingRequest]:
+    """Expire stale pending rows and return them (for request_expired receipts).
+
+    Idempotent: a second call finds no ``pending`` rows and returns nothing.
+    """
+    return [get_request(conn, rid) for rid in expire_requests(conn)]

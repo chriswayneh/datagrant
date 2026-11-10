@@ -8,6 +8,9 @@ deleting, or reordering any line breaks verification. Truncating the newest
 lines can only be caught against an externally kept head hash (see verify).
 
 Receipts never contain passwords or key material; only the signing key id.
+Writer events: issued, revoked, expired, revoke_failed, denied, not_approved,
+request_expired. ``denied`` / ``not_approved`` / ``request_expired`` omit
+``grant_id``. ``verify`` accepts any signed, chained line (old logs included).
 """
 
 from __future__ import annotations
@@ -34,8 +37,25 @@ RECEIPT_VERSION = 1
 GENESIS = "0" * 64
 MAX_LINE_BYTES = 64 * 1024
 RECEIPT_LOG_ENV = "DATAGRANT_RECEIPT_LOG"
-Event = Literal["issued", "revoked", "expired", "revoke_failed"]
-EVENTS = ("issued", "revoked", "expired", "revoke_failed")
+Event = Literal[
+    "issued",
+    "revoked",
+    "expired",
+    "revoke_failed",
+    "denied",
+    "not_approved",
+    "request_expired",
+]
+EVENTS = (
+    "issued",
+    "revoked",
+    "expired",
+    "revoke_failed",
+    "denied",
+    "not_approved",
+    "request_expired",
+)
+_NO_GRANT_EVENTS = frozenset({"denied", "not_approved", "request_expired"})
 _FORBIDDEN_KEYS = {
     "password",
     "hash_key",
@@ -133,7 +153,6 @@ def receipt_body(
         "event": event,
         "event_at": _utc(event_at or datetime.now(UTC)),
         "host": host or socket.gethostname(),
-        "grant_id": facts.grant_id,
         "requester": facts.requester,
         "dataset": facts.dataset,
         "table": facts.table,
@@ -151,6 +170,8 @@ def receipt_body(
         "prev_receipt_sha256": prev,
         "key_id": key_id,
     }
+    if event not in _NO_GRANT_EVENTS:
+        body["grant_id"] = facts.grant_id
     if facts.identity is not None:
         body["identity"] = dict(facts.identity)
     if facts.approver_identities is not None:

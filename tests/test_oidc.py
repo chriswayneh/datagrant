@@ -1101,7 +1101,9 @@ def test_cli_oidc_end_to_end_flows_receipts_and_mode_mismatch(
     skey = load_signing_key(tmp_path / "keys" / "signing.key")
     raw_log_text = log_path.read_text()
     assert alice_tok not in raw_log_text and carol_tok not in raw_log_text
-    rec_body = json.loads(raw_log_text.splitlines()[0])["receipt"]
+    bodies = [json.loads(line)["receipt"] for line in raw_log_text.splitlines() if line]
+    assert any(b["event"] == "not_approved" for b in bodies)
+    rec_body = next(b for b in bodies if b["event"] == "issued")
     assert rec_body["identity"] == {
         "source": "oidc",
         "iss": idp.issuer,
