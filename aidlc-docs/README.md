@@ -10,6 +10,7 @@ datagrant follows the [AWS AI-Driven Development Life Cycle](https://github.com/
 
 - [aidlc-state.md](aidlc-state.md) tracks the current stage.
 - [audit.md](audit.md) is the append-only log of decisions and approvals.
+- Proposed M2 / v0.4.0 (approvals and policy limits): [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md). Construction does not start until that design is approved in `audit.md`.
 
 Working rules: see [AGENTS.md](../AGENTS.md).
 
