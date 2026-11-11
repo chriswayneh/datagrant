@@ -24,7 +24,8 @@ import json
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -152,6 +153,49 @@ def _connect(args: argparse.Namespace) -> Any:
         return psycopg.connect(dsn, autocommit=True)
     except psycopg.Error as exc:
         raise CliError(f"cannot connect: {redact(str(exc), dsn).strip()}") from None
+
+
+def _pid_list(pids: tuple[int, ...]) -> str:
+    return ", ".join(str(p) for p in pids) if pids else "unknown"
+
+
+@contextmanager
+def _pg_session(
+    args: argparse.Namespace,
+    *,
+    lock: bool,
+    wait: bool = True,
+    ctx: Ctx | None = None,
+) -> Iterator[Any]:
+    """Connect; take the session advisory lock on mutating ``--apply`` only.
+
+    Access-creating paths wait (bounded), then fail closed. revoke/sweep
+    pass ``wait=False`` (try-lock) and proceed without the lock on contention.
+    """
+    from datagrant.pg.lock import LockBusy, holder_pids, lock_busy_message, session_lock
+
+    with _connect(args) as conn:
+        if not lock:
+            yield conn
+            return
+        if wait:
+            try:
+                with session_lock(conn, wait=True):
+                    yield conn
+            except LockBusy as exc:
+                raise CliError(lock_busy_message(exc.pids), EXIT_RECEIPT) from None
+            return
+        with session_lock(conn, wait=False) as acquired:
+            if not acquired:
+                msg = (
+                    "proceeding without the datagrant lock; held by pid "
+                    + _pid_list(holder_pids(conn))
+                )
+                if ctx is not None:
+                    _warn(ctx, msg)
+                else:
+                    print(f"datagrant: warning: {msg}", file=sys.stderr)
+            yield conn
 
 
 def _policy(args: argparse.Namespace) -> Any:
@@ -615,7 +659,7 @@ def cmd_request(ctx: Ctx) -> int:
     hash_key = (
         load_hash_key(resolve_key_path("hash", a.hash_key)) if _needs_hash(decision, cols) else None
     )
-    with _connect(a) as conn:
+    with _pg_session(a, lock=bool(a.apply)) as conn:
         catalog = inspect_table(conn, req.table)
         if a.apply:
             sink = _sink(a)  # no signing key, no grant
@@ -747,7 +791,7 @@ def cmd_approve(ctx: Ctx) -> int:
     policy = _policy(a)
     caller = _resolve_caller(ctx, policy)
     approver, source = caller.username, caller.source
-    with _connect(a) as conn:
+    with _pg_session(a, lock=bool(a.apply)) as conn:
         if a.apply:
             ensure_state(conn)
         pending = get_request(conn, a.request_id)
@@ -1210,7 +1254,7 @@ def cmd_revoke(ctx: Ctx) -> int:
         )
         return EXIT_OK
     sink, key_problem = _revoke_receipts(ctx)
-    with _connect(ctx.args) as conn:
+    with _pg_session(ctx.args, lock=True, wait=False, ctx=ctx) as conn:
         ensure_state(conn)
         r = revoke(conn, ctx.args.grant_id, "manual", sink)
     delivery = _deliver_quick(ctx, sink)
@@ -1255,7 +1299,7 @@ def cmd_sweep(ctx: Ctx) -> int:
         )
         return EXIT_OK
     sink, key_problem = _revoke_receipts(ctx)
-    with _connect(ctx.args) as conn:
+    with _pg_session(ctx.args, lock=True, wait=False, ctx=ctx) as conn:
         ensure_state(conn)
         results = sweep(conn, sink)
         expired = expire_stale_requests(conn)
@@ -1380,7 +1424,7 @@ def cmd_receipts_push(ctx: Ctx) -> int:
 def cmd_preflight(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state, preflight
 
-    with _connect(ctx.args) as conn:
+    with _pg_session(ctx.args, lock=bool(ctx.args.apply)) as conn:
         warnings = ensure_state(conn) if ctx.args.apply else preflight(conn)
     if not ctx.args.apply:
         warnings = [*warnings, "dry run: state schemas not created/updated; use --apply"]
