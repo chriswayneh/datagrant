@@ -1554,17 +1554,20 @@ def cmd_preflight(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state, preflight
     from datagrant.policy import load_policy
 
+    # Dry run does not read the policy (v0.4.0). --apply loads --policy or
+    # $DATAGRANT_POLICY so strict_preflight / file-mode gates can run.
     policy = None
-    path = _policy_path(ctx.args)
-    if path is not None:
-        policy = load_policy(path)
-    _host_file_gate(
-        ctx,
-        access_creating=True,
-        apply=bool(ctx.args.apply),
-        policy=policy,
-        policy_path=path,
-    )
+    if ctx.args.apply:
+        path = _policy_path(ctx.args)
+        if path is not None:
+            policy = load_policy(path)
+        _host_file_gate(
+            ctx,
+            access_creating=True,
+            apply=True,
+            policy=policy,
+            policy_path=path,
+        )
     with _pg_session(ctx.args, lock=bool(ctx.args.apply)) as conn:
         warnings = ensure_state(conn) if ctx.args.apply else preflight(conn)
     public = list(warnings)

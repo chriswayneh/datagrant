@@ -37,7 +37,8 @@ class ModeReport:
 
     @property
     def owner_mismatch(self) -> bool:
-        return os.name == "posix" and self.st_uid != os.geteuid()
+        geteuid = getattr(os, "geteuid", None)
+        return geteuid is not None and self.st_uid != geteuid()
 
     @property
     def parent_group_other_writable(self) -> bool:

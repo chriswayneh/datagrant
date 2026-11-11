@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from test_cli_flows import CAT, POLICY, REQ, FakeConn
+from test_policy import doc, table
 
 from datagrant import cli
 from datagrant.pg import grant as g
 from datagrant.pg import revoke as rv
 from datagrant.policy import PolicyError, parse_policy
-from test_cli_flows import CAT, POLICY, REQ, FakeConn
-from test_policy import doc, table
 
 
 @pytest.fixture
@@ -117,14 +117,43 @@ def test_strict_preflight_dry_run_still_reports(
     assert not setup["applied"]
 
 
-def test_strict_preflight_preflight_apply_exits_1(setup: dict[str, Any]) -> None:
+def test_strict_preflight_preflight_apply_creates_state_then_exits_1(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = {"n": 0}
+
+    def ens(c: Any) -> list[str]:
+        called["n"] += 1
+        return ["PUBLIC can CREATE in schema public"]
+
+    monkeypatch.setattr(g, "ensure_state", ens)
     pol = setup["tmp"] / "strict.yaml"
     pol.write_text(POLICY.format(approval="auto") + "strict_preflight: true\n")
     os.chmod(pol, 0o600)
     code, d = run("preflight", "--apply", "--policy", str(pol))
     assert code == cli.EXIT_FAILED
+    assert called["n"] == 1
     assert d["warnings"]
     assert any("PUBLIC" in w for w in d["warnings"])
+
+
+def test_preflight_dry_run_ignores_missing_policy_env(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAGRANT_POLICY", "/nonexistent")
+    code, d = run("preflight")
+    assert code == cli.EXIT_OK
+    assert "warnings" in d
+
+
+def test_preflight_apply_bad_policy_exits_1(
+    setup: dict[str, Any], tmp_path: Path
+) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("version: 2\n")
+    code, d = run("preflight", "--apply", "--policy", str(bad))
+    assert code == cli.EXIT_FAILED
+    assert "error" in d
 
 
 def test_strict_preflight_does_not_block_revoke(
