@@ -114,4 +114,4 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 
 ## M2 / v0.4.0: approvals and policy limits (proposed)
 
-Design approved (PR #33, `ffb02d3`). Construction PR 2 (merged) implemented `pending_ttl`, `max_columns`, and `max_concurrent_grants`. Construction PR 3 (merged) implemented denial and request-expiry receipts. This PR implements policy-wide quorum (`approvals_required` 1..8, `approval_recorded`, additive `requests.approvals`). Remaining PRs: SoD, docs. [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
+Design approved (PR #33, `ffb02d3`). Construction PRs 2-4 (merged) implemented policy limits, denial/expiry receipts, and quorum. This PR implements optional `separation_of_duties: distinct-groups` (refuse when requester groups ∩ approver groups ∩ table `allowed_groups` is non-empty) and the quorum `claim_request` incoming-vote merge. Remaining PR: docs. [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).

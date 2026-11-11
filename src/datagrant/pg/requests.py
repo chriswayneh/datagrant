@@ -333,8 +333,15 @@ def claim_request(
     policy_sha256: str = "",
     issuer: str | None = None,
     can_approve: Callable[[Mapping[str, Any]], bool] | None = None,
-) -> None:
-    """Lock the pending row, merge votes, re-check quorum, claim. Caller's transaction."""
+) -> list[dict[str, Any]]:
+    """Lock the pending row, merge the caller's new vote, re-check, claim.
+
+    ``votes`` is only the caller's new vote (empty if they already counted),
+    not a snapshot of every approval. Stored votes that were dropped after
+    the in-memory snapshot stay dropped. Must run in the caller's transaction.
+    Returns the eligible votes counted for this claim (the set the grant
+    and issued receipt must name).
+    """
     r = conn.execute(
         sql.SQL("SELECT {} FROM {}.requests WHERE id = %s FOR UPDATE").format(
             sql.SQL(_REQUEST_COLS), sql.Identifier(STATE_SCHEMA)
@@ -371,6 +378,7 @@ def claim_request(
     ).fetchone()
     if claimed is None:
         raise GrantError(f"request {request_id} is not pending (or has expired)")
+    return counted
 
 
 def drop_approval(

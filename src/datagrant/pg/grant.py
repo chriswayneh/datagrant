@@ -291,6 +291,23 @@ def new_password() -> str:
     return secrets.token_urlsafe(32)
 
 
+def _require_counted_matches_plan(
+    plan: GrantPlan, counted: Sequence[Mapping[str, Any]]
+) -> None:
+    """Fail closed when the locked counted set is not the plan's approvers."""
+    if plan.facts is None:
+        raise GrantError(
+            f"grant {plan.grant_id}: counted approvers changed during claim; retry approve"
+        )
+    locked = tuple(str(v.get("approver")) for v in counted)
+    planned = tuple(plan.facts.approvers)
+    if locked != planned:
+        raise GrantError(
+            f"grant {plan.grant_id}: counted approvers changed during claim "
+            f"({list(locked)} vs plan {list(planned)}); retry approve"
+        )
+
+
 def apply_plan(
     conn: psycopg.Connection,
     plan: GrantPlan,
@@ -309,7 +326,10 @@ def apply_plan(
     With ``receipts``, an ``issued`` receipt is written after commit. If that
     write fails the grant is revoked at once (no receipt, no access) and
     GrantError is raised. Quorum's Nth vote is claimed inside this same
-    transaction (``FOR UPDATE``, re-check eligible votes, write approvals).
+    transaction (``FOR UPDATE``, merge the caller's new vote with the locked
+    row, re-check eligible votes, write approvals). Plan facts are fixed
+    before that lock, so the counted names must match ``plan.facts.approvers``
+    or the transaction rolls back (request stays pending; retry approve).
     """
     try:
         with conn.transaction():
@@ -334,7 +354,7 @@ def apply_plan(
                 if approvals is not None:
                     from datagrant.pg.requests import claim_request
 
-                    claim_request(
+                    counted = claim_request(
                         conn,
                         request_id,
                         grant_id=plan.grant_id,
@@ -345,6 +365,7 @@ def apply_plan(
                         issuer=issuer,
                         can_approve=can_approve,
                     )
+                    _require_counted_matches_plan(plan, counted)
                 else:
                     claimed = conn.execute(
                         sql.SQL(
