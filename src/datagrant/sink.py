@@ -324,12 +324,21 @@ def parse_sink_url(url: str, token: str | None = None) -> ReceiptSink:
             "receipt sink URL must not contain credentials; use $" + SINK_TOKEN_ENV
         )
     if u.scheme == "file":
-        if u.netloc not in ("", "localhost") or not u.path or u.query or u.fragment:
+        netloc, path = u.netloc, u.path
+        # Windows: "file://" + r"C:\dir\f" -> netloc='C', path='\dir\f'
+        #          "file://C:/dir/f"      -> netloc='C:', path='/dir/f'
+        if len(netloc) == 2 and netloc[1] == ":" and netloc[0].isalpha():
+            path = netloc + path
+            netloc = ""
+        elif len(netloc) == 1 and netloc.isalpha() and path.startswith("\\"):
+            path = netloc + ":" + path
+            netloc = ""
+        if netloc not in ("", "localhost") or not path or u.query or u.fragment:
             raise SinkConfigError("file sink must be file:///absolute/path")
-        path = urllib.request.url2pathname(u.path)
-        if not os.path.isabs(path):
+        converted = urllib.request.url2pathname(path)
+        if not os.path.isabs(converted):
             raise SinkConfigError("file sink path must be absolute")
-        return FileSink(path)
+        return FileSink(converted)
     if u.scheme == "https" or (u.scheme == "http" and host in _LOCAL_HOSTS):
         if not host:
             raise SinkConfigError("receipt sink URL has no host")
