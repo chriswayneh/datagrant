@@ -97,6 +97,8 @@ class Policy:
     max_concurrent_grants: int | None = None
     approvals_required: int = 1
     separation_of_duties: str = "none"
+    strict_preflight: bool = False
+    strict_policy_permissions: bool = False
 
     def concurrent_grant_cap(self, dataset: str) -> int | None:
         """Minimum of the policy-wide and dataset caps that are set, or None."""
@@ -188,6 +190,15 @@ def _check_keys(d: dict[str, Any], allowed: set[str], where: str) -> None:
 def _positive_int(val: object, where: str) -> int:
     if isinstance(val, bool) or not isinstance(val, int) or val < 1:
         raise PolicyError(f"{where}: expected a positive integer")
+    return val
+
+
+def _opt_bool(data: dict[str, Any], key: str, where: str) -> bool:
+    if key not in data:
+        return False
+    val = data[key]
+    if not isinstance(val, bool):
+        raise PolicyError(f"{where}.{key}: expected true/false")
     return val
 
 
@@ -445,6 +456,8 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
             "max_concurrent_grants",
             "approvals_required",
             "separation_of_duties",
+            "strict_preflight",
+            "strict_policy_permissions",
         },
         "policy",
     )
@@ -552,6 +565,8 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
                 f"policy.separation_of_duties: must be one of {sorted(SOD_MODES)}"
             )
         sod = raw_sod
+    strict_preflight = _opt_bool(data, "strict_preflight", "policy")
+    strict_policy_permissions = _opt_bool(data, "strict_policy_permissions", "policy")
     return Policy(
         version,
         approval,
@@ -565,6 +580,8 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         max_cg,
         approvals_required,
         sod,
+        strict_preflight,
+        strict_policy_permissions,
     )
 
 
