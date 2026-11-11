@@ -8,7 +8,7 @@ Run `datagrant COMMAND --help` for the exact flags of your installed version. Th
 
 ## Conventions
 
-- **Dry run by default.** Any command that changes something (`keys init`, `request`, `approve`, `revoke`, `sweep`, `preflight`) only reports what it would do unless you pass `--apply`. `--dry-run` is accepted as a no-op. Passing both `--apply` and `--dry-run` exits 2.
+- **Dry run by default.** Any command that changes something (`keys init`, `request`, `approve`, `revoke`, `sweep`, `preflight`) only reports what it would do unless you pass `--apply`. `--dry-run` is accepted as a no-op. Passing both `--apply` and `--dry-run` exits 2. `doctor` is read-only and does not take `--apply`.
 - **`--json`** gives machine-readable output and can go before or after the command.
 - **Per-command flags.** Each command accepts only the shared flags it uses (see the table below). Using a flag a command doesn't take, for example `policy check --dsn ...`, exits 2.
 - **Secrets are never echoed.** DSN `user:pass@` and `password=` forms are redacted from errors at every password length. An extracted DSN password of 4 or more characters is also removed wherever it appears in the message; shorter ones are not globally replaced, so they do not destroy the rest of the text. Sink bearer tokens and OIDC ID tokens are redacted from errors, warnings and JSON. The one-time database password is printed once, to the person it belongs to. There is no `--oidc-token` flag: putting a token on `argv` would leak via `ps` and shell history.
@@ -37,7 +37,7 @@ Key paths resolve in this order: explicit flag, then environment variable, then 
 | :---: | --- |
 | 0 | Success, including a clean dry run and "nothing to do". |
 | 1 | Denied or failed: policy denial (including `max_columns` and `max_concurrent_grants`), invalid policy, failed check, bad receipt chain, database error, keys that already exist, a bad or expired OIDC token, a token-file that cannot be read (missing, symlink, not `0600` on POSIX, too large), or `approve` identity-mode / issuer mismatch. |
-| 2 | Usage error: unknown or inapplicable flag, an invalid receipt sink URL, mode or token, `--apply` with `--dry-run`, missing DSN or policy, both keys resolving to the same file, `--as-user` when `identity.mode` is `oidc`, `--oidc-token-file` when `identity.mode` is `local`, a missing OIDC token in `oidc` mode, or an explicit `--pending-ttl` longer than `policy.pending_ttl` in `two-person` mode. |
+| 2 | Usage error: unknown or inapplicable flag, an invalid receipt sink URL, mode or token, `--apply` with `--dry-run`, missing DSN or policy (except `doctor`, which reports these as failed checks, exit 1), both keys resolving to the same file, `--as-user` when `identity.mode` is `oidc`, `--oidc-token-file` when `identity.mode` is `local`, a missing OIDC token in `oidc` mode, or an explicit `--pending-ttl` longer than `policy.pending_ttl` in `two-person` mode. |
 | 3 | `revoke`/`sweep`: access was removed but a receipt could not be written (including `request_expired` for a pending request that sweep already expired). `request --apply` / `approve --apply`: a `denied`, `not_approved`, or `approval_recorded` receipt could not be written, so nothing was issued (a failed `approval_recorded` write also removes that caller's vote). `request`/`approve`/`preflight --apply`: another session still holds the datagrant advisory lock after the wait bound, so nothing was issued. `request`/`approve` with a sink: the outbox cursor is unusable, so nothing was issued; or, in `required` mode, the `issued` receipt could not be delivered, so the grant was revoked (the message says if the grant is STILL ACTIVE because that revoke failed). `receipts push --apply`: some receipts are still pending. |
 | 4 | `revoke`/`sweep`: a revoke failed. The grant stays active and its role stays locked out; the error is in `last_error`. |
 
@@ -71,6 +71,9 @@ Revokes every expired grant (`expired` receipts) and expires stale pending reque
 Checks every signature, sequence number and hash link, and reports the first break. It prints the head hash. Record that hash somewhere off the host and pass it back with `--expect-head` to detect truncation of the newest entries.
 
 With `--sink URL` (alias `--receipt-sink`, or `DATAGRANT_RECEIPT_SINK`), it also reads the sink head and compares it with the local chain. It never writes to the sink or the outbox cursor. Equal heads pass. A sink behind the local log passes if the local receipt at the sink's `seq` hashes to the sink head; the rest are reported as not yet delivered. A sink ahead of the local log, or a different hash at the same `seq`, fails (exit 1), as does a sink that can't be reached. It also fails if the sink head is behind the last `seq` the sink acknowledged in `<receipt-log>.sink` (sink lost or replaced), or if that cursor is unreadable, corrupt, or ahead of the local log. `--json` adds `sink_seq`, `sink_head_sha256` and `undelivered` (null when the sink check didn't produce them). If the local chain fails, the sink isn't checked.
+
+### `doctor [--policy FILE]`
+Read-only host and database checks, in order: key files, policy parse, POSIX policy-file mode (warn if group/other-readable; does not fail), receipt-log and sink-cursor file mode on POSIX, DSN connect, `preflight` PUBLIC warnings (warn, does not fail), `pg_signal_backend` membership or superuser, ability to `SET log_statement` (superuser, or PostgreSQL 15+ `has_parameter_privilege`; PostgreSQL 14 and earlier require superuser), receipt-log chain head, optional sink cursor readability. Exit 0 if every check passes; exit 1 if any check fails (warnings are not failures); exit 2 on usage. A missing DSN, policy, or key is a failed check (exit 1), not a usage error. `--json` lists each check as `{name, status, detail}`. Does not take `--apply`, does not create schemas, keys, or grants, does not `SET log_statement`, and does not take the advisory lock.
 
 ### `preflight [--apply]`
 Creates datagrant's state schema (with `--apply`) and warns about `PUBLIC` defaults that every grant role inherits: `CONNECT` on other databases, `TEMP` in this database, and `CREATE` in schema `public`. A dry run only reports the warnings.
@@ -184,3 +187,4 @@ Bad settings exit 2 before any database work. Flags beat the environment.
 | `receipts verify` | | ✓ | | ✓ | ✓ | | | |
 | `receipts push` | | | | ✓ | ✓ | | | ✓ |
 | `preflight` | ✓ | | | | | | | ✓ |
+| `doctor` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | |
