@@ -5,7 +5,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 ## [Unreleased]
 
 ### Added
-- Session-level `pg_advisory_lock` on mutating `--apply` (`request`, `approve`, `revoke`, `sweep`, `preflight --apply`) using documented `DATAGRANT_ADVISORY_LOCK_KEY` (`0x64677401`). Taken before the concurrent-grant cap count; released with `pg_advisory_unlock` in a `finally` block. Dry runs do not lock. ([design](docs/design/ops-hardening.md))
+- Session-level advisory lock (`DATAGRANT_ADVISORY_LOCK_KEY` `0x64677401`) on mutating `--apply` before the concurrent-grant cap count. `request` / `approve` / `preflight --apply` wait up to 30s then fail closed (exit 3, no grant) if another session holds the key. `revoke` / `sweep` use `pg_try_advisory_lock` and proceed without the lock on contention (stderr warning names the holding pid(s)). Unlock in `finally` if acquired. Dry runs do not lock. `PUBLIC` can `EXECUTE pg_advisory_lock`; the lock is a coordination aid, not a security boundary. ([design](docs/design/ops-hardening.md))
 
 ## [0.4.0] - 2026-11-10
 

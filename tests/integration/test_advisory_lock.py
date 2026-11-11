@@ -13,7 +13,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from datagrant.cli import EXIT_FAILED, EXIT_OK, main
+from datagrant.cli import EXIT_FAILED, EXIT_OK, EXIT_RECEIPT, main
 from datagrant.pg.lock import (
     DATAGRANT_ADVISORY_LOCK_KEY,
     acquire_advisory_lock,
@@ -194,3 +194,111 @@ def test_concurrent_cap_race_cannot_double_insert(env: dict[str, Path]) -> None:
     assert len(granted) == 1
     assert len(denied) == 1
     assert any("max_concurrent_grants" in r for r in denied[0].get("reasons", []))
+
+
+def login(conn_info: dict[str, Any], password: str) -> psycopg.Connection:
+    return psycopg.connect(**conn_info, password=password, autocommit=True)
+
+
+def test_revoke_completes_and_terminates_when_lock_held(
+    env: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert DSN
+    code, g = run("request", "--apply", "--policy", str(env["policy"]), *REQ)
+    assert code == EXIT_OK and g["status"] == "granted"
+    gconn = login(g["connection"], g["password"])
+    assert gconn.execute("SELECT 1").fetchone() == (1,)
+    with psycopg.connect(DSN, autocommit=True) as holder:
+        acquire_advisory_lock(holder)
+        pid = holder.execute("SELECT pg_catalog.pg_backend_pid()").fetchone()
+        assert pid is not None
+        capsys.readouterr()
+        code, r = run("revoke", "--apply", g["grant_id"])
+        err = capsys.readouterr().err
+        assert code == EXIT_OK and r["outcome"] == "revoked"
+        assert str(pid[0]) in err and "lock" in err.lower()
+        release_advisory_lock(holder)
+    with pytest.raises(psycopg.OperationalError):
+        gconn.execute("SELECT 1")
+    gconn.close()
+
+
+def test_sweep_completes_when_lock_held(
+    env: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert DSN
+    code, g = run("request", "--apply", "--policy", str(env["policy"]), *REQ)
+    assert code == EXIT_OK
+    gconn = login(g["connection"], g["password"])
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(
+            "UPDATE datagrant.grants SET expires_at = now() - interval '1 minute' WHERE id = %s",
+            (g["grant_id"],),
+        )
+    with psycopg.connect(DSN, autocommit=True) as holder:
+        acquire_advisory_lock(holder)
+        pid = holder.execute("SELECT pg_catalog.pg_backend_pid()").fetchone()
+        assert pid is not None
+        capsys.readouterr()
+        code, sw = run("sweep", "--apply")
+        err = capsys.readouterr().err
+        assert code == EXIT_OK and [x["outcome"] for x in sw["results"]] == ["revoked"]
+        assert str(pid[0]) in err
+        release_advisory_lock(holder)
+    with pytest.raises(psycopg.OperationalError):
+        gconn.execute("SELECT 1")
+    gconn.close()
+
+
+def test_request_times_out_fail_closed_no_grant(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert DSN
+    monkeypatch.setattr("datagrant.pg.lock.LOCK_WAIT_SECONDS", 0.05)
+    with psycopg.connect(DSN, autocommit=True) as holder:
+        acquire_advisory_lock(holder)
+        pid = holder.execute("SELECT pg_catalog.pg_backend_pid()").fetchone()
+        assert pid is not None
+        code, d = run("request", "--apply", "--policy", str(env["policy"]), *REQ)
+        assert code == EXIT_RECEIPT
+        assert "datagrant lock" in d.get("error", "")
+        assert str(pid[0]) in d.get("error", "")
+        n = holder.execute(
+            "SELECT count(*) FROM datagrant.grants WHERE status = 'active'"
+        ).fetchone()
+        assert n == (0,)
+        release_advisory_lock(holder)
+
+
+def test_approve_times_out_fail_closed_no_grant(
+    env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert DSN
+    two = tmp_path / "two.yaml"
+    two.write_text(
+        POLICY.replace("approval: auto", "approval: two-person\napprovers: [sec]").replace(
+            "ml: [alice]", "ml: [alice]\n  sec: [carol]"
+        )
+    )
+    code, p = run("request", "--apply", "--policy", str(two), *REQ)
+    assert code == EXIT_OK and p["status"] == "pending"
+    monkeypatch.setattr("datagrant.pg.lock.LOCK_WAIT_SECONDS", 0.05)
+    with psycopg.connect(DSN, autocommit=True) as holder:
+        acquire_advisory_lock(holder)
+        pid = holder.execute("SELECT pg_catalog.pg_backend_pid()").fetchone()
+        assert pid is not None
+        code, d = run(
+            "approve", "--apply", p["request_id"], "--policy", str(two), "--as-user", "carol"
+        )
+        assert code == EXIT_RECEIPT
+        assert "datagrant lock" in d.get("error", "")
+        assert str(pid[0]) in d.get("error", "")
+        n = holder.execute(
+            "SELECT count(*) FROM datagrant.grants WHERE status = 'active'"
+        ).fetchone()
+        assert n == (0,)
+        st = holder.execute(
+            "SELECT status FROM datagrant.requests WHERE id = %s", (p["request_id"],)
+        ).fetchone()
+        assert st == ("pending",)
+        release_advisory_lock(holder)
