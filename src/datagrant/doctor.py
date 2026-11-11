@@ -49,16 +49,16 @@ CHECK_ORDER = (
 )
 
 _SIGNAL_SQL = (
-    "SELECT current_setting('is_superuser') = 'on'"
-    " OR ("
-    " EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pg_signal_backend')"
-    " AND pg_catalog.pg_has_role(pg_catalog.current_user, 'pg_signal_backend', 'USAGE')"
-    ")"
+    "SELECT r.rolsuper OR COALESCE(("
+    " SELECT pg_catalog.pg_has_role(r.oid, g.oid, 'USAGE')"
+    " FROM pg_catalog.pg_roles g WHERE g.rolname = 'pg_signal_backend'"
+    "), false)"
+    " FROM pg_catalog.pg_roles r WHERE r.rolname = current_user"
 )
-_SUPER_SQL = "SELECT current_setting('is_superuser') = 'on'"
+_SUPER_SQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user"
 _VERSION_SQL = "SELECT current_setting('server_version_num')"
 _PARAM_SQL = (
-    "SELECT pg_catalog.has_parameter_privilege(pg_catalog.current_user, 'log_statement', 'SET')"
+    "SELECT pg_catalog.has_parameter_privilege(current_user, 'log_statement', 'SET')"
 )
 _LOG_STATEMENT_NEED = (
     "role cannot SET log_statement; needs superuser or PostgreSQL 15+"

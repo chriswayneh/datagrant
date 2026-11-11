@@ -61,7 +61,8 @@ def test_doctor_exits_0_on_live_dsn(env: dict[str, Path]) -> None:
         }
         log_stmt = conn.execute("SHOW log_statement").fetchone()
     code, d = run("doctor", "--policy", str(env["policy"]))
-    assert code == EXIT_OK and d["ok"] is True
+    assert code == EXIT_OK, d
+    assert d["ok"] is True
     assert [c["name"] for c in d["checks"]] == list(CHECK_ORDER)
     assert all(c["status"] != STATUS_FAIL for c in d["checks"])
     with psycopg.connect(DSN, autocommit=True) as conn:

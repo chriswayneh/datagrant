@@ -78,7 +78,7 @@ class FakeConn:
         elif "pg_signal_backend" in low:
             row = (self.superuser or self.signal,)
             rows = [row]
-        elif "is_superuser" in low:
+        elif "rolsuper" in low or "is_superuser" in low:
             row = (self.superuser,)
             rows = [row]
         else:
@@ -170,6 +170,7 @@ def test_doctor_missing_key_fails(env: dict[str, Any], tmp_path: Path) -> None:
     assert "signing key" in _by_name(d)[CHECK_KEYS]["detail"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_doctor_group_readable_key_fails(env: dict[str, Any]) -> None:
     sk = Path(os.environ["DATAGRANT_SIGNING_KEY"])
     os.chmod(sk, 0o644)
@@ -187,6 +188,7 @@ def test_doctor_bad_policy_fails(env: dict[str, Any], tmp_path: Path) -> None:
     assert _by_name(d)[CHECK_POLICY]["status"] == STATUS_FAIL
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_doctor_policy_0644_warns_does_not_fail(env: dict[str, Any]) -> None:
     pol = Path(env["pol"])
     os.chmod(pol, 0o644)
@@ -196,6 +198,7 @@ def test_doctor_policy_0644_warns_does_not_fail(env: dict[str, Any]) -> None:
     assert "group/other" in _by_name(d)[CHECK_POLICY_PERMISSIONS]["detail"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_doctor_receipt_log_0644_fails(env: dict[str, Any]) -> None:
     log = Path(os.environ["DATAGRANT_RECEIPT_LOG"])
     log.write_text("")
@@ -337,13 +340,14 @@ def test_doctor_unreadable_cursor_fails(env: dict[str, Any]) -> None:
         "--policy",
         env["pol"],
         "--receipt-sink",
-        "file://" + str(env["tmp"] / "sink.jsonl"),
+        (env["tmp"] / "sink.jsonl").as_uri(),
     )
     assert code == cli.EXIT_FAILED
     assert _by_name(d)[CHECK_SINK_CURSOR]["status"] == STATUS_FAIL
     assert "corrupt" in _by_name(d)[CHECK_SINK_CURSOR]["detail"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_doctor_group_readable_cursor_fails_permissions(env: dict[str, Any]) -> None:
     log = Path(os.environ["DATAGRANT_RECEIPT_LOG"])
     log.write_text("")
@@ -404,7 +408,7 @@ def test_doctor_sink_cursor_readable(env: dict[str, Any]) -> None:
         "--policy",
         env["pol"],
         "--receipt-sink",
-        "file://" + str(env["tmp"] / "sink.jsonl"),
+        (env["tmp"] / "sink.jsonl").as_uri(),
     )
     assert code == cli.EXIT_OK
     assert _by_name(d)[CHECK_SINK_CURSOR]["status"] == STATUS_PASS
