@@ -9,8 +9,9 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | v0.1.0 | Expiring, masked, receipted Postgres access from the CLI | ✅ Released |
 | v0.2.0 | Tighter privacy controls and off-host evidence | ✅ Released |
 | v0.3.0 | Real identity | ✅ Released |
-| v0.4.0 | Approvals and policy limits | Ready, release pending |
-| v0.5.0+ | More warehouses | Planned |
+| v0.4.0 | Approvals and policy limits | ✅ Released |
+| v0.5.0 | Ops hardening | Design |
+| v0.6.0+ | More warehouses | Planned |
 
 ## v0.1.0: done
 
@@ -39,16 +40,23 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | --- | --- | :---: |
 | OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. `policy.identity`, `--oidc-token-file` / `$DATAGRANT_OIDC_TOKEN`, mode parity and `(iss, sub)` checks. Design: [docs/design/oidc-identity.md](docs/design/oidc-identity.md). Demo: [docs/demo-oidc.md](docs/demo-oidc.md). | ✅ |
 
-## v0.4.0: ready, release pending
+## v0.4.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
 | Approvals and policy limits | Policy-wide N-of-M quorum (cap 8); `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty; policy-capped pending TTL, `max_columns`, max concurrent grants, denial/expiry receipts on `--apply`. No break-glass (emergency path is a reviewed policy edit to `auto`). Design: [docs/design/approvals-policy-limits.md](docs/design/approvals-policy-limits.md). | ✅ |
 
+## v0.5.0: design
+
+| Item | What | Status |
+| --- | --- | :---: |
+| Ops hardening | Session advisory lock on mutating `--apply`; `datagrant doctor`; optional `strict_preflight`; POSIX 0600 on policy and receipt log; `SET LOCAL log_statement = none` in grant/revoke transactions. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). Construction waits on maintainer approval in [audit.md](aidlc-docs/audit.md). | Design |
+
 ## Next
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.5.0+ |
+| Ops hardening (advisory lock, doctor, strict preflight, file modes, statement logging) | Production gaps on the Postgres CLI after v0.4.0. | v0.5.0 |
+| Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.6.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.

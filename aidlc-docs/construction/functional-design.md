@@ -114,4 +114,8 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 
 ## M2 / v0.4.0: approvals and policy limits (implemented)
 
-Implemented (PRs #34 to #38). v0.4.0 is ready, release pending; not tagged. Policy limits (`pending_ttl`, `max_columns`, `max_concurrent_grants`), denial/expiry receipts on `--apply` (`denied`, `not_approved`, `request_expired`), policy-wide quorum (`approvals_required` 1..8, `approval_recorded`, fail-closed claim mismatch), and optional `separation_of_duties: distinct-groups`. Authoritative pages: [docs/policy.md](../../docs/policy.md), [docs/cli.md](../../docs/cli.md), [docs/security.md](../../docs/security.md). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
+Implemented (PRs #34 to #38). Tagged v0.4.0. Policy limits (`pending_ttl`, `max_columns`, `max_concurrent_grants`), denial/expiry receipts on `--apply` (`denied`, `not_approved`, `request_expired`), policy-wide quorum (`approvals_required` 1..8, `approval_recorded`, fail-closed claim mismatch), and optional `separation_of_duties: distinct-groups`. Authoritative pages: [docs/policy.md](../../docs/policy.md), [docs/cli.md](../../docs/cli.md), [docs/security.md](../../docs/security.md). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
+
+## M3 / v0.5.0: ops hardening (design)
+
+Proposed. Construction waits on maintainer approval in [audit.md](../audit.md). Advisory lock on mutating `--apply`; `datagrant doctor`; optional `strict_preflight`; POSIX 0600 on policy and receipt log; `SET LOCAL log_statement = none` in grant/revoke transactions. Warehouses, rate limits, and `max_rows` are out of this milestone. Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
