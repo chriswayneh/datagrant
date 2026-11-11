@@ -6,14 +6,13 @@ and does not take the session advisory lock.
 
 from __future__ import annotations
 
-import os
-import stat
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from datagrant.hostfs import inspect_existing, posix_mode_problem
 from datagrant.keys import KeyFileError, load_hash_key, load_signing_key
 from datagrant.outbox import cursor_path, read_cursor
 from datagrant.policy import PolicyError, load_policy
@@ -77,28 +76,33 @@ class Check:
         return {"name": self.name, "status": self.status, "detail": self.detail}
 
 
-def posix_mode_problem(path: Path, what: str) -> str | None:
-    """Return a problem string if ``path`` exists and is not a private regular file.
-
-    Missing paths are not a problem (caller decides). Uses the opened fd
-    (``O_NOFOLLOW``) the same way key files are checked.
-    """
-    if not path.exists() and not path.is_symlink():
-        return None
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        return f"cannot open {what} {path}: {exc.strerror}"
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return f"{what} {path} is not a regular file"
-        if os.name == "posix" and st.st_mode & 0o077:
-            return f"{what} {path} is group/other-readable (chmod 600)"
-        return None
-    finally:
-        os.close(fd)
+def _file_check(
+    add: Callable[[str, str, str], None],
+    name: str,
+    path: Path,
+    what: str,
+    *,
+    fail_on_access: bool,
+) -> None:
+    result = inspect_existing(path, what)
+    msgs: list[str] = []
+    access: str | None = None
+    if isinstance(result, str):
+        access = result
+        msgs.append(result)
+    elif result is not None:
+        access = result.access_message()
+        if access:
+            msgs.append(access)
+        msgs.extend(result.extra_warnings())
+    if not msgs:
+        add(name, STATUS_PASS, str(path))
+        return
+    detail = "; ".join(msgs)
+    if access and fail_on_access:
+        add(name, STATUS_FAIL, detail)
+    else:
+        add(name, STATUS_WARN, detail)
 
 
 def _bool_row(row: Any) -> bool:
@@ -146,17 +150,20 @@ def run_doctor(
         add(CHECK_POLICY, STATUS_FAIL, "no policy: pass --policy or set $DATAGRANT_POLICY")
         add(CHECK_POLICY_PERMISSIONS, STATUS_SKIP, "no policy path")
     else:
+        pol = None
         try:
             pol = load_policy(policy_path)
             add(CHECK_POLICY, STATUS_PASS, f"sha256={pol.sha256}")
         except (PolicyError, OSError) as exc:
             msg = str(exc) if not isinstance(exc, OSError) else f"{exc.strerror}: {exc.filename}"
             add(CHECK_POLICY, STATUS_FAIL, msg)
-        problem = posix_mode_problem(policy_path, "policy file")
-        if problem:
-            add(CHECK_POLICY_PERMISSIONS, STATUS_WARN, problem)
-        else:
-            add(CHECK_POLICY_PERMISSIONS, STATUS_PASS, str(policy_path))
+        _file_check(
+            add,
+            CHECK_POLICY_PERMISSIONS,
+            policy_path,
+            "policy file",
+            fail_on_access=bool(pol and pol.strict_policy_permissions),
+        )
 
     log_probs = [
         p
@@ -166,8 +173,18 @@ def run_doctor(
         )
         if p
     ]
+    extras: list[str] = []
+    for pth, label in (
+        (receipt_log, "receipt log"),
+        (cursor_path(receipt_log), "sink cursor"),
+    ):
+        inspected = inspect_existing(pth, label)
+        if inspected is not None and not isinstance(inspected, str):
+            extras.extend(inspected.extra_warnings())
     if log_probs:
-        add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_FAIL, "; ".join(log_probs))
+        add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_FAIL, "; ".join(log_probs + extras))
+    elif extras:
+        add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_WARN, "; ".join(extras))
     elif not receipt_log.exists() and not cursor_path(receipt_log).exists():
         add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_PASS, "no receipt log or cursor yet")
     else:

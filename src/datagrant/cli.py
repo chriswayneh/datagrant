@@ -221,7 +221,8 @@ def _remote(args: argparse.Namespace) -> Any:
 
 
 def _log_path(args: argparse.Namespace) -> Path:
-    return Path(args.receipt_log) if args.receipt_log else receipt.default_log_path()
+    raw = getattr(args, "receipt_log", None)
+    return Path(raw) if raw else receipt.default_log_path()
 
 
 def _hide_token(text: str, extra_oidc_token: str | None = None) -> str:
@@ -236,6 +237,75 @@ def _hide_token(text: str, extra_oidc_token: str | None = None) -> str:
 
 def _warn(ctx: Ctx, msg: str) -> None:
     print(f"datagrant: warning: {_hide_token(msg, ctx.oidc_token)}", file=sys.stderr)
+
+
+def _policy_path(args: argparse.Namespace) -> Path | None:
+    raw = getattr(args, "policy", None) or os.environ.get(POLICY_ENV)
+    return Path(raw) if raw else None
+
+
+def _host_file_gate(
+    ctx: Ctx,
+    *,
+    access_creating: bool,
+    apply: bool,
+    policy: Any | None,
+    policy_path: Path | None,
+) -> None:
+    """Warn (or refuse) on policy-file and receipt-log modes.
+
+    Access-creating ``--apply`` refuses a group/other-accessible receipt log,
+    and refuses a group/other-accessible policy file when
+    ``strict_policy_permissions`` is set. revoke/sweep never refuse for these
+    reasons (receipt-log problems become exit 3 after access is removed).
+    Dry runs warn. Extra findings (wrong owner, group/other-writable parent)
+    are always warnings.
+    """
+    from datagrant.hostfs import inspect_existing
+
+    def _report(result: Any, *, refuse: bool) -> None:
+        msgs: list[str] = []
+        access: str | None = None
+        if isinstance(result, str):
+            access = result
+            msgs.append(result)
+        elif result is not None:
+            access = result.access_message()
+            if access:
+                msgs.append(access)
+            msgs.extend(result.extra_warnings())
+        if not msgs:
+            return
+        if refuse and access:
+            raise CliError("; ".join(msgs), EXIT_FAILED)
+        for m in msgs:
+            _warn(ctx, m)
+
+    if policy_path is not None:
+        strict = bool(policy is not None and policy.strict_policy_permissions)
+        _report(
+            inspect_existing(policy_path, "policy file"),
+            refuse=apply and access_creating and strict,
+        )
+    log = _log_path(ctx.args)
+    _report(
+        inspect_existing(log, "receipt log"),
+        refuse=apply and access_creating,
+    )
+
+
+def _public_preflight_gate(ctx: Ctx, conn: Any, policy: Any, *, apply: bool) -> None:
+    """Warn on PUBLIC defaults; refuse access-creating --apply if strict_preflight."""
+    from datagrant.pg.grant import preflight
+
+    warnings = preflight(conn)
+    for w in warnings:
+        _warn(ctx, w)
+    if apply and policy.strict_preflight and warnings:
+        raise CliError(
+            "strict_preflight: PUBLIC defaults remain: " + "; ".join(warnings),
+            EXIT_FAILED,
+        )
 
 
 def _check_outbox(ctx: Ctx, local: Any) -> None:
@@ -639,6 +709,13 @@ def cmd_request(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
+    _host_file_gate(
+        ctx,
+        access_creating=True,
+        apply=bool(a.apply),
+        policy=policy,
+        policy_path=_policy_path(a),
+    )
     ttl = _request_pending_ttl(policy, a.pending_ttl)
     caller = _resolve_caller(ctx, policy)
     user, source = caller.username, caller.source
@@ -660,6 +737,7 @@ def cmd_request(ctx: Ctx) -> int:
         load_hash_key(resolve_key_path("hash", a.hash_key)) if _needs_hash(decision, cols) else None
     )
     with _pg_session(a, lock=bool(a.apply)) as conn:
+        _public_preflight_gate(ctx, conn, policy, apply=bool(a.apply))
         catalog = inspect_table(conn, req.table)
         if a.apply:
             sink = _sink(a)  # no signing key, no grant
@@ -789,9 +867,17 @@ def cmd_approve(ctx: Ctx) -> int:
 
     a = ctx.args
     policy = _policy(a)
+    _host_file_gate(
+        ctx,
+        access_creating=True,
+        apply=bool(a.apply),
+        policy=policy,
+        policy_path=_policy_path(a),
+    )
     caller = _resolve_caller(ctx, policy)
     approver, source = caller.username, caller.source
     with _pg_session(a, lock=bool(a.apply)) as conn:
+        _public_preflight_gate(ctx, conn, policy, apply=bool(a.apply))
         if a.apply:
             ensure_state(conn)
         pending = get_request(conn, a.request_id)
@@ -1227,6 +1313,13 @@ def cmd_revoke(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state
     from datagrant.pg.revoke import revoke
 
+    _host_file_gate(
+        ctx,
+        access_creating=False,
+        apply=bool(ctx.args.apply),
+        policy=None,
+        policy_path=_policy_path(ctx.args),
+    )
     if not ctx.args.apply:
         with _connect(ctx.args) as conn:
             rows = _grant_rows(conn, "WHERE id = %s", (ctx.args.grant_id,))
@@ -1276,6 +1369,13 @@ def cmd_sweep(ctx: Ctx) -> int:
     from datagrant.pg.revoke import sweep
     from datagrant.receipt import ReceiptError
 
+    _host_file_gate(
+        ctx,
+        access_creating=False,
+        apply=bool(ctx.args.apply),
+        policy=None,
+        policy_path=_policy_path(ctx.args),
+    )
     if not ctx.args.apply:
         with _connect(ctx.args) as conn:
             due = [
@@ -1452,15 +1552,33 @@ def cmd_doctor(ctx: Ctx) -> int:
 
 def cmd_preflight(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state, preflight
+    from datagrant.policy import load_policy
 
+    # Dry run does not read the policy (v0.4.0). --apply loads --policy or
+    # $DATAGRANT_POLICY so strict_preflight / file-mode gates can run.
+    policy = None
+    if ctx.args.apply:
+        path = _policy_path(ctx.args)
+        if path is not None:
+            policy = load_policy(path)
+        _host_file_gate(
+            ctx,
+            access_creating=True,
+            apply=True,
+            policy=policy,
+            policy_path=path,
+        )
     with _pg_session(ctx.args, lock=bool(ctx.args.apply)) as conn:
         warnings = ensure_state(conn) if ctx.args.apply else preflight(conn)
+    public = list(warnings)
     if not ctx.args.apply:
         warnings = [*warnings, "dry run: state schemas not created/updated; use --apply"]
     ctx.emit(
         {"warnings": warnings},
         "\n".join(f"WARNING: {w}" for w in warnings) or "preflight OK: no warnings",
     )
+    if ctx.args.apply and policy is not None and policy.strict_preflight and public:
+        return EXIT_FAILED
     return EXIT_OK
 
 
@@ -1672,7 +1790,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "preflight",
-        parents=[*only("json", "dsn"), apply],
+        parents=[*only("json", "dsn", "receipt_log"), pol, apply],
         help="check state and warn on PUBLIC defaults (dry run; --apply creates state)",
     ).set_defaults(fn=cmd_preflight)
     sub.add_parser(
@@ -1696,7 +1814,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
         cmd_receipts_push: ("receipt_log", "receipt_sink"),
         cmd_grant_list: ("dsn",),
         cmd_grant_status: ("dsn",),
-        cmd_preflight: ("dsn",),
+        cmd_preflight: ("dsn", "receipt_log"),
         cmd_doctor: _DOCTOR,
     }
     return set(table.get(fn, ()))

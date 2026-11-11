@@ -195,7 +195,18 @@ def test_doctor_policy_0644_warns_does_not_fail(env: dict[str, Any]) -> None:
     code, d = run("doctor", "--policy", str(pol))
     assert code == cli.EXIT_OK and d["ok"] is True
     assert _by_name(d)[CHECK_POLICY_PERMISSIONS]["status"] == STATUS_WARN
-    assert "group/other" in _by_name(d)[CHECK_POLICY_PERMISSIONS]["detail"]
+    assert "group/other-accessible" in _by_name(d)[CHECK_POLICY_PERMISSIONS]["detail"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_doctor_strict_policy_permissions_fails_0644(env: dict[str, Any]) -> None:
+    pol = Path(env["pol"])
+    pol.write_text(POLICY + "strict_policy_permissions: true\n")
+    os.chmod(pol, 0o644)
+    code, d = run("doctor", "--policy", str(pol))
+    assert code == cli.EXIT_FAILED
+    assert _by_name(d)[CHECK_POLICY_PERMISSIONS]["status"] == STATUS_FAIL
+    assert "group/other-accessible" in _by_name(d)[CHECK_POLICY_PERMISSIONS]["detail"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
