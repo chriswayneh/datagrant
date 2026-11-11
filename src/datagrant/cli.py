@@ -1421,6 +1421,35 @@ def cmd_receipts_push(ctx: Ctx) -> int:
     return EXIT_RECEIPT if res.error else EXIT_OK
 
 
+def cmd_doctor(ctx: Ctx) -> int:
+    from datagrant.doctor import STATUS_FAIL, run_doctor
+
+    a = ctx.args
+    dsn = a.dsn or os.environ.get(DSN_ENV)
+    policy = a.policy or os.environ.get(POLICY_ENV)
+    log = _log_path(a)
+
+    def scrub(msg: str) -> str:
+        return _hide_token(redact(msg, dsn), ctx.oidc_token)
+
+    checks = run_doctor(
+        signing_path=resolve_key_path("signing", a.signing_key),
+        hash_path=resolve_key_path("hash", a.hash_key),
+        policy_path=Path(policy) if policy else None,
+        receipt_log=log,
+        dsn=dsn,
+        sink_configured=_remote(a) is not None,
+        scrub=scrub,
+    )
+    ok = not any(c.status == STATUS_FAIL for c in checks)
+    payload = {"ok": ok, "checks": [c.as_dict() for c in checks]}
+    lines = [
+        f"{c.name}: {c.status}" + (f": {c.detail}" if c.detail else "") for c in checks
+    ]
+    ctx.emit(payload, "\n".join(lines))
+    return EXIT_OK if ok else EXIT_FAILED
+
+
 def cmd_preflight(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state, preflight
 
@@ -1441,6 +1470,7 @@ def cmd_preflight(ctx: Ctx) -> int:
 _SINK = ("receipt_sink", "receipt_sink_mode")
 _GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
 _REVOKING = ("json", "dsn", "signing_key", "receipt_log", *_SINK)
+_DOCTOR = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):
@@ -1645,6 +1675,11 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[*only("json", "dsn"), apply],
         help="check state and warn on PUBLIC defaults (dry run; --apply creates state)",
     ).set_defaults(fn=cmd_preflight)
+    sub.add_parser(
+        "doctor",
+        parents=[*only(*_DOCTOR), pol],
+        help="read-only host and database checks (no --apply)",
+    ).set_defaults(fn=cmd_doctor)
     return p
 
 
@@ -1662,6 +1697,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
         cmd_grant_list: ("dsn",),
         cmd_grant_status: ("dsn",),
         cmd_preflight: ("dsn",),
+        cmd_doctor: _DOCTOR,
     }
     return set(table.get(fn, ()))
 
