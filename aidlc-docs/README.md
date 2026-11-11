@@ -10,7 +10,7 @@ datagrant follows the [AWS AI-Driven Development Life Cycle](https://github.com/
 
 - [aidlc-state.md](aidlc-state.md) tracks the current stage.
 - [audit.md](audit.md) is the append-only log of decisions and approvals.
-- M2 / v0.4.0 (approvals and policy limits): implemented. Design: [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md). Release pending; not tagged.
+- M2 / v0.4.0 (approvals and policy limits): released 2026-11-10. Design: [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md).
 
 Working rules: see [AGENTS.md](../AGENTS.md).
 
