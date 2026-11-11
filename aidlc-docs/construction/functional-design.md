@@ -118,4 +118,4 @@ Implemented (PRs #34 to #38). v0.4.0 released 2026-11-10. Policy limits (`pendin
 
 ## M3 / v0.5.0: ops hardening (design)
 
-Proposed. Construction waits on maintainer approval in [audit.md](../audit.md). Advisory lock on mutating `--apply`; `datagrant doctor`; optional `strict_preflight`; POSIX 0600 on policy and receipt log; `SET LOCAL log_statement = none` in grant/revoke transactions. Warehouses, rate limits, and `max_rows` are out of this milestone. Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
+Proposed. Construction waits on maintainer approval in [audit.md](../audit.md). Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. Warehouses, rate limits, and `max_rows` are out of this milestone. Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).

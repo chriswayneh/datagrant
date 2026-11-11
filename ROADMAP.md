@@ -50,7 +50,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Ops hardening | Session advisory lock on mutating `--apply`; `datagrant doctor`; optional `strict_preflight`; POSIX 0600 on policy and receipt log; `SET LOCAL log_statement = none` in grant/revoke transactions. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). Construction waits on maintainer approval in [audit.md](aidlc-docs/audit.md). | Design |
+| Ops hardening | Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). Construction waits on maintainer approval in [audit.md](aidlc-docs/audit.md). | Design |
 
 ## Next
 
