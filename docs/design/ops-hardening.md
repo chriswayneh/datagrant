@@ -26,7 +26,7 @@ Chris parked other warehouses at **v0.5.0+** during M2 so they would not land in
 | Grant DDL uses `SET LOCAL search_path = pg_catalog, pg_temp` | `apply_plan` | Keep. M3 may add `SET LOCAL log_statement` in the same transaction when the admin can SET that GUC. |
 | Revoke commits lockout, then terminates sessions, then drops | `pg/revoke.py` | Keep. Needs `pg_signal_backend` (or superuser); today that is a runtime error, not a preflight check. Access removal must not fail open on preflight or logging GUC. |
 | Receipt log, file sink, and outbox flush use `fcntl.flock` on POSIX | `receipt.py`, `outbox.py` | Keep. Windows is still one writer per log (documented). A DB advisory lock does not replace the file lock. |
-| Key files: `O_NOFOLLOW`, regular file, POSIX 0600 | `keys.py` | Keep. M3 applies the same refusal to the receipt log on `--apply`. The policy file is configuration (often 0644 in a checkout); warn by default, optional refuse. |
+| Key files: `O_NOFOLLOW`, regular file, POSIX 0600 | `keys.py` | Keep. M3 applies the same refusal to the receipt log on access-creating `--apply`; `revoke` and `sweep` warn and still revoke. The policy file is configuration (often 0644 in a checkout); warn by default, optional refuse. |
 | Concurrent-cap count is `status = 'active' AND expires_at > now()` | `count_active_grants` | Keep the count. M3 serializes writers with a session lock held across autocommit transactions. |
 | CLI connections use `autocommit=True` | `cli.py` `_connect` | Keep. `approve` counts the cap, then `apply_plan` in later transactions on the same connection. A transaction-scoped lock is released at COMMIT and does not cover that window. |
 | One documented writer | `docs/security.md` | M3 makes that real on one database via a lock. Two hosts with two logs remain two writers. |
@@ -46,7 +46,7 @@ Chris parked other warehouses at **v0.5.0+** during M2 so they would not land in
 | Fail-closed preflight on revoke/sweep | **Cut** | Access removal must not fail open. |
 | `datagrant doctor` | **Keep** (recommended) | One command for keys, policy, DSN, preflight, `pg_signal_backend`, `log_statement` SET privilege, receipt log, sink cursor. Open question 4. |
 | Fold doctor into `preflight` | **Cut** (recommended) | `preflight --apply` creates state. Doctor should not create schemas. |
-| Receipt-log 0600 on `--apply` | **Keep** (recommended) | Same bar as keys. Dry runs warn. |
+| Receipt-log 0600 on access-creating `--apply` | **Keep** (recommended) | Same bar as keys for `request`, `approve`, `preflight --apply`. `revoke` and `sweep` warn, still revoke, and report the receipt problem (exit 3). Dry runs warn. |
 | Policy-file 0600 refuse on `--apply` | **Cut** as the default | A checkout `policy.yaml` is 0644. Warn by default; optional `strict_policy_permissions` refuses access-creating `--apply` only. Open question 5. |
 | `SET LOCAL log_statement = 'none'` when the admin can SET it | **Keep** (recommended) | Known leak of verifiers and hash-key parameters. Needs superuser or PG15+ GRANT. Open question 6. |
 | Require a server GUC `log_statement = none` | **Cut** | Too rigid for shared clusters; SET LOCAL covers datagrant's session when permitted. |
@@ -87,7 +87,7 @@ No other policy keys in M3. Rate limits and `max_rows` are not added.
 **Advisory lock.** Mutating `--apply` that talks to Postgres (`request`, `approve`, `revoke`, `sweep`, `preflight --apply`) takes a **session-level** `pg_advisory_lock(DATAGRANT_ADVISORY_LOCK_KEY)` on the current database **before** the concurrent-grant cap count (and before any other mutating work), and releases it with `pg_advisory_unlock(DATAGRANT_ADVISORY_LOCK_KEY)` in a `finally` block. Session close is the backstop if the process dies before `finally`. Do **not** use `pg_advisory_xact_lock`: that lock is released at COMMIT, and `_connect` uses `autocommit=True` (`cli.py`), so `approve` counts the cap in one transaction and `apply_plan` runs in later ones. Do **not** use `hashtext()` (or any SQL hash of a string) as the key; the key is a documented module-level bigint constant:
 
 ```
-DATAGRANT_ADVISORY_LOCK_KEY = 0x64677401  # 16842753; 'dgt' + 0x01
+DATAGRANT_ADVISORY_LOCK_KEY = 0x64677401  # 1684501505; 'dgt' + 0x01
 ```
 
 Dry runs do not lock. A second `--apply` on that database waits. The receipt JSONL is still one process per file (existing POSIX flock; Windows documented).
@@ -98,7 +98,7 @@ Dry runs do not lock. A second `--apply` on that database waits. The receipt JSO
 
 **Policy-file and receipt-log permissions.** On POSIX, using the opened fd (`O_NOFOLLOW`):
 
-- **Receipt log:** `--apply` **refuses** if it is not a regular file or is group/other-readable (same bar as keys). Dry runs warn. Windows: regular file only.
+- **Receipt log:** access-creating `--apply` (`request`, `approve`, `preflight --apply`) **refuses** if it is not a regular file or is group/other-readable (same bar as keys). `revoke` and `sweep` **warn and still revoke** (access removal must not fail open), then report the receipt-log problem the same way as today's receipt write failure (exit 3). Dry runs warn. Windows: regular file only.
 - **Policy file:** `--apply` **warns** if it is not a regular file or is group/other-readable. With `strict_policy_permissions: true`, access-creating `--apply` (`request`, `approve`, `preflight --apply`) **refuses**; `revoke` and `sweep` still only warn. Windows: regular file only.
 
 **Admin session logging.** `apply_plan` issues `SET LOCAL log_statement = 'none'` next to the existing `search_path` pin **when the connected role can SET that GUC** (superuser, or PostgreSQL 15+ `GRANT SET ON PARAMETER log_statement TO <admin>` as allowed by [docs/operations.md](../operations.md) for a non-superuser admin). If the role cannot SET it:
@@ -135,7 +135,7 @@ Exit codes stay 0-4. Doctor uses 0/1/2. Strict preflight failures and missing `l
 - Advisory lock: two overlapping `--apply` stubs; the second waits or sees the first's row; concurrent-cap cannot double-insert in a scripted race. Dry run does not lock. Integration: two connections, one holds the lock. The lock is still held after `COMMIT` on an autocommit connection (session lock, not xact). After `pg_advisory_unlock` in `finally`, a second command on the same connection can take the lock. The SQL uses `DATAGRANT_ADVISORY_LOCK_KEY` (0x64677401), not `hashtext()`. A stub that only `COMMIT`s must not drop the lock.
 - Doctor: missing key, group-readable key, bad policy, unreachable DSN, PUBLIC warning listed, missing `pg_signal_backend` (non-superuser stub), missing `log_statement` SET privilege, unreadable cursor; `--json` shape; exit 0 on a clean temp dir; doctor does not call `CREATE SCHEMA` and does not `SET log_statement`.
 - `strict_preflight`: omitted = warn and grant; `true` = `--apply` on `request`, `approve`, and `preflight` exit 1 when `_PREFLIGHT` is non-empty; **`revoke` and `sweep --apply` proceed under `strict_preflight: true` even when `_PREFLIGHT` is non-empty**; dry run still reports; dataset-level key is a parse error; `policy check` catches a non-boolean.
-- File modes: POSIX `--apply` refuses a 0644 **receipt log**. A 0644 **policy file** warns by default and still applies; with `strict_policy_permissions: true`, `request`/`approve`/`preflight --apply` refuse and **`revoke`/`sweep` proceed**. Dry run warns. Windows regular-file check only.
+- File modes: POSIX `request`/`approve`/`preflight --apply` refuse a 0644 **receipt log**; **`revoke`/`sweep` with a 0644 receipt log still drop the role and terminate sessions, warn, and exit 3** (receipt problem reported like a receipt write failure). A 0644 **policy file** warns by default and still applies; with `strict_policy_permissions: true`, `request`/`approve`/`preflight --apply` refuse and **`revoke`/`sweep` proceed**. Dry run warns. Windows regular-file check only.
 - `log_statement`: `apply_plan` SQL includes `SET LOCAL log_statement = 'none'` before INSERT/PASSWORD when the role can SET it. Unit test on the statement list. Missing privilege: `request`/`approve --apply` refuse with a message that names `SET log_statement` and the PG15+ GRANT (or superuser); **`revoke` and `sweep` proceed without the SET**. Doctor lists the missing privilege. Superuser (or granted role) path issues the SET.
 - Compat: omitted new keys; 0644 policy file; existing OIDC request/approve/revoke integration still passes.
 - No real IdP, no real PHI/PII. Fictional names only.
@@ -147,7 +147,7 @@ Same shape as M2: one concern per PR, tests and security checks in each, docs la
 1. **This PR.** Design, ROADMAP, audit pointer. No runtime.
 2. **Advisory lock.** Session `pg_advisory_lock(DATAGRANT_ADVISORY_LOCK_KEY)` on mutating `--apply` (request, approve, revoke, sweep, preflight apply), taken before the cap count, `pg_advisory_unlock` in `finally`. Tests for the concurrent-cap race and that COMMIT does not drop the lock. No doctor yet.
 3. **`datagrant doctor`.** Read-only host and DB checks (keys, policy parse, DSN, preflight warnings, `pg_signal_backend`, `log_statement` SET privilege, receipt log, sink cursor). `--json`. Does not create state.
-4. **`strict_preflight` and file modes.** Policy keys (default off). `strict_preflight` gates access-creating `--apply` only. POSIX receipt-log 0600 refusal. Policy-file warn by default; `strict_policy_permissions` refuses access-creating `--apply` only. Tests as in the test plan.
+4. **`strict_preflight` and file modes.** Policy keys (default off). `strict_preflight` gates access-creating `--apply` only. POSIX receipt-log 0600 refusal on access-creating `--apply` only; `revoke`/`sweep` warn, revoke, exit 3. Policy-file warn by default; `strict_policy_permissions` refuses access-creating `--apply` only. Tests as in the test plan.
 5. **`SET LOCAL log_statement = 'none'`** in `apply_plan` when permitted; refuse access-creating `--apply` if not; revoke/sweep proceed without it. Tests on the statement list and the missing-privilege paths.
 6. **Docs, runbook, CHANGELOG Unreleased, v0.5.0 prep (no tag).** `docs/cli.md`, `docs/security.md`, `docs/operations.md`, this design marked implemented.
 
@@ -181,9 +181,9 @@ Each item needs Chris's call before construction. Recommended picks are the prop
 
 5. **Should the policy file require POSIX 0600 on `--apply`?**
    - A. Refuse `--apply` if the policy file is group/other-readable (same as keys). Breaks a 0644 git checkout.
-   - B. Warn by default; optional `strict_policy_permissions: true` refuses `--apply` on access-creating paths only. Receipt-log 0600 refusal stays for every `--apply`.
+   - B. Warn by default; optional `strict_policy_permissions: true` refuses `--apply` on access-creating paths only. Receipt-log 0600 refusal on access-creating `--apply` only; `revoke` and `sweep` warn, still revoke, and exit 3.
    - C. Leave policy-file mode unchecked; still refuse a group/other-readable receipt log.
-   - **Recommend B.** A checkout `policy.yaml` is 0644; the policy is configuration, not a key file. The receipt log still fails closed.
+   - **Recommend B.** A checkout `policy.yaml` is 0644; the policy is configuration, not a key file. The receipt log fails closed for new access, while `revoke` and `sweep` always remove access.
 
 6. **How to stop grant DDL from logging verifiers and hash-key parameters?**
    - A. Document only (operators set the GUC).
