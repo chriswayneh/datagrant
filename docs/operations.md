@@ -38,6 +38,26 @@ export DATAGRANT_RECEIPT_SINK_MODE=required  # or best-effort (default)
 
 To try everything safely first, see [demo.md](demo.md).
 
+## Approvals and policy limits (v0.4.0)
+
+Details: [policy](policy.md), [CLI](cli.md), [security limits](security.md#known-limits), [design](design/approvals-policy-limits.md).
+
+These are CLI workflow controls. Anyone who holds `DATAGRANT_DSN` can still connect to Postgres directly. In `identity.mode: local`, `approvals_required` is N claimed names and `distinct-groups` is only as strong as the claimed names. For real N-of-M, run datagrant on a bastion that holds the DSN and requires OIDC tokens.
+
+**Policy keys (all optional; omit them for v0.3.0 behavior).** `policy.version` stays `1`. Check with `datagrant policy check`.
+
+- `pending_ttl` (`1m`..`7d`): cap on an explicit `request --pending-ttl` in two-person mode (exit 2 if the flag is longer). If the flag is omitted, the lifetime is `min(24h, policy.pending_ttl)`.
+- `max_columns` per table: deny a request whose unique column count exceeds it. It cannot exceed the size of `columns`.
+- `max_concurrent_grants` policy-wide and/or per dataset: effective cap is the minimum of those set. Count is `status = 'active' AND expires_at > now()` for that requester on `request` and `approve`. Revoked grants and grants past `expires_at` (swept or not) do not count. Two `auto --apply` writers can both pass the count; the ops model is one writer.
+- `approvals_required` (1..8, default 1): policy-wide only, `two-person` only. Dataset-level key is a load error. Votes are stamped with `policy.sha256`; a policy edit means previous votes no longer count. The Nth vote commits with the grant; if the locked counted names do not match the plan, apply fails closed and the request stays pending (retry).
+- `separation_of_duties: none` (default) or `distinct-groups`. `distinct-groups` refuses approve when requester groups ∩ approver groups ∩ the table's `allowed_groups` is non-empty.
+
+**Receipts, `--apply` only.** Dry runs write nothing. `denied` (refused request), `not_approved` (refused approve), `approval_recorded` (partial quorum vote), `request_expired` (sweep expired a pending request). A `denied` / `not_approved` / `approval_recorded` receipt that cannot be written is exit 3 and creates no pending row or grant. Sweep still expires the pending row if `request_expired` cannot be written (exit 3). Alert on exit 3 the same way as today.
+
+There is no break-glass command. Emergency access is a reviewed policy edit to `approval: auto`.
+
+`make demo` stays local two-person with one approver. It does not walk quorum N>1, SoD, or the new limit keys.
+
 ## OIDC identity (v0.3.0)
 
 Details: [policy](policy.md#identity), [CLI](cli.md#oidc-identity), [security limits](security.md#known-limits), [demo](demo-oidc.md).
