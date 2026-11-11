@@ -4,6 +4,9 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+- Session-level `pg_advisory_lock` on mutating `--apply` (`request`, `approve`, `revoke`, `sweep`, `preflight --apply`) using documented `DATAGRANT_ADVISORY_LOCK_KEY` (`0x64677401`). Taken before the concurrent-grant cap count; released with `pg_advisory_unlock` in a `finally` block. Dry runs do not lock. ([design](docs/design/ops-hardening.md))
+
 ## [0.4.0] - 2026-11-10
 
 Approvals and policy limits.

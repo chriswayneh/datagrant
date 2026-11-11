@@ -858,6 +858,16 @@ def test_cli_oidc_end_to_end_flows_receipts_and_mode_mismatch(
         def __exit__(self, *a: object) -> None:
             return None
 
+        def execute(self, q: Any, params: Any = None) -> Any:
+            class C:
+                def fetchone(self) -> None:
+                    return None
+
+                def fetchall(self) -> list[Any]:
+                    return []
+
+            return C()
+
     stored_reqs: dict[str, rq_mod.PendingRequest] = {}
     t_now = datetime(2026, 11, 5, 18, tzinfo=UTC)
 
@@ -1497,6 +1507,16 @@ def test_red_team_pr28_m1_l2_l3_regressions(
         def __exit__(self, *a: object) -> None:
             return None
 
+        def execute(self, q: Any, params: Any = None) -> Any:
+            class C:
+                def fetchone(self) -> None:
+                    return None
+
+                def fetchall(self) -> list[Any]:
+                    return []
+
+            return C()
+
     t_now = datetime(2026, 11, 5, 18, tzinfo=UTC)
     base_req = Request("alice@example.com", "clinic", "public.p", ("id",), timedelta(hours=1), "t")
     box: dict[str, rq_mod.PendingRequest] = {}
@@ -1807,6 +1827,16 @@ def test_ascii_only_principal_folding_member_validation_and_local_receipt_normal
 
         def __exit__(self, *a: object) -> None:
             return None
+
+        def execute(self, q: Any, params: Any = None) -> Any:
+            class C:
+                def fetchone(self) -> None:
+                    return None
+
+                def fetchall(self) -> list[Any]:
+                    return []
+
+            return C()
 
     def stub_apply(conn: Any, plan: g_mod.GrantPlan, sink: g_mod.ReceiptSink, **kw: Any) -> None:
         assert plan.facts is not None
