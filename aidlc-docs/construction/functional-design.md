@@ -114,7 +114,7 @@ SQL generation, filter parsing (filters are matched against an allowlist only; U
 
 ## M2 / v0.4.0: approvals and policy limits (implemented)
 
-Implemented (PRs #34 to #38). Tagged v0.4.0. Policy limits (`pending_ttl`, `max_columns`, `max_concurrent_grants`), denial/expiry receipts on `--apply` (`denied`, `not_approved`, `request_expired`), policy-wide quorum (`approvals_required` 1..8, `approval_recorded`, fail-closed claim mismatch), and optional `separation_of_duties: distinct-groups`. Authoritative pages: [docs/policy.md](../../docs/policy.md), [docs/cli.md](../../docs/cli.md), [docs/security.md](../../docs/security.md). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
+Implemented (PRs #34 to #38). v0.4.0 released 2026-11-10. Policy limits (`pending_ttl`, `max_columns`, `max_concurrent_grants`), denial/expiry receipts on `--apply` (`denied`, `not_approved`, `request_expired`), policy-wide quorum (`approvals_required` 1..8, `approval_recorded`, fail-closed claim mismatch), and optional `separation_of_duties: distinct-groups`. Authoritative pages: [docs/policy.md](../../docs/policy.md), [docs/cli.md](../../docs/cli.md), [docs/security.md](../../docs/security.md). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
 
 ## M3 / v0.5.0: ops hardening (design)
 
