@@ -12,6 +12,7 @@
 | Construction | Code generation | ✅ U1–U8, v0.2.0, v0.3.0, v0.4.0 done |
 | Construction | Build and test | ✅ CI: lint/type/test matrix, Postgres integration, demo, demo-compose |
 | Construction | M2 / v0.4.0 | ✅ Released (PRs #33 to #38, tag `v0.4.0` at `7ab4e3c`, 2026-11-10 CT). |
+| Construction | M3 / v0.5.0 | Design proposed ([docs/design/ops-hardening.md](../docs/design/ops-hardening.md)). Construction waits on maintainer approval in audit.md. |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
-**Current stage:** v0.4.0 released. Inception (U1–U8) approved 2026-11-02.
+**Current stage:** v0.4.0 released. M3 / v0.5.0 ops hardening design in review. Construction of M3 waits on maintainer approval. Inception (U1–U8) approved 2026-11-02.
