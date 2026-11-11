@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from test_cli_flows import CAT, POLICY, REQ, FakeConn
+from test_policy import doc, table
 
 from datagrant import cli
 from datagrant.pg import grant as g
 from datagrant.pg import revoke as rv
 from datagrant.policy import PolicyError, parse_policy
-from test_cli_flows import CAT, POLICY, REQ, FakeConn
-from test_policy import doc, table
 
 
 @pytest.fixture
