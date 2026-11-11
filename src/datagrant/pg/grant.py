@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -107,6 +107,10 @@ STATE_DDL: tuple[sql.Composed, ...] = (
     sql.SQL(
         "ALTER TABLE {}.grants ADD COLUMN IF NOT EXISTS requester_identity jsonb,"
         " ADD COLUMN IF NOT EXISTS approver_identities jsonb"
+    ).format(sql.Identifier(STATE_SCHEMA)),
+    # M2 quorum: durable votes on a pending request (additive, default empty).
+    sql.SQL(
+        "ALTER TABLE {}.requests ADD COLUMN IF NOT EXISTS approvals jsonb NOT NULL DEFAULT '[]'::jsonb"
     ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
@@ -294,12 +298,18 @@ def apply_plan(
     *,
     request_id: str | None = None,
     approver: str | None = None,
+    approvals: Sequence[Mapping[str, Any]] | None = None,
+    required: int | None = None,
+    policy_sha256: str = "",
+    issuer: str | None = None,
+    can_approve: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> None:
     """Execute a plan atomically; any failure rolls everything back.
 
     With ``receipts``, an ``issued`` receipt is written after commit. If that
     write fails the grant is revoked at once (no receipt, no access) and
-    GrantError is raised.
+    GrantError is raised. Quorum's Nth vote is claimed inside this same
+    transaction (``FOR UPDATE``, re-check eligible votes, write approvals).
     """
     try:
         with conn.transaction():
@@ -320,16 +330,32 @@ def apply_plan(
                 )
             if request_id is not None:
                 # Claim the pending request in the same transaction: exactly one approval wins.
-                claimed = conn.execute(
-                    sql.SQL(
-                        "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
-                        " verifier = NULL WHERE id = %s AND status = 'pending'"
-                        " AND expires_at > pg_catalog.now() RETURNING id"
-                    ).format(sql.Identifier(STATE_SCHEMA)),
-                    (approver, plan.grant_id, request_id),
-                ).fetchone()
-                if claimed is None:
-                    raise GrantError(f"request {request_id} is not pending (or has expired)")
+                # The Nth quorum vote is written here too so a failed apply rolls it back.
+                if approvals is not None:
+                    from datagrant.pg.requests import claim_request
+
+                    claim_request(
+                        conn,
+                        request_id,
+                        grant_id=plan.grant_id,
+                        approver=approver,
+                        votes=approvals,
+                        required=required if required is not None else 1,
+                        policy_sha256=policy_sha256,
+                        issuer=issuer,
+                        can_approve=can_approve,
+                    )
+                else:
+                    claimed = conn.execute(
+                        sql.SQL(
+                            "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
+                            " verifier = NULL WHERE id = %s AND status = 'pending'"
+                            " AND expires_at > pg_catalog.now() RETURNING id"
+                        ).format(sql.Identifier(STATE_SCHEMA)),
+                        (approver, plan.grant_id, request_id),
+                    ).fetchone()
+                    if claimed is None:
+                        raise GrantError(f"request {request_id} is not pending (or has expired)")
             for stmt in plan.statements:
                 conn.execute(stmt)
     except psycopg.Error as exc:

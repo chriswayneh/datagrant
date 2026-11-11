@@ -24,7 +24,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -537,6 +537,19 @@ def _refuse_approve(
     return EXIT_FAILED
 
 
+def _vote_receipt_ident(vote: Mapping[str, Any]) -> dict[str, str]:
+    raw_ident = vote.get("identity")
+    ident: Mapping[str, Any] = raw_ident if isinstance(raw_ident, dict) else {}
+    out: dict[str, str] = {}
+    if isinstance(vote.get("approver"), str):
+        out["approver"] = vote["approver"]
+    for k in ("approver", "source", "iss", "sub", "token_sha256"):
+        v = ident.get(k)
+        if isinstance(v, str) and k not in out:
+            out[k] = v
+    return out
+
+
 def _facts_from_pending(ctx: Ctx, pending: Any) -> tuple[Any, dict[str, Any]]:
     return _audit_facts(
         ctx,
@@ -646,6 +659,7 @@ def cmd_request(ctx: Ctx) -> int:
                 ttl=ttl,
                 requester_identity=caller.request_state_dict(),
             )
+            n_req = policy.approvals_required
             ctx.emit(
                 {
                     "status": "pending",
@@ -654,9 +668,12 @@ def cmd_request(ctx: Ctx) -> int:
                     "identity_source": source,
                     "pending_expires_at": pending.expires_at,
                     "password": password,
+                    "approvals_recorded": 0,
+                    "approvals_required": n_req,
+                    "approvals": f"0/{n_req}",
                 },
                 f"request {pending.id} is pending approval by another person"
-                f" (expires {pending.expires_at.isoformat()}).\n"
+                f" (approvals 0/{n_req}, expires {pending.expires_at.isoformat()}).\n"
                 f"one-time password (shown once, works after approval): {password}",
             )
             return EXIT_OK
@@ -677,7 +694,16 @@ def cmd_request(ctx: Ctx) -> int:
     return _print_grant(ctx, plan, password, user, source)
 
 
-def _print_grant(ctx: Ctx, plan: Any, password: str | None, user: str, source: str) -> int:
+def _print_grant(
+    ctx: Ctx,
+    plan: Any,
+    password: str | None,
+    user: str,
+    source: str,
+    *,
+    approvals_recorded: int | None = None,
+    approvals_required: int | None = None,
+) -> int:
     info = _conn_info(ctx.args, plan)
     data = {
         "status": "granted",
@@ -688,6 +714,10 @@ def _print_grant(ctx: Ctx, plan: Any, password: str | None, user: str, source: s
         "identity_source": source,
         "connection": info,
     }
+    if approvals_recorded is not None and approvals_required is not None:
+        data["approvals_recorded"] = approvals_recorded
+        data["approvals_required"] = approvals_required
+        data["approvals"] = f"{approvals_recorded}/{approvals_required}"
     text = (
         f"grant {plan.grant_id} active until {plan.expires_at.isoformat()}\n"
         f"connect: host={info['host']} port={info['port']} dbname={info['dbname']}"
@@ -703,7 +733,14 @@ def _print_grant(ctx: Ctx, plan: Any, password: str | None, user: str, source: s
 def cmd_approve(ctx: Ctx) -> int:
     from datagrant.pg.grant import apply_plan, build_plan, ensure_state, new_password
     from datagrant.pg.mask import inspect_table
-    from datagrant.pg.requests import get_request
+    from datagrant.pg.requests import (
+        already_voted,
+        drop_approval,
+        eligible_votes,
+        get_request,
+        mapped_groups_of,
+        record_approval,
+    )
     from datagrant.policy import evaluate
 
     a = ctx.args
@@ -806,7 +843,34 @@ def cmd_approve(ctx: Ctx) -> int:
             if isinstance(req_meta, dict) and "source" in req_meta
             else {"source": "os"}
         )
-        app_receipt_idents = (caller.approver_receipt_dict(),)
+        required = policy.approvals_required
+        ident = caller.approver_receipt_dict()
+        issuer = policy.identity.issuer if policy.identity.mode == "oidc" else None
+
+        def _voter_ok(vote: Mapping[str, Any]) -> bool:
+            name = vote.get("approver")
+            if not isinstance(name, str):
+                return False
+            extra = mapped_groups_of(vote)
+            return not policy.can_approve(
+                name, pending.request.requester, extra_groups=extra
+            )
+
+        counted, _ignored = eligible_votes(
+            pending.approvals,
+            policy_sha256=policy.sha256,
+            issuer=issuer,
+            can_approve=_voter_ok,
+        )
+        already = already_voted(counted, approver, ident)
+        projected = len(counted) if already else len(counted) + 1
+        would_issue = projected >= required
+        voter_names = [str(v.get("approver")) for v in counted]
+        voter_idents = [_vote_receipt_ident(v) for v in counted]
+        if not already:
+            voter_names.append(approver)
+            voter_idents.append(ident)
+        app_receipt_idents = tuple(voter_idents)
         cols = pending.request.columns
         hash_key = (
             load_hash_key(resolve_key_path("hash", a.hash_key))
@@ -814,43 +878,200 @@ def cmd_approve(ctx: Ctx) -> int:
             else None
         )
         if not a.apply:
+            if would_issue:
+                plan = build_plan(
+                    decision,
+                    pending.request,
+                    database=policy.datasets[pending.request.dataset].database,
+                    password="",  # nosec B106 - dry run: no password exists
+                    verifier=REDACTED,
+                    catalog=inspect_table(conn, pending.request.table),
+                    hash_key=hash_key,
+                    approvers=tuple(voter_names),
+                    requester_identity=req_receipt_ident,
+                    approver_identities=app_receipt_idents,
+                )
+                sqls = _redacted_sql(plan)
+                ctx.emit(
+                    {
+                        "dry_run": True,
+                        "request_id": pending.id,
+                        "approver": approver,
+                        "sql": sqls,
+                        "approvals_recorded": projected,
+                        "approvals_required": required,
+                        "would_issue": True,
+                        "already_approved": already,
+                    },
+                    f"dry run: {approver} may approve request {pending.id}"
+                    f" (approvals {projected}/{required}); with --apply:\n"
+                    + "\n".join(x + ";" for x in sqls),
+                )
+            else:
+                ctx.emit(
+                    {
+                        "dry_run": True,
+                        "request_id": pending.id,
+                        "approver": approver,
+                        "approvals_recorded": projected,
+                        "approvals_required": required,
+                        "would_issue": False,
+                        "already_approved": already,
+                    },
+                    f"dry run: {approver} would record approval {projected} of {required}"
+                    f" for request {pending.id}; with --apply no grant yet",
+                )
+            return EXIT_OK
+        sink = _sink(a)
+        _check_outbox(ctx, sink)
+        if required <= 1:
             plan = build_plan(
                 decision,
                 pending.request,
                 database=policy.datasets[pending.request.dataset].database,
-                password="",  # nosec B106 - dry run: no password exists
-                verifier=REDACTED,
+                password=new_password(),
+                verifier=pending.verifier,
                 catalog=inspect_table(conn, pending.request.table),
                 hash_key=hash_key,
                 approvers=(approver,),
                 requester_identity=req_receipt_ident,
-                approver_identities=app_receipt_idents,
+                approver_identities=(ident,),
             )
-            sqls = _redacted_sql(plan)
+            apply_plan(conn, plan, sink, request_id=pending.id, approver=approver)
+            _deliver_issued(ctx, conn, plan, sink)
+            return _print_grant(
+                ctx,
+                plan,
+                None,
+                pending.request.requester,
+                source,
+                approvals_recorded=1,
+                approvals_required=1,
+            )
+
+        result = record_approval(
+            conn,
+            pending.id,
+            approver=approver,
+            identity=ident,
+            required=required,
+            policy_sha256=policy.sha256,
+            issuer=issuer,
+            can_approve=_voter_ok,
+            persist_if_final=False,
+            mapped_groups=tuple(sorted(caller.mapped_groups)),
+        )
+        if result.is_final:
+            counted_final, _ign = eligible_votes(
+                result.pending.approvals,
+                policy_sha256=policy.sha256,
+                issuer=issuer,
+                can_approve=_voter_ok,
+            )
+            names = tuple(str(v.get("approver")) for v in counted_final)
+            idents = tuple(_vote_receipt_ident(v) for v in counted_final)
+            issued = build_plan(
+                decision,
+                pending.request,
+                database=policy.datasets[pending.request.dataset].database,
+                password=new_password(),
+                verifier=pending.verifier,
+                catalog=inspect_table(conn, pending.request.table),
+                hash_key=hash_key,
+                approvers=names,
+                requester_identity=req_receipt_ident,
+                approver_identities=idents,
+            )
+            apply_plan(
+                conn,
+                issued,
+                sink,
+                request_id=pending.id,
+                approver=approver,
+                approvals=result.pending.approvals,
+                required=required,
+                policy_sha256=policy.sha256,
+                issuer=issuer,
+                can_approve=_voter_ok,
+            )
+            _deliver_issued(ctx, conn, issued, sink)
+            return _print_grant(
+                ctx,
+                issued,
+                None,
+                pending.request.requester,
+                source,
+                approvals_recorded=len(issued.facts.approvers) if issued.facts else required,
+                approvals_required=required,
+            )
+        extra_ignored = (
+            {"ignored_approvals": list(result.ignored)} if result.ignored else {}
+        )
+        if result.already:
             ctx.emit(
-                {"dry_run": True, "request_id": pending.id, "approver": approver, "sql": sqls},
-                f"dry run: {approver} may approve request {pending.id}; with --apply:\n"
-                + "\n".join(x + ";" for x in sqls),
+                {
+                    "status": "pending",
+                    "request_id": pending.id,
+                    "already_approved": True,
+                    "approvals_recorded": result.recorded,
+                    "approvals_required": result.required,
+                    "approvals": f"{result.recorded}/{result.required}",
+                    **extra_ignored,
+                },
+                f"{approver} already approved request {pending.id}"
+                f" ({result.recorded}/{result.required})",
             )
             return EXIT_OK
-        sink = _sink(a)
-        _check_outbox(ctx, sink)
-        plan = build_plan(
-            decision,
-            pending.request,
-            database=policy.datasets[pending.request.dataset].database,
-            password=new_password(),
-            verifier=pending.verifier,
-            catalog=inspect_table(conn, pending.request.table),
-            hash_key=hash_key,
-            approvers=(approver,),
-            requester_identity=req_receipt_ident,
-            approver_identities=app_receipt_idents,
+        counted_partial, _ign_partial = eligible_votes(
+            result.pending.approvals,
+            policy_sha256=policy.sha256,
+            issuer=issuer,
+            can_approve=_voter_ok,
         )
-        apply_plan(conn, plan, sink, request_id=pending.id, approver=approver)
-        _deliver_issued(ctx, conn, plan, sink)
-    _print_grant(ctx, plan, None, pending.request.requester, source)
-    return EXIT_OK
+        try:
+            facts, extra = _audit_facts(
+                ctx,
+                pending.request,
+                policy,
+                identity=_identity_from_pending(pending),
+                approvers=tuple(str(v.get("approver")) for v in counted_partial),
+                approver_identities=tuple(
+                    _vote_receipt_ident(v) for v in counted_partial
+                ),
+                starts_at=pending.created_at,
+                expires_at=pending.expires_at,
+            )
+            _write_decision_receipt(
+                ctx,
+                "approval_recorded",
+                facts,
+                {
+                    "request_id": pending.id,
+                    "approvals_recorded": result.recorded,
+                    "approvals_required": result.required,
+                    "phase": "approve",
+                    **extra,
+                },
+            )
+        except CliError:
+            drop_approval(conn, pending.id, approver=approver, identity=ident)
+            raise
+        ignored_note = (
+            f"; not counted: {', '.join(result.ignored)}" if result.ignored else ""
+        )
+        ctx.emit(
+            {
+                "status": "pending",
+                "request_id": pending.id,
+                "approvals_recorded": result.recorded,
+                "approvals_required": result.required,
+                "approvals": f"{result.recorded}/{result.required}",
+                **extra_ignored,
+            },
+            f"approval recorded for request {pending.id}"
+            f" ({result.recorded}/{result.required}){ignored_note}",
+        )
+        return EXIT_OK
 
 
 _GRANT_COLS = (
@@ -877,7 +1098,13 @@ def _grant_rows(conn: Any, where: str, params: tuple[Any, ...]) -> list[dict[str
         sql.SQL(", ").join(sql.Identifier(c) for c in _GRANT_COLS),
         sql.SQL(where),
     )
-    return [dict(zip(_GRANT_COLS, r, strict=True)) for r in conn.execute(q, params).fetchall()]
+    out = []
+    for r in conn.execute(q, params).fetchall():
+        row = dict(zip(_GRANT_COLS, r, strict=True))
+        n = len(row.get("approvers") or [])
+        row["approvals"] = f"{n}/{n}"
+        out.append(row)
+    return out
 
 
 def cmd_grant_list(ctx: Ctx) -> int:

@@ -443,3 +443,44 @@ def test_oidc_request_approve_revoke_and_receipts_e2e(
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_quorum_nth_vote_race_creates_one_grant(env: dict[str, Path]) -> None:
+    import threading
+
+    pol = env["two-person"].parent / "quorum.yaml"
+    pol.write_text(
+        POLICY.format(approval="two-person")
+        .replace("approvers: [sec]", "approvers: [sec]\napprovals_required: 2")
+        .replace("sec: [carol]", "sec: [carol, dave, eve]")
+    )
+    p = str(pol)
+    assert run("preflight", "--apply")[0] == EXIT_OK
+    code, pend = run(
+        "request", "--apply", "--policy", p, "--as-user", "alice", "--duration", "1h", *REQ
+    )
+    assert code == EXIT_OK
+    code, first = run("approve", "--apply", pend["request_id"], "--policy", p, "--as-user", "carol")
+    assert code == EXIT_OK and first["status"] == "pending" and first["approvals"] == "1/2"
+    results: list[tuple[int, dict[str, Any]]] = []
+
+    def vote(user: str) -> None:
+        results.append(
+            run("approve", "--apply", pend["request_id"], "--policy", p, "--as-user", user)
+        )
+
+    t1 = threading.Thread(target=vote, args=("dave",))
+    t2 = threading.Thread(target=vote, args=("eve",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    granted = [d for c, d in results if d.get("status") == "granted"]
+    assert len(granted) == 1
+    assert DSN
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        n = admin.execute(
+            "SELECT count(*) FROM datagrant.grants WHERE requester = %s AND status = 'active'",
+            ("alice",),
+        ).fetchone()
+    assert n == (1,)

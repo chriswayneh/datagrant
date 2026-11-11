@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 from collections.abc import Iterator
@@ -16,6 +17,8 @@ from datagrant import cli
 from datagrant.pg import grant as g
 from datagrant.pg import requests as rq
 from datagrant.pg import revoke as rv
+
+_REAL_APPLY_PLAN = g.apply_plan
 from datagrant.pg.mask import ColumnType, TableCatalog
 from datagrant.pg.requests import PendingRequest
 from datagrant.policy import Request
@@ -873,3 +876,490 @@ def test_request_expired_receipt_failure_still_expires_exit_3(
     assert code == cli.EXIT_RECEIPT
     assert expired_called["n"] == 1
     assert d["expired_requests"] == ["343434343434"]
+
+
+def _quorum_policy(setup: dict[str, Any], n: int = 2) -> str:
+    text = (
+        POLICY.format(approval="two-person")
+        .replace("approvers: [sec]", f"approvers: [sec]\napprovals_required: {n}")
+        .replace("sec: [carol]", "sec: [carol, dave]")
+    )
+    path = setup["tmp"] / f"quorum-{n}.yaml"
+    path.write_text(text)
+    return str(path)
+
+
+def _pending(
+    req: Request,
+    *,
+    rid: str = "aaaaaaaaaaaa",
+    approvals: tuple[dict[str, Any], ...] = (),
+    status: str = "pending",
+    verifier: str | None = "SCRAM-SHA-256$x",
+) -> PendingRequest:
+    return PendingRequest(
+        rid, req, "p" * 64, verifier, T, T + timedelta(hours=24), status, None, None, None, approvals
+    )
+
+
+def test_quorum_n1_issues_on_first_distinct_approver(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _quorum_policy(setup, n=1)
+    req = Request("alice", "clinic", "public.p", ("id", "ssn"), timedelta(hours=1), "x")
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: _pending(req))
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["status"] == "granted"
+    assert d["approvals"] == "1/1"
+    plan, _, kw = setup["applied"][0]
+    assert kw["request_id"] == "aaaaaaaaaaaa"
+    assert plan.facts.approvers == ("carol",)
+    events = [b["event"] for b in _receipts(setup)]
+    assert "approval_recorded" not in events
+
+
+def test_quorum_n2_two_distinct_then_issue(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _quorum_policy(setup, n=2)
+    req = Request("alice", "clinic", "public.p", ("id", "ssn"), timedelta(hours=1), "x")
+    stored: dict[str, Any] = {"p": _pending(req)}
+
+    def record(conn: Any, rid: str, **kw: Any) -> Any:
+        from datagrant.pg.requests import ApprovalRecord
+
+        votes = list(stored["p"].approvals)
+        name = kw["approver"]
+        if any(str(v.get("approver", "")).casefold() == name.casefold() for v in votes):
+            return ApprovalRecord(
+                stored["p"], len(votes), 2, already=True, is_final=False, added=False
+            )
+        votes.append(
+            {
+                "approver": name,
+                "at": T.isoformat(),
+                "identity": dict(kw["identity"]),
+                "policy_sha256": kw.get("policy_sha256", ""),
+            }
+        )
+        stored["p"] = _pending(req, approvals=tuple(votes))
+        n = len(votes)
+        return ApprovalRecord(stored["p"], n, 2, already=False, is_final=n >= 2, added=True)
+
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: stored["p"])
+    monkeypatch.setattr(rq, "record_approval", record)
+
+    code, d = run("approve", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["dry_run"] is True
+    assert d["approvals_recorded"] == 1 and d["approvals_required"] == 2
+    assert d["would_issue"] is False
+    assert not setup["applied"]
+
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending"
+    assert d["approvals"] == "1/2"
+    assert not setup["applied"]
+    bodies = _receipts(setup)
+    assert len(bodies) == 1 and bodies[0]["event"] == "approval_recorded"
+    assert bodies[0]["details"]["approvals_recorded"] == 1
+    assert bodies[0]["details"]["approvals_required"] == 2
+    assert "grant_id" not in bodies[0]
+    assert bodies[0]["approver_identities"][0]["approver"] == "carol"
+    raw = (setup["tmp"] / "r.jsonl").read_text()
+    assert "pw9secret" not in raw
+
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending" and d.get("already_approved") is True
+    assert d["approvals"] == "1/2"
+    assert len(_receipts(setup)) == 1
+
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == 0 and d["status"] == "granted"
+    assert d["approvals"] == "2/2"
+    plan, _, _kw = setup["applied"][0]
+    assert plan.facts.approvers == ("carol", "dave")
+    events = [b["event"] for b in _receipts(setup)]
+    assert events == ["approval_recorded"]
+    setup["conn"].rows = [
+        (
+            "g1",
+            "alice",
+            "clinic",
+            "public.p",
+            ["id"],
+            None,
+            "active",
+            T,
+            T,
+            None,
+            None,
+            ["carol", "dave"],
+            None,
+        )
+    ]
+    code, listed = run("grant", "list")
+    assert code == 0 and listed["grants"][0]["approvals"] == "2/2"
+    assert run("grant", "status", "g1")[1]["approvals"] == "2/2"
+
+
+def test_quorum_self_approval_refused(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _quorum_policy(setup, n=2)
+    req = Request("alice", "clinic", "public.p", ("id",), timedelta(hours=1), "x")
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: _pending(req))
+    recorded: list[Any] = []
+    monkeypatch.setattr(
+        rq,
+        "record_approval",
+        lambda *a, **k: recorded.append((a, k)) or (_ for _ in ()).throw(AssertionError("no")),
+    )
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "alice")
+    assert code == cli.EXIT_FAILED and d["approved"] is False
+    assert any("different person" in r for r in d["reasons"])
+    assert recorded == []
+    assert _receipts(setup)[0]["event"] == "not_approved"
+
+
+def test_quorum_partial_expires_as_request_expired(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    req = Request("alice", "clinic", "public.p", ("id",), timedelta(hours=1), "x")
+    vote = {"approver": "carol", "at": T.isoformat(), "identity": {"source": "flag"}}
+    pending = _pending(req, rid="ffffffffffff", approvals=(vote,), status="expired", verifier=None)
+    monkeypatch.setattr(rv, "sweep", lambda c, sink: [])
+    monkeypatch.setattr(rq, "expire_stale_requests", lambda c: [pending])
+    monkeypatch.setattr(rq, "expire_requests", lambda c: [pending.id])
+    code, d = run("sweep", "--apply")
+    assert code == 0 and d["expired_requests"] == ["ffffffffffff"]
+    bodies = [b for b in _receipts(setup) if b["event"] == "request_expired"]
+    assert len(bodies) == 1
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: pending)
+    pol = _quorum_policy(setup, n=2)
+    code, d = run("approve", "--apply", pending.id, "--policy", pol, "--as-user", "dave")
+    assert code == cli.EXIT_FAILED
+    assert any("not pending" in r for r in d["reasons"])
+
+
+def test_approval_recorded_receipt_failure_drops_caller_keeps_other(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _quorum_policy(setup, n=3)
+    req = Request("alice", "clinic", "public.p", ("id",), timedelta(hours=1), "x")
+    bob = {
+        "approver": "dave",
+        "at": T.isoformat(),
+        "identity": {"source": "flag", "approver": "dave"},
+        "policy_sha256": "p" * 64,
+    }
+    stored: dict[str, Any] = {"p": _pending(req, approvals=(bob,))}
+
+    def record(conn: Any, rid: str, **kw: Any) -> Any:
+        from datagrant.pg.requests import ApprovalRecord
+
+        votes = list(stored["p"].approvals)
+        votes.append(
+            {
+                "approver": kw["approver"],
+                "at": T.isoformat(),
+                "identity": dict(kw["identity"]),
+                "policy_sha256": kw.get("policy_sha256", ""),
+            }
+        )
+        stored["p"] = _pending(req, approvals=tuple(votes))
+        return ApprovalRecord(stored["p"], 2, 3, already=False, is_final=False, added=True)
+
+    def drop(conn: Any, rid: str, **kw: Any) -> None:
+        name = str(kw.get("approver", "")).casefold()
+        kept = tuple(
+            v for v in stored["p"].approvals if str(v.get("approver", "")).casefold() != name
+        )
+        stored["p"] = _pending(req, approvals=kept)
+
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: stored["p"])
+    monkeypatch.setattr(rq, "record_approval", record)
+    monkeypatch.setattr(rq, "drop_approval", drop)
+
+    def boom(*a: Any, **k: Any) -> None:
+        raise cli.CliError("disk full", cli.EXIT_RECEIPT)
+
+    monkeypatch.setattr(cli, "_write_decision_receipt", boom)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == cli.EXIT_RECEIPT
+    assert [v["approver"] for v in stored["p"].approvals] == ["dave"]
+    assert not setup["applied"]
+    assert "disk" in d.get("error", "")
+
+
+class VoteConn:
+    """Scripted connection with nested-transaction rollback of approvals jsonb."""
+
+    def __init__(self, *, requester: str = "alice", rid: str = "aaaaaaaaaaaa") -> None:
+        self.rid = rid
+        self.requester = requester
+        self.votes: list[dict[str, Any]] = []
+        self.status = "pending"
+        self.depth = 0
+        self.commits = 0
+        self._snaps: list[tuple[list[dict[str, Any]], str]] = []
+        self.queries: list[Any] = []
+
+    def _row(self) -> tuple[Any, ...]:
+        return (
+            self.rid,
+            self.requester,
+            "clinic",
+            "public.p",
+            ["id", "ssn"],
+            None,
+            3600,
+            "x",
+            "p" * 64,
+            "SCRAM-SHA-256$x",
+            T,
+            T + timedelta(hours=24),
+            self.status,
+            None,
+            None,
+            None,
+            json.dumps(self.votes),
+        )
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        self._snaps.append((copy.deepcopy(self.votes), self.status))
+        self.depth += 1
+        try:
+            yield
+        except BaseException:
+            self.votes, self.status = self._snaps.pop()
+            self.depth -= 1
+            raise
+        self._snaps.pop()
+        self.depth -= 1
+        if self.depth == 0:
+            self.commits += 1
+
+    def execute(self, q: Any, params: Any = None) -> Any:
+        self.queries.append((q, params))
+        text = q.as_string(None) if hasattr(q, "as_string") else str(q)
+        if "current_database" in text:
+            rows: list[tuple[Any, ...]] = [("clinicdb",)]
+        elif "requests" in text and "SELECT" in text:
+            rows = [self._row()]
+        else:
+            rows = []
+        if text.lstrip().upper().startswith("UPDATE") and "requests" in text and params:
+            for p in params:
+                if isinstance(p, str) and p.lstrip().startswith("["):
+                    self.votes = json.loads(p)
+                    break
+            if "approved" in text:
+                self.status = "approved"
+            rows = [(self.rid,)]
+
+        class C:
+            def fetchall(self) -> list[tuple[Any, ...]]:
+                return rows
+
+            def fetchone(self) -> tuple[Any, ...] | None:
+                return rows[0] if rows else None
+
+        return C()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        return None
+
+
+def test_nth_vote_apply_failure_does_not_strand(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant.pg.grant import GrantError
+
+    pol = _quorum_policy(setup, n=2)
+    conn = VoteConn()
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    n_apply = {"n": 0}
+
+    def apply(c: Any, plan: Any, sink: Any, **kw: Any) -> None:
+        n_apply["n"] += 1
+        if n_apply["n"] == 1:
+            raise GrantError("apply failed")
+        setup["applied"].append((plan, sink, kw))
+
+    monkeypatch.setattr(g, "apply_plan", apply)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert [v["approver"] for v in conn.votes] == ["carol"]
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == cli.EXIT_FAILED
+    assert [v["approver"] for v in conn.votes] == ["carol"]
+    assert not setup["applied"]
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == 0 and d["status"] == "granted"
+    assert len(setup["applied"]) == 1
+    assert setup["applied"][0][0].facts.approvers == ("carol", "dave")
+
+
+def test_stale_approver_vote_ignored_after_policy_edit(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp = setup["tmp"]
+    text = (
+        "version: 1\napproval: two-person\napprovers: [dba]\napprovals_required: 2\n"
+        "max_duration: 8h\ngroups:\n  ml: [erin]\n  dba: [alice, bob]\n"
+        "datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        "      - name: public.p\n        allowed_groups: [ml]\n"
+        "        columns: {id: passthrough, ssn: hash}\n"
+    )
+    pol1 = tmp / "dba1.yaml"
+    pol1.write_text(text)
+    pol2 = tmp / "dba2.yaml"
+    pol2.write_text(text.replace("dba: [alice, bob]", "dba: [bob]"))
+    conn = VoteConn(requester="erin")
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol1), "--as-user", "alice")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol2), "--as-user", "bob")
+    assert code == 0 and d["status"] == "pending"
+    assert d["approvals"] == "1/2"
+    assert "alice" in d.get("ignored_approvals", [])
+    assert not setup["applied"]
+
+
+def test_request_pending_json_includes_approvals_required(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _quorum_policy(setup, n=2)
+
+    def create(conn: Any, req: Request, **kw: Any) -> PendingRequest:
+        return _pending(req, rid="bbbbbbbbbbbb")
+
+    monkeypatch.setattr(rq, "create_request", create)
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
+    assert code == 0 and d["status"] == "pending"
+    assert d["approvals_recorded"] == 0 and d["approvals_required"] == 2
+    assert d["approvals"] == "0/2"
+
+
+def test_issued_receipt_written_only_after_grant_commits(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import datagrant.receipt as recmod
+    from datagrant.pg.revoke import RevokeResult
+    from datagrant.sink import SinkConfig, SinkError
+
+    monkeypatch.setattr(g, "apply_plan", _REAL_APPLY_PLAN)
+    pol = _quorum_policy(setup, n=2)
+    conn = VoteConn()
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    depths: list[int] = []
+    real_append = recmod.append
+
+    def spy_append(*a: Any, **k: Any) -> Any:
+        depths.append(conn.depth)
+        return real_append(*a, **k)
+
+    monkeypatch.setattr(recmod, "append", spy_append)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert depths and all(x == 0 for x in depths)
+
+    class Boom:
+        name = "boom"
+
+        def deliver(self, line: bytes) -> None:
+            raise SinkError("down")
+
+        def head(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "_remote", lambda args: SinkConfig(Boom(), "required"))
+    revoke_depths: list[int] = []
+
+    def fake_revoke(c: Any, gid: str, reason: str, sink: Any = None) -> RevokeResult:
+        revoke_depths.append(c.depth)
+        return RevokeResult(gid, "revoked", 1, None)
+
+    monkeypatch.setattr("datagrant.pg.revoke.revoke", fake_revoke)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == cli.EXIT_RECEIPT
+    err = d.get("error", "")
+    assert "STILL ACTIVE" not in err
+    assert "grant revoked" in err
+    assert [v["approver"] for v in conn.votes] == ["carol", "dave"]
+    assert conn.status == "approved"
+    assert all(x == 0 for x in depths)
+    assert revoke_depths == [0]
+    events = [b["event"] for b in _receipts(setup)]
+    assert "issued" in events
+
+
+def test_oidc_group_map_only_approver_reaches_quorum(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant.oidc import VerifiedIdentity
+
+    text = (
+        POLICY.format(approval="two-person")
+        .replace("approvers: [sec]", "approvers: [sec]\napprovals_required: 2")
+        .replace("sec: [carol]", "sec: []")
+    )
+    path = setup["tmp"] / "oidc-quorum.yaml"
+    path.write_text(text)
+
+    def resolve(ctx: Any, policy: Any) -> VerifiedIdentity:
+        user = ctx.args.as_user
+        return VerifiedIdentity(
+            username=user,
+            source="oidc",
+            iss="https://idp.example",
+            sub=f"sub-{user}",
+            token_sha256="a" * 64,
+            mapped_groups=frozenset({"sec"}),
+        )
+
+    conn = VoteConn()
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    monkeypatch.setattr(cli, "_resolve_caller", resolve)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(path), "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert conn.votes[0]["mapped_groups"] == ["sec"]
+    bodies = _receipts(setup)
+    assert bodies[0]["event"] == "approval_recorded"
+    assert [x["approver"] for x in bodies[0]["approver_identities"]] == ["carol"]
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(path), "--as-user", "dave")
+    assert code == 0 and d["status"] == "granted"
+    assert d["approvals"] == "2/2"
+    plan, _, _kw = setup["applied"][0]
+    assert plan.facts.approvers == ("carol", "dave")
+
+
+def test_ignored_voter_repeat_does_not_grow_approvals(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp = setup["tmp"]
+    text = (
+        "version: 1\napproval: two-person\napprovers: [dba]\napprovals_required: 2\n"
+        "max_duration: 8h\ngroups:\n  ml: [erin]\n  dba: [alice, bob]\n"
+        "datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        "      - name: public.p\n        allowed_groups: [ml]\n"
+        "        columns: {id: passthrough, ssn: hash}\n"
+    )
+    pol1 = tmp / "grow1.yaml"
+    pol1.write_text(text)
+    pol2 = tmp / "grow2.yaml"
+    pol2.write_text(text.replace("dba: [alice, bob]", "dba: [alice, bob]\npending_ttl: 12h"))
+    conn = VoteConn(requester="erin")
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol1), "--as-user", "alice")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert len(conn.votes) == 1
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol2), "--as-user", "alice")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert len(conn.votes) == 1
+    assert conn.votes[0]["policy_sha256"] != "p" * 64
+    assert conn.votes[0]["approver"] == "alice"
