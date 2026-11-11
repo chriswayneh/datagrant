@@ -19,8 +19,10 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `groups` | yes | Map of group name to a list of user names (1 to 256 printable ASCII characters without spaces). Email-style names (containing `@`) fold ASCII `A-Z` to `a-z`; duplicate members in a group or conflicting spellings across groups are policy errors. Empty lists are allowed: in `identity.mode: oidc`, membership can come only from `identity.group_map`. |
 | `datasets` | yes | List of datasets (see below). |
 | `identity` | no | How `request` and `approve` name the caller. Omit it, or set `mode: local`, for OS/`--as-user` names. Set `mode: oidc` to require a verified ID token. See [Identity](#identity). |
+| `strict_preflight` | no | Policy-wide only. Boolean. Omit it, or `false`, to keep PUBLIC preflight warnings and still grant. `true` means `--apply` on `request`, `approve`, and `preflight` exits 1 when `_PREFLIGHT` returns any row. `revoke` and `sweep` never refuse for this reason. A dataset- or table-level key is an unknown-key error. |
+| `strict_policy_permissions` | no | Policy-wide only. Boolean. Omit it, or `false`, to **warn** on `--apply` if the policy file is group/other-accessible (a 0644 git checkout keeps working). `true` means access-creating `--apply` (`request`, `approve`, `preflight --apply`) refuses (exit 1) if the policy file is group/other-accessible; group/other-writable is the stronger finding. `revoke` and `sweep` still only warn. A dataset- or table-level key is an unknown-key error. |
 
-v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_concurrent_grants`, per-table `max_columns`) are optional. Omitting them keeps v0.3.0 behavior. There is no break-glass key; emergency access is a reviewed policy edit to `approval: auto`.
+v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_concurrent_grants`, per-table `max_columns`) are optional. Omitting them keeps v0.3.0 behavior. Optional M3 keys (`strict_preflight`, `strict_policy_permissions`) default off. There is no break-glass key; emergency access is a reviewed policy edit to `approval: auto`.
 
 ## Datasets
 
