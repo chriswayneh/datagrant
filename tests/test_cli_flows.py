@@ -1363,3 +1363,158 @@ def test_ignored_voter_repeat_does_not_grow_approvals(
     assert len(conn.votes) == 1
     assert conn.votes[0]["policy_sha256"] != "p" * 64
     assert conn.votes[0]["approver"] == "alice"
+
+
+def _sod_policy(setup: dict[str, Any], *, enabled: bool = True, n: int = 1) -> str:
+    sod = "distinct-groups" if enabled else "none"
+    text = (
+        "version: 1\napproval: two-person\napprovers: [sec]\n"
+        f"separation_of_duties: {sod}\napprovals_required: {n}\n"
+        "max_duration: 8h\ngroups:\n"
+        "  employees: [alice, carol, dave, erin]\n"
+        "  ml: [alice, carol]\n"
+        "  analysts: [dave]\n"
+        "  sec: [carol, dave, erin]\n"
+        "datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        "      - name: public.p\n        allowed_groups: [ml, analysts]\n"
+        "        columns: {id: passthrough, ssn: hash}\n"
+    )
+    path = setup["tmp"] / f"sod-{sod}-{n}.yaml"
+    path.write_text(text)
+    return str(path)
+
+
+def test_distinct_groups_refuses_overlap_on_apply(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _sod_policy(setup)
+    req = Request("alice", "clinic", "public.p", ("id", "ssn"), timedelta(hours=1), "x")
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: _pending(req))
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == cli.EXIT_FAILED and d["approved"] is False
+    assert any("distinct-groups" in r and "ml" in r for r in d["reasons"])
+    assert not setup["applied"]
+    bodies = _receipts(setup)
+    assert len(bodies) == 1 and bodies[0]["event"] == "not_approved"
+    assert any("distinct-groups" in r for r in bodies[0]["details"]["reasons"])
+
+
+def test_distinct_groups_dry_run_writes_no_receipt(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _sod_policy(setup)
+    req = Request("alice", "clinic", "public.p", ("id",), timedelta(hours=1), "x")
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: _pending(req))
+    code, d = run("approve", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == cli.EXIT_FAILED and d["approved"] is False
+    assert any("distinct-groups" in r for r in d["reasons"])
+    assert _receipts(setup) == []
+
+
+def test_distinct_groups_allows_no_overlap_and_outside_allowed(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _sod_policy(setup)
+    req = Request("alice", "clinic", "public.p", ("id", "ssn"), timedelta(hours=1), "x")
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: _pending(req))
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == 0 and d["status"] == "granted"
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "erin")
+    assert code == 0 and d["status"] == "granted"
+
+
+def test_distinct_groups_none_allows_shared_allowed_group(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _sod_policy(setup, enabled=False)
+    req = Request("alice", "clinic", "public.p", ("id",), timedelta(hours=1), "x")
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: _pending(req))
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == 0 and d["status"] == "granted"
+
+
+def test_distinct_groups_group_map_overlap_refused(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant.oidc import VerifiedIdentity
+
+    text = (
+        "version: 1\napproval: two-person\napprovers: [sec]\n"
+        "separation_of_duties: distinct-groups\nmax_duration: 8h\n"
+        "groups:\n  ml: [alice]\n  sec: []\n"
+        "datasets:\n  - name: clinic\n    database: clinicdb\n    tables:\n"
+        "      - name: public.p\n        allowed_groups: [ml]\n"
+        "        columns: {id: passthrough, ssn: hash}\n"
+    )
+    path = setup["tmp"] / "sod-map.yaml"
+    path.write_text(text)
+
+    def resolve(ctx: Any, policy: Any) -> VerifiedIdentity:
+        return VerifiedIdentity(
+            username=ctx.args.as_user,
+            source="flag",
+            mapped_groups=frozenset({"sec", "ml"}),
+        )
+
+    req = Request("alice", "clinic", "public.p", ("id",), timedelta(hours=1), "x")
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: _pending(req))
+    monkeypatch.setattr(cli, "_resolve_caller", resolve)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(path), "--as-user", "carol")
+    assert code == cli.EXIT_FAILED and d["approved"] is False
+    assert any("distinct-groups" in r and "ml" in r for r in d["reasons"])
+
+
+def test_distinct_groups_quorum_second_voter_refused_keeps_first(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _sod_policy(setup, n=2)
+    conn = VoteConn()
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
+    assert code == cli.EXIT_FAILED and d["approved"] is False
+    assert any("distinct-groups" in r for r in d["reasons"])
+    assert [v["approver"] for v in conn.votes] == ["dave"]
+    assert not setup["applied"]
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "erin")
+    assert code == 0 and d["status"] == "granted"
+    _plan, _sink, kw = setup["applied"][0]
+    assert [v["approver"] for v in kw.get("approvals", ())] == ["erin"]
+
+
+def test_nth_vote_passes_only_caller_vote_to_claim(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _quorum_policy(setup, n=2)
+    req = Request("alice", "clinic", "public.p", ("id", "ssn"), timedelta(hours=1), "x")
+    stored: dict[str, Any] = {"p": _pending(req)}
+
+    def record(conn: Any, rid: str, **kw: Any) -> Any:
+        from datagrant.pg.requests import ApprovalRecord
+
+        votes = list(stored["p"].approvals)
+        name = kw["approver"]
+        if any(str(v.get("approver", "")).casefold() == name.casefold() for v in votes):
+            return ApprovalRecord(
+                stored["p"], len(votes), 2, already=True, is_final=False, added=False
+            )
+        votes.append(
+            {
+                "approver": name,
+                "at": T.isoformat(),
+                "identity": dict(kw["identity"]),
+                "policy_sha256": kw.get("policy_sha256", ""),
+            }
+        )
+        stored["p"] = _pending(req, approvals=tuple(votes))
+        n = len(votes)
+        return ApprovalRecord(stored["p"], n, 2, already=False, is_final=n >= 2, added=True)
+
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: stored["p"])
+    monkeypatch.setattr(rq, "record_approval", record)
+    assert run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")[0] == 0
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "dave")
+    assert code == 0 and d["status"] == "granted"
+    _plan, _sink, kw = setup["applied"][0]
+    assert [v["approver"] for v in kw["approvals"]] == ["dave"]

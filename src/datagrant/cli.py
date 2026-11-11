@@ -831,6 +831,18 @@ def cmd_approve(ctx: Ctx) -> int:
         decision = evaluate(policy, pending.request, extra_groups=req_extra)
         if not decision.allowed:
             reasons += [f"request no longer allowed: {r}" for r in decision.reasons]
+        ds = policy.datasets.get(pending.request.dataset)
+        rule = ds.tables.get(pending.request.table) if ds is not None else None
+        if rule is not None:
+            reasons.extend(
+                policy.sod_reasons(
+                    pending.request.requester,
+                    approver,
+                    rule.allowed_groups,
+                    requester_extra=req_extra,
+                    approver_extra=caller.mapped_groups,
+                )
+            )
         if reasons:
             return _refuse_approve(ctx, pending, policy, reasons, caller)
         cap_reason = _concurrent_reason(
@@ -982,13 +994,20 @@ def cmd_approve(ctx: Ctx) -> int:
                 requester_identity=req_receipt_ident,
                 approver_identities=idents,
             )
+            incoming: tuple[dict[str, Any], ...] = ()
+            if result.added:
+                incoming = tuple(
+                    dict(v)
+                    for v in result.pending.approvals
+                    if already_voted([v], approver, ident)
+                )
             apply_plan(
                 conn,
                 issued,
                 sink,
                 request_id=pending.id,
                 approver=approver,
-                approvals=result.pending.approvals,
+                approvals=incoming,
                 required=required,
                 policy_sha256=policy.sha256,
                 issuer=issuer,

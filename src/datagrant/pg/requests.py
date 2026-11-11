@@ -334,7 +334,12 @@ def claim_request(
     issuer: str | None = None,
     can_approve: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> None:
-    """Lock the pending row, merge votes, re-check quorum, claim. Caller's transaction."""
+    """Lock the pending row, merge the caller's new vote, re-check, claim.
+
+    ``votes`` is only the caller's new vote (empty if they already counted),
+    not a snapshot of every approval. Stored votes that were dropped after
+    the in-memory snapshot stay dropped. Must run in the caller's transaction.
+    """
     r = conn.execute(
         sql.SQL("SELECT {} FROM {}.requests WHERE id = %s FOR UPDATE").format(
             sql.SQL(_REQUEST_COLS), sql.Identifier(STATE_SCHEMA)

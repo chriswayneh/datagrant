@@ -737,3 +737,116 @@ def test_repeat_ignored_vote_replaces_does_not_grow() -> None:
         can_approve=lambda vote: False,
     )
     assert third.already is True and len(votes) == 1
+
+
+def _claim_conn(
+    stored: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    status: str = "pending",
+    verifier: str | None = "V",
+) -> Any:
+    now = now or datetime(2026, 1, 1, tzinfo=UTC)
+
+    class Cur:
+        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+            self.rows = rows
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self.rows[0] if self.rows else None
+
+    class Conn:
+        def __init__(self) -> None:
+            self.merged: list[dict[str, Any]] | None = None
+            self.rows = [
+                (
+                    "r1",
+                    "alice",
+                    "clinic",
+                    "public.p",
+                    ["id"],
+                    None,
+                    3600,
+                    "x",
+                    "sha",
+                    verifier,
+                    now,
+                    now + timedelta(hours=1),
+                    status,
+                    None,
+                    None,
+                    None,
+                    json.dumps(stored),
+                )
+            ]
+
+        def execute(self, q: Any, params: Any = None) -> Cur:
+            text = q.as_string(None)
+            if "FOR UPDATE" in text:
+                return Cur(self.rows)
+            if text.lstrip().upper().startswith("UPDATE") and params:
+                for p in params:
+                    if isinstance(p, str) and p.lstrip().startswith("["):
+                        self.merged = json.loads(p)
+                        break
+                return Cur([("r1",)])
+            return Cur([])
+
+    return Conn()
+
+
+def test_claim_request_dropped_vote_stays_dropped() -> None:
+    from datagrant.pg import requests as rq
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    dave = {
+        "approver": "dave",
+        "at": now.isoformat(),
+        "identity": {"source": "flag"},
+        "policy_sha256": "sha",
+        "mapped_groups": [],
+    }
+    conn = _claim_conn([])
+    with pytest.raises(GrantError, match="does not have 2 eligible"):
+        rq.claim_request(
+            conn,  # type: ignore[arg-type]
+            "r1",
+            grant_id="g1",
+            approver="dave",
+            votes=[dave],
+            required=2,
+            policy_sha256="sha",
+        )
+    assert conn.merged is None
+
+
+def test_claim_request_merges_only_incoming_with_stored() -> None:
+    from datagrant.pg import requests as rq
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    carol = {
+        "approver": "carol",
+        "at": now.isoformat(),
+        "identity": {"source": "flag"},
+        "policy_sha256": "sha",
+        "mapped_groups": [],
+    }
+    dave = {
+        "approver": "dave",
+        "at": now.isoformat(),
+        "identity": {"source": "flag"},
+        "policy_sha256": "sha",
+        "mapped_groups": [],
+    }
+    conn = _claim_conn([carol])
+    rq.claim_request(
+        conn,  # type: ignore[arg-type]
+        "r1",
+        grant_id="g1",
+        approver="dave",
+        votes=[dave],
+        required=2,
+        policy_sha256="sha",
+    )
+    assert conn.merged is not None
+    assert [v["approver"] for v in conn.merged] == ["carol", "dave"]

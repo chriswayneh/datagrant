@@ -309,7 +309,8 @@ def apply_plan(
     With ``receipts``, an ``issued`` receipt is written after commit. If that
     write fails the grant is revoked at once (no receipt, no access) and
     GrantError is raised. Quorum's Nth vote is claimed inside this same
-    transaction (``FOR UPDATE``, re-check eligible votes, write approvals).
+    transaction (``FOR UPDATE``, merge the caller's new vote with the locked
+    row, re-check eligible votes, write approvals).
     """
     try:
         with conn.transaction():

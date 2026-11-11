@@ -31,6 +31,7 @@ from datagrant.rowfilter import RowFilterError, parse_row_filter
 
 MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null"})
 APPROVAL_MODES = frozenset({"auto", "two-person"})
+SOD_MODES = frozenset({"none", "distinct-groups"})
 _DURATION_RE = re.compile(r"^(\d{1,6})([mhd])$")
 _SMALL_DURATION_RE = re.compile(r"^(\d{1,6})([smhd])$")
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
@@ -95,6 +96,7 @@ class Policy:
     pending_ttl: timedelta | None = None
     max_concurrent_grants: int | None = None
     approvals_required: int = 1
+    separation_of_duties: str = "none"
 
     def concurrent_grant_cap(self, dataset: str) -> int | None:
         """Minimum of the policy-wide and dataset caps that are set, or None."""
@@ -112,6 +114,32 @@ class Policy:
         if not (self.groups_of(approver) | extra_groups) & self.approver_groups:
             reasons.append(f"{approver!r} is not in an approver group")
         return reasons
+
+    def sod_reasons(
+        self,
+        requester: str,
+        approver: str,
+        allowed_groups: frozenset[str],
+        *,
+        requester_extra: frozenset[str] = frozenset(),
+        approver_extra: frozenset[str] = frozenset(),
+    ) -> list[str]:
+        """Reasons distinct-groups SoD refuses this pair (empty list = allowed)."""
+        if self.separation_of_duties != "distinct-groups":
+            return []
+        shared = (
+            (self.groups_of(requester) | requester_extra)
+            & (self.groups_of(approver) | approver_extra)
+            & allowed_groups
+        )
+        if not shared:
+            return []
+        names = ", ".join(sorted(shared))
+        msg = (
+            f"distinct-groups: requester and approver share group(s) {names} "
+            "which are in this table's allowed_groups"
+        )
+        return [msg]
 
     def groups_of(self, requester: str) -> frozenset[str]:
         norm = normalize_principal(requester)
@@ -416,6 +444,7 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
             "pending_ttl",
             "max_concurrent_grants",
             "approvals_required",
+            "separation_of_duties",
         },
         "policy",
     )
@@ -515,6 +544,14 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         if raw_n < 1 or raw_n > 8:
             raise PolicyError("policy.approvals_required: must be an integer from 1 to 8")
         approvals_required = raw_n
+    sod = "none"
+    if "separation_of_duties" in data:
+        raw_sod = data["separation_of_duties"]
+        if not isinstance(raw_sod, str) or raw_sod not in SOD_MODES:
+            raise PolicyError(
+                f"policy.separation_of_duties: must be one of {sorted(SOD_MODES)}"
+            )
+        sod = raw_sod
     return Policy(
         version,
         approval,
@@ -527,6 +564,7 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         pending_ttl,
         max_cg,
         approvals_required,
+        sod,
     )
 
 
