@@ -1174,6 +1174,59 @@ class VoteConn:
         return None
 
 
+def test_stale_snapshot_approvers_fail_closed_no_grant(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drop X and store Y between C's record_approval snapshot and claim.
+
+    Plan facts still name X+C; the locked row is Y+C. Apply must fail closed
+    with no grant, no issued receipt, and the request still pending on Y.
+    """
+    monkeypatch.setattr(g, "apply_plan", _REAL_APPLY_PLAN)
+    text = (
+        POLICY.format(approval="two-person")
+        .replace("approvers: [sec]", "approvers: [sec]\napprovals_required: 2")
+        .replace("sec: [carol]", "sec: [carol, dave, eve]")
+    )
+    pol = setup["tmp"] / "stale-snap.yaml"
+    pol.write_text(text)
+    conn = VoteConn()
+    monkeypatch.setattr(cli, "_connect", lambda a: conn)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol), "--as-user", "carol")
+    assert code == 0 and d["status"] == "pending" and d["approvals"] == "1/2"
+    assert [v["approver"] for v in conn.votes] == ["carol"]
+
+    def apply_after_drop_and_new_vote(c: Any, plan: Any, sink: Any, **kw: Any) -> None:
+        y = copy.deepcopy(c.votes[0])
+        y["approver"] = "dave"
+        ident = dict(y.get("identity") or {})
+        ident["approver"] = "dave"
+        y["identity"] = ident
+        c.votes = [y]
+        return _REAL_APPLY_PLAN(c, plan, sink, **kw)
+
+    monkeypatch.setattr(g, "apply_plan", apply_after_drop_and_new_vote)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol), "--as-user", "eve")
+    assert code == cli.EXIT_FAILED
+    err = d.get("error", "")
+    assert "retry approve" in err
+    assert "carol" in err and "dave" in err
+    assert [v["approver"] for v in conn.votes] == ["dave"]
+    assert conn.status == "pending"
+    events = [b["event"] for b in _receipts(setup)]
+    assert "issued" not in events
+    assert "approval_recorded" in events
+
+    monkeypatch.setattr(g, "apply_plan", _REAL_APPLY_PLAN)
+    code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", str(pol), "--as-user", "eve")
+    assert code == 0 and d["status"] == "granted"
+    issued = [b for b in _receipts(setup) if b["event"] == "issued"]
+    assert len(issued) == 1
+    assert issued[0]["approvers"] == ["dave", "eve"]
+    assert [v["approver"] for v in conn.votes] == ["dave", "eve"]
+    assert "carol" not in issued[0]["approvers"]
+
+
 def test_nth_vote_apply_failure_does_not_strand(
     setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -839,7 +839,7 @@ def test_claim_request_merges_only_incoming_with_stored() -> None:
         "mapped_groups": [],
     }
     conn = _claim_conn([carol])
-    rq.claim_request(
+    counted = rq.claim_request(
         conn,  # type: ignore[arg-type]
         "r1",
         grant_id="g1",
@@ -850,3 +850,4 @@ def test_claim_request_merges_only_incoming_with_stored() -> None:
     )
     assert conn.merged is not None
     assert [v["approver"] for v in conn.merged] == ["carol", "dave"]
+    assert [v["approver"] for v in counted] == ["carol", "dave"]
