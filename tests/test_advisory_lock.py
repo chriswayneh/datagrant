@@ -12,8 +12,10 @@ import pytest
 from datagrant import cli
 from datagrant.pg import grant as g
 from datagrant.pg.lock import (
+    _HOLDERS_SQL,
     DATAGRANT_ADVISORY_LOCK_KEY,
     acquire_advisory_lock,
+    holder_pids,
     holding_advisory_lock,
     release_advisory_lock,
 )
@@ -152,6 +154,17 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def test_key_is_documented_bigint_not_hashtext() -> None:
     assert DATAGRANT_ADVISORY_LOCK_KEY == 0x64677401
     assert DATAGRANT_ADVISORY_LOCK_KEY == 1684501505
+
+
+def test_holders_sql_filters_bigint_objsubid_1() -> None:
+    sql = _HOLDERS_SQL.lower()
+    assert "objsubid = 1" in sql
+    assert "locktype = 'advisory'" in sql
+    conn = RecConn(holders=(42,))
+    assert holder_pids(conn) == (42,)  # type: ignore[arg-type]
+    q, params = conn.queries[0]
+    assert "objsubid = 1" in str(q).lower()
+    assert params == (0, DATAGRANT_ADVISORY_LOCK_KEY)
 
 
 def test_acquire_and_unlock_use_constant_not_hashtext_or_xact() -> None:

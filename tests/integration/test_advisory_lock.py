@@ -17,6 +17,7 @@ from datagrant.cli import EXIT_FAILED, EXIT_OK, EXIT_RECEIPT, main
 from datagrant.pg.lock import (
     DATAGRANT_ADVISORY_LOCK_KEY,
     acquire_advisory_lock,
+    holder_pids,
     holding_advisory_lock,
     release_advisory_lock,
 )
@@ -102,6 +103,33 @@ def test_unlock_in_finally_releases_on_exception() -> None:
         assert _try(other) is True
         other.execute(
             "SELECT pg_catalog.pg_advisory_unlock(%s)",
+            (DATAGRANT_ADVISORY_LOCK_KEY,),
+        )
+
+
+def test_holder_pids_ignores_two_int_form() -> None:
+    assert DSN
+    with (
+        psycopg.connect(DSN, autocommit=True) as two_int,
+        psycopg.connect(DSN, autocommit=True) as bigint,
+        psycopg.connect(DSN, autocommit=True) as observer,
+    ):
+        two_int.execute(
+            "SELECT pg_catalog.pg_advisory_lock(0, %s)",
+            (DATAGRANT_ADVISORY_LOCK_KEY,),
+        )
+        two_pid = two_int.execute("SELECT pg_catalog.pg_backend_pid()").fetchone()
+        assert two_pid is not None
+        assert two_pid[0] not in holder_pids(observer)
+        acquire_advisory_lock(bigint)
+        big_pid = bigint.execute("SELECT pg_catalog.pg_backend_pid()").fetchone()
+        assert big_pid is not None
+        pids = holder_pids(observer)
+        assert big_pid[0] in pids
+        assert two_pid[0] not in pids
+        release_advisory_lock(bigint)
+        two_int.execute(
+            "SELECT pg_catalog.pg_advisory_unlock(0, %s)",
             (DATAGRANT_ADVISORY_LOCK_KEY,),
         )
 

@@ -36,7 +36,8 @@ _UNLOCK_SQL = "SELECT pg_catalog.pg_advisory_unlock(%s)"
 _HOLDERS_SQL = (
     "SELECT pid FROM pg_catalog.pg_locks"
     " WHERE locktype = 'advisory' AND classid = %s AND objid = %s"
-    " AND granted AND pid IS DISTINCT FROM pg_catalog.pg_backend_pid()"
+    " AND objsubid = 1 AND granted"
+    " AND pid IS DISTINCT FROM pg_catalog.pg_backend_pid()"
     " ORDER BY pid"
 )
 
@@ -60,7 +61,7 @@ def lock_busy_message(pids: tuple[int, ...]) -> str:
 
 
 def holder_pids(conn: psycopg.Connection) -> tuple[int, ...]:
-    """PIDs holding our advisory key (locktype advisory), excluding this backend."""
+    """PIDs holding the bigint-form key (objsubid 1), excluding this backend."""
     high, low = _key_halves()
     rows = conn.execute(_HOLDERS_SQL, (high, low)).fetchall()
     out: list[int] = []
