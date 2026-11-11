@@ -48,12 +48,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, P
     monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "receipts.jsonl"))
     pol = tmp_path / "p.yaml"
     pol.write_text(POLICY)
-    if os.name != "nt":
-        os.chmod(pol, 0o600)
-    log = tmp_path / "receipts.jsonl"
-    log.write_text("")
-    if os.name != "nt":
-        os.chmod(log, 0o600)
+    os.chmod(pol, 0o600)
     assert run("keys", "init", "--apply")[0] == EXIT_OK
     yield {"policy": pol}
 
@@ -66,10 +61,10 @@ def test_doctor_exits_0_on_live_dsn(env: dict[str, Path]) -> None:
         }
         log_stmt = conn.execute("SHOW log_statement").fetchone()
     code, d = run("doctor", "--policy", str(env["policy"]))
-    failed = [c for c in d.get("checks", []) if c.get("status") == STATUS_FAIL]
-    assert code == EXIT_OK and d.get("ok") is True, failed or d
+    assert code == EXIT_OK, d
+    assert d["ok"] is True
     assert [c["name"] for c in d["checks"]] == list(CHECK_ORDER)
-    assert not failed
+    assert all(c["status"] != STATUS_FAIL for c in d["checks"])
     with psycopg.connect(DSN, autocommit=True) as conn:
         after = {
             r[0] for r in conn.execute("SELECT nspname FROM pg_catalog.pg_namespace").fetchall()

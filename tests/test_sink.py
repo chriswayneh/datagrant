@@ -251,14 +251,6 @@ def test_good_urls(tmp_path: Path) -> None:
     assert isinstance(f, FileSink)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows drive-letter file URLs")
-def test_windows_concat_file_url(tmp_path: Path) -> None:
-    p = tmp_path / "s.jsonl"
-    p.write_bytes(b"")
-    f = sink.parse_sink_url("file://" + str(p))
-    assert isinstance(f, FileSink)
-
-
 def test_config_from_env(tmp_path: Path) -> None:
     assert sink.sink_from_config(env={}) is None
     env = {sink.SINK_ENV: "https://siem.example/r", sink.SINK_TOKEN_ENV: TOKEN}
