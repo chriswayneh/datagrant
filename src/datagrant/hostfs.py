@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,8 +38,9 @@ class ModeReport:
 
     @property
     def owner_mismatch(self) -> bool:
-        geteuid = getattr(os, "geteuid", None)
-        return geteuid is not None and self.st_uid != geteuid()
+        if sys.platform == "win32":
+            return False
+        return self.st_uid != os.geteuid()
 
     @property
     def parent_group_other_writable(self) -> bool:
