@@ -36,4 +36,4 @@
 
 v0.1.0 units U1–U8 above stay the approved original plan. Chris authorized a v1.0 plan that names **M2 = approvals and policy limits**, target v0.4.0.
 
-Implemented (PRs #33 to #38). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). v0.4.0 is ready, release pending; not tagged. No break-glass.
+Implemented (PRs #33 to #38). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). v0.4.0 released 2026-11-10. No break-glass.

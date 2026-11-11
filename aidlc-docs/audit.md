@@ -38,3 +38,4 @@ Append-only. Never edit past entries. Format: date (UTC), stage, actor, action, 
 | 2026-11-10 CT | Construction | executor (Cursor cloud agent) | M2 construction PR 4 of 6: `separation_of_duties: distinct-groups` (refuse shared `allowed_groups`) and `claim_request` incoming-vote merge. No break-glass, no version bump. | **in review** |
 | 2026-11-11 CT | Construction | Chris Hickman (maintainer) | Merged M2 SoD PR #37 at `e0d46d8`. | **merged #37** |
 | 2026-11-11 CT | Construction | executor (Cursor cloud agent) | M2 last construction PR: docs, demo notes, CHANGELOG Unreleased moved under 0.4.0, package version 0.4.0. Release pending; not tagged or published. | **in review** |
+| 2026-11-11 CT | Construction | executor (Cursor cloud agent) | Docs-only: mark v0.4.0 as released after tag `v0.4.0` at `7ab4e3c` (GitHub release 2026-11-10 CT). Current-status wording only; no runtime, version, tag or release-body change. | **in review** |

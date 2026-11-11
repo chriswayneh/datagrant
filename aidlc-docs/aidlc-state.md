@@ -11,7 +11,7 @@
 | Construction | NFR requirements / design | Covered in functional design and docs/security.md |
 | Construction | Code generation | ✅ U1–U8, v0.2.0, v0.3.0, v0.4.0 done |
 | Construction | Build and test | ✅ CI: lint/type/test matrix, Postgres integration, demo, demo-compose |
-| Construction | M2 / v0.4.0 | Implemented (PRs #33 design, #34 limits, #35 receipts, #36 quorum, #37 SoD, #38 docs). v0.4.0 ready, release pending; not tagged. |
+| Construction | M2 / v0.4.0 | ✅ Released (PRs #33 to #38, tag `v0.4.0` at `7ab4e3c`, 2026-11-10 CT). |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
-**Current stage:** v0.3.0 released. v0.4.0 ready, release pending (approvals and policy limits). Inception (U1–U8) approved 2026-11-02.
+**Current stage:** v0.4.0 released. Inception (U1–U8) approved 2026-11-02.
