@@ -1,6 +1,6 @@
 # Design: approvals and policy limits (v0.4.0 / M2)
 
-Status: proposed. Not implemented. This is the M2 design and execution plan from the v1.0 plan Chris authorized (approvals and policy limits, target v0.4.0). Scope below includes Chris's decisions (2026-11-09 CT). Construction must not start until this document is approved in [audit.md](../../aidlc-docs/audit.md). Roadmap: [ROADMAP.md](../../ROADMAP.md).
+Status: implemented in v0.4.0 (PRs #34 to #38). Release pending, not tagged. Differences from this proposal: the Nth vote is not persisted until `apply_plan`'s transaction (`persist_if_final` is false); `claim_request` merges only the caller's new vote with the locked row and returns the counted set; if the locked counted names do not match `plan.facts.approvers`, apply fails closed and the request stays pending; votes are stamped with `policy.sha256`, OIDC `iss`, and `mapped_groups`; live-grant counting uses `status = 'active' AND expires_at > now()`; a failed `approval_recorded` write removes that caller's vote; omitted `--pending-ttl` uses `min(24h, policy.pending_ttl)`. The [policy](../policy.md) and [CLI](../cli.md) pages are authoritative. Roadmap: [ROADMAP.md](../../ROADMAP.md).
 
 Grounded in the v0.3.0 code on `main` (`src/datagrant/policy.py`, `cli.py`, `pg/requests.py`, `pg/grant.py`, `receipt.py`).
 

@@ -20,6 +20,8 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `datasets` | yes | List of datasets (see below). |
 | `identity` | no | How `request` and `approve` name the caller. Omit it, or set `mode: local`, for OS/`--as-user` names. Set `mode: oidc` to require a verified ID token. See [Identity](#identity). |
 
+v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_concurrent_grants`, per-table `max_columns`) are optional. Omitting them keeps v0.3.0 behavior. There is no break-glass key; emergency access is a reviewed policy edit to `approval: auto`.
+
 ## Datasets
 
 | Key | Meaning |

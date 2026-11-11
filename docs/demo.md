@@ -2,6 +2,8 @@
 
 One command walks the whole flow against a throwaway Postgres, using synthetic, obviously fake patient data.
 
+The demo stays local two-person with one approver (`--as-user carol`). It does not set `approvals_required`, `separation_of_duties`, or the v0.4.0 policy limit keys.
+
 ```bash
 pip install -e .
 make demo          # or ./scripts/demo.sh ; needs Docker with the compose plugin
@@ -16,7 +18,7 @@ make demo-down     # only needed if a run was interrupted; the demo tears down o
    3. runs `request` with no flag: a dry run showing plan SQL with `PASSWORD '<redacted>'` and no password;
    4. runs `request --apply` (auto): alice connects and sees 4 west rows with name redacted, SSN HMAC-hashed, phone partial and birth date NULL, and the view has no `region` column; reading the raw table is refused;
    5. `hash_scope`: alice gets a grant on the `research` dataset; the same patient's SSN hashes to a different value there; that grant is revoked;
-   6. two-person: the request goes pending; alice approving her own request is refused (exit 1); carol approves; alice logs in with the password she got at request time;
+   6. two-person (one approver): the request goes pending; alice approving her own request is refused (exit 1); carol approves; alice logs in with the password she got at request time;
    7. `revoke --apply` while alice's session is open: the session is terminated;
    8. the second grant's expiry is fast-forwarded (a demo shortcut), then `sweep` (dry run) and `sweep --apply`;
    9. `receipts verify` passes (7 receipts: issued ×3, revoked ×2, expired, not_approved from the refused self-approve), then again with `--expect-head <head>`;
@@ -59,6 +61,6 @@ CI runs the demo on every push twice: `demo` against the CI Postgres service, an
 
 ## OIDC identity (v0.3.0)
 
-`make demo` still uses local identity (`--as-user alice` / `--as-user carol`). That is the v0.2.0 GIF above.
+`make demo` still uses local identity (`--as-user alice` / `--as-user carol`) and one approver. That is the v0.2.0 GIF above. Quorum N>1, `distinct-groups`, and the new limit keys are covered in the [policy](policy.md) and [CLI](cli.md) references, not in this walkthrough.
 
 To walk `request` and `approve` with synthetic short-lived ID tokens, no real IdP and no real secrets, see [demo-oidc.md](demo-oidc.md). That write-up is documentation plus copy-paste fixtures; it is not a second `make demo` target.
