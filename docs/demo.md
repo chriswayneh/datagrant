@@ -2,7 +2,7 @@
 
 One command walks the whole flow against a throwaway Postgres, using synthetic, obviously fake patient data.
 
-The demo stays local two-person with one approver (`--as-user carol`). It does not set `approvals_required`, `separation_of_duties`, or the v0.4.0 policy limit keys.
+The demo stays local two-person with one approver (`--as-user carol`). It does not set `approvals_required`, `separation_of_duties`, or the v0.4.0 policy limit keys. It also omits `strict_preflight` and `strict_policy_permissions` (CI Postgres has PUBLIC defaults; demo policy files stay 0644) and does not walk `datagrant doctor`.
 
 ```bash
 pip install -e .
@@ -61,6 +61,6 @@ CI runs the demo on every push twice: `demo` against the CI Postgres service, an
 
 ## OIDC identity (v0.3.0)
 
-`make demo` still uses local identity (`--as-user alice` / `--as-user carol`) and one approver. That is the v0.2.0 GIF above. Quorum N>1, `distinct-groups`, and the new limit keys are covered in the [policy](policy.md) and [CLI](cli.md) references, not in this walkthrough.
+`make demo` still uses local identity (`--as-user alice` / `--as-user carol`) and one approver. That is the v0.2.0 GIF above. Quorum N>1, `distinct-groups`, the v0.4.0 limit keys, `strict_preflight`, `strict_policy_permissions`, and `datagrant doctor` are covered in the [policy](policy.md), [CLI](cli.md), and [operations](operations.md#ops-hardening-v050) references, not in this walkthrough.
 
 To walk `request` and `approve` with synthetic short-lived ID tokens, no real IdP and no real secrets, see [demo-oidc.md](demo-oidc.md). That write-up is documentation plus copy-paste fixtures; it is not a second `make demo` target.

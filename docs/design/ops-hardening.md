@@ -1,6 +1,6 @@
 # Design: ops hardening (v0.5.0 / M3)
 
-Status: proposed. Not implemented. This is the M3 design and execution plan (ops hardening, target v0.5.0) from the v1.0 plan Chris authorized. Scope below includes Chris's earlier decisions (warehouses v0.5.0+, no rate limits, no `max_rows`) and how this milestone interprets them. Construction must not start until this document is approved in [audit.md](../../aidlc-docs/audit.md). Roadmap: [ROADMAP.md](../../ROADMAP.md).
+Status: implemented in v0.5.0 (PRs #41 to #45). Release pending, not tagged. Differences from this proposal: `revoke` / `sweep` use `pg_try_advisory_lock` and proceed on contention; in-file `strict_policy_permissions` is defeated by write access, so `--strict-policy-permissions` / `$DATAGRANT_STRICT_POLICY_PERMISSIONS` force the check from outside the file and inspect the mode before parse; junk env values fail closed (exit 2) on access-creating `--apply` and `doctor` only (`revoke` / `sweep` do not parse the var); `create_request` also pins `SET LOCAL log_statement = 'none'` next to the search_path pin; residual `log_min_error_statement` is documented. The [CLI](../cli.md) and [operations](../operations.md#ops-hardening-v050) pages are authoritative. Roadmap: [ROADMAP.md](../../ROADMAP.md).
 
 Grounded in the v0.4.0 code on `main` (`src/datagrant/cli.py`, `pg/grant.py`, `pg/revoke.py`, `receipt.py`, `outbox.py`, `keys.py`, `docs/security.md`, `docs/operations.md`).
 

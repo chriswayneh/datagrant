@@ -4,6 +4,10 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-12
+
+Ops hardening. Ready, release pending; the maintainer tags.
+
 ### Added
 - Session-level advisory lock (`DATAGRANT_ADVISORY_LOCK_KEY` `0x64677401`) on mutating `--apply` before the concurrent-grant cap count. `request` / `approve` / `preflight --apply` wait up to 30s then fail closed (exit 3, no grant) if another session holds the key. `revoke` / `sweep` use `pg_try_advisory_lock` and proceed without the lock on contention (stderr warning names the holding pid(s)). Unlock in `finally` if acquired. Dry runs do not lock. `PUBLIC` can `EXECUTE pg_advisory_lock`; the lock is a coordination aid, not a security boundary. ([design](docs/design/ops-hardening.md))
 - `datagrant doctor`: read-only checks (keys, policy parse, POSIX file modes, DSN, PUBLIC preflight, `pg_signal_backend`, `SET log_statement` privilege without issuing SET, receipt chain, optional sink cursor). Exit 0/1/2. Warnings do not fail. No `--apply`, no schemas/keys/grants, no advisory lock. ([design](docs/design/ops-hardening.md))

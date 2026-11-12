@@ -38,6 +38,24 @@ export DATAGRANT_RECEIPT_SINK_MODE=required  # or best-effort (default)
 
 To try everything safely first, see [demo.md](demo.md).
 
+## Ops hardening (v0.5.0)
+
+Details: [CLI](cli.md), [policy](policy.md), [security limits](security.md#known-limits), [design](design/ops-hardening.md).
+
+These are host and database workflow controls. Anyone who holds `DATAGRANT_DSN` can still connect to Postgres directly. Run datagrant on a bastion that holds the DSN when you need them as an enforced control.
+
+**`datagrant doctor`.** Read-only. Checks keys, policy parse, POSIX file modes, DSN connect, PUBLIC preflight warnings, `pg_signal_backend` (or superuser), ability to `SET log_statement` (superuser, or PostgreSQL 15+ `has_parameter_privilege`; does not issue SET), receipt-log chain, optional sink cursor. Exit 0 if every check passes, 1 if any fail, 2 on usage. Warnings do not fail. No `--apply`. Does not create schemas, keys, or grants, and does not take the advisory lock.
+
+**Advisory lock.** Mutating `--apply` takes a session `pg_advisory_lock` on `DATAGRANT_ADVISORY_LOCK_KEY` (`0x64677401`) before the live-grant count. `request` / `approve` / `preflight --apply` wait up to 30s, then fail closed (exit 3, no grant) if another session still holds the key. `revoke` / `sweep` use `pg_try_advisory_lock` and proceed without the lock if it is busy (they warn with the holding pid(s)). Dry runs do not lock. `PUBLIC` can `EXECUTE pg_advisory_lock`; treat the lock as a coordination aid among writers, not as enforcement against grantees.
+
+**`strict_preflight`.** Optional, omit or `false` to keep PUBLIC warnings and still grant. `true` means `--apply` on `request`, `approve`, and `preflight` exits 1 when those PUBLIC defaults remain. `preflight --apply` still creates datagrant state before refusing. `revoke` and `sweep` never refuse for this reason.
+
+**File modes (POSIX).** A group/other-accessible receipt log is refused on access-creating `--apply` (exit 1). `revoke` / `sweep` warn, still revoke, and exit 3. Policy-file mode warns by default (`group/other-accessible`; writable is the stronger finding). Optional `strict_policy_permissions: true` refuses access-creating `--apply` only. That in-file key is defeated by write access to the policy file. `--strict-policy-permissions` or `$DATAGRANT_STRICT_POLICY_PERMISSIONS` (`1`/`true`/`yes`/`on`) forces the same check from outside the file and inspects the mode before the YAML is parsed. Unset, empty, or `0`/`false`/`no`/`off` leaves the override off. Any other non-empty value is exit 2 on access-creating `--apply` and `doctor`; `revoke` and `sweep` do not parse the variable.
+
+**`SET LOCAL log_statement`.** `apply_plan` and two-person `create_request` issue `SET LOCAL log_statement = 'none'` in the grant/request transaction when the admin can SET that GUC. `request` / `approve --apply` refuse (exit 1) if it cannot. `revoke` / `sweep` proceed without SET. Doctor reports the privilege and never SETs. Residual: `log_min_duration_statement = 0` and `log_min_error_statement` can still capture parameters or a failed `CREATE ROLE` verifier.
+
+`make demo` omits `strict_preflight` and `strict_policy_permissions` (CI Postgres has PUBLIC defaults; demo policy files stay 0644). It does not walk `datagrant doctor`.
+
 ## Approvals and policy limits (v0.4.0)
 
 Details: [policy](policy.md), [CLI](cli.md), [security limits](security.md#known-limits), [design](design/approvals-policy-limits.md).
@@ -48,7 +66,7 @@ These are CLI workflow controls. Anyone who holds `DATAGRANT_DSN` can still conn
 
 - `pending_ttl` (`1m`..`7d`): cap on an explicit `request --pending-ttl` in two-person mode (exit 2 if the flag is longer). If the flag is omitted, the lifetime is `min(24h, policy.pending_ttl)`.
 - `max_columns` per table: deny a request whose unique column count exceeds it. It cannot exceed the size of `columns`.
-- `max_concurrent_grants` policy-wide and/or per dataset: effective cap is the minimum of those set. Count is `status = 'active' AND expires_at > now()` for that requester on `request` and `approve`. Revoked grants and grants past `expires_at` (swept or not) do not count. Two `auto --apply` writers can both pass the count; the ops model is one writer.
+- `max_concurrent_grants` policy-wide and/or per dataset: effective cap is the minimum of those set. Count is `status = 'active' AND expires_at > now()` for that requester on `request` and `approve`. Revoked grants and grants past `expires_at` (swept or not) do not count. Overlapping `--apply` is serialized by the v0.5.0 session advisory lock (see [Ops hardening](#ops-hardening-v050)).
 - `approvals_required` (1..8, default 1): policy-wide only, `two-person` only. Dataset-level key is a load error. Votes are stamped with `policy.sha256`; a policy edit means previous votes no longer count. The Nth vote commits with the grant; if the locked counted names do not match the plan, apply fails closed and the request stays pending (retry).
 - `separation_of_duties: none` (default) or `distinct-groups`. `distinct-groups` refuses approve when requester groups ∩ approver groups ∩ the table's `allowed_groups` is non-empty.
 

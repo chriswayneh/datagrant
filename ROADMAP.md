@@ -10,7 +10,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | v0.2.0 | Tighter privacy controls and off-host evidence | ✅ Released |
 | v0.3.0 | Real identity | ✅ Released |
 | v0.4.0 | Approvals and policy limits | ✅ Released |
-| v0.5.0 | Ops hardening | Design |
+| v0.5.0 | Ops hardening | Ready, release pending |
 | v0.6.0+ | More warehouses | Planned |
 
 ## v0.1.0: done
@@ -46,17 +46,16 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | --- | --- | :---: |
 | Approvals and policy limits | Policy-wide N-of-M quorum (cap 8); `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty; policy-capped pending TTL, `max_columns`, max concurrent grants, denial/expiry receipts on `--apply`. No break-glass (emergency path is a reviewed policy edit to `auto`). Design: [docs/design/approvals-policy-limits.md](docs/design/approvals-policy-limits.md). | ✅ |
 
-## v0.5.0: design
+## v0.5.0: ready, release pending
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Ops hardening | Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). Construction waits on maintainer approval in [audit.md](aidlc-docs/audit.md). | Design |
+| Ops hardening | Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). | ✅ |
 
 ## Next
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| Ops hardening (advisory lock, doctor, strict preflight, file modes, statement logging) | Production gaps on the Postgres CLI after v0.4.0. | v0.5.0 |
 | Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.6.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.
