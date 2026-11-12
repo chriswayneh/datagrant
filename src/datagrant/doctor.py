@@ -15,6 +15,7 @@ from typing import Any
 from datagrant.hostfs import inspect_existing, posix_mode_problem
 from datagrant.keys import KeyFileError, load_hash_key, load_signing_key
 from datagrant.outbox import cursor_path, read_cursor
+from datagrant.pg.grant import log_statement_capability
 from datagrant.policy import PolicyError, load_policy
 from datagrant.receipt import ReceiptError, verify
 
@@ -54,16 +55,9 @@ _SIGNAL_SQL = (
     "), false)"
     " FROM pg_catalog.pg_roles r WHERE r.rolname = current_user"
 )
-_SUPER_SQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user"
-_VERSION_SQL = "SELECT current_setting('server_version_num')"
 _PARAM_SQL = (
     "SELECT pg_catalog.has_parameter_privilege(current_user, 'log_statement', 'SET')"
 )
-_LOG_STATEMENT_NEED = (
-    "role cannot SET log_statement; needs superuser or PostgreSQL 15+"
-    " GRANT SET ON PARAMETER log_statement"
-)
-_PG15 = 150000
 
 
 @dataclass(frozen=True)
@@ -124,6 +118,7 @@ def run_doctor(
     sink_configured: bool,
     connect: Callable[[], Any] | None = None,
     scrub: Callable[[str], str] = lambda s: s,
+    force_strict_policy_permissions: bool = False,
 ) -> list[Check]:
     """Run checks in design order. ``connect`` is injected in tests."""
     out: list[Check] = []
@@ -150,20 +145,41 @@ def run_doctor(
         add(CHECK_POLICY, STATUS_FAIL, "no policy: pass --policy or set $DATAGRANT_POLICY")
         add(CHECK_POLICY_PERMISSIONS, STATUS_SKIP, "no policy path")
     else:
-        pol = None
-        try:
-            pol = load_policy(policy_path)
-            add(CHECK_POLICY, STATUS_PASS, f"sha256={pol.sha256}")
-        except (PolicyError, OSError) as exc:
-            msg = str(exc) if not isinstance(exc, OSError) else f"{exc.strerror}: {exc.filename}"
-            add(CHECK_POLICY, STATUS_FAIL, msg)
-        _file_check(
-            add,
-            CHECK_POLICY_PERMISSIONS,
-            policy_path,
-            "policy file",
-            fail_on_access=bool(pol and pol.strict_policy_permissions),
-        )
+        inspected = inspect_existing(policy_path, "policy file")
+        access: str | None = None
+        extras: list[str] = []
+        if isinstance(inspected, str):
+            access = inspected
+        elif inspected is not None:
+            access = inspected.access_message()
+            extras = inspected.extra_warnings()
+        if access and force_strict_policy_permissions:
+            add(
+                CHECK_POLICY,
+                STATUS_SKIP,
+                "not parsed: policy file is group/other-accessible",
+            )
+            add(CHECK_POLICY_PERMISSIONS, STATUS_FAIL, "; ".join([access, *extras]))
+        else:
+            pol = None
+            try:
+                pol = load_policy(policy_path)
+                add(CHECK_POLICY, STATUS_PASS, f"sha256={pol.sha256}")
+            except (PolicyError, OSError) as exc:
+                msg = (
+                    str(exc)
+                    if not isinstance(exc, OSError)
+                    else f"{exc.strerror}: {exc.filename}"
+                )
+                add(CHECK_POLICY, STATUS_FAIL, msg)
+            fail = bool(pol and pol.strict_policy_permissions) or force_strict_policy_permissions
+            _file_check(
+                add,
+                CHECK_POLICY_PERMISSIONS,
+                policy_path,
+                "policy file",
+                fail_on_access=fail,
+            )
 
     log_probs = [
         p
@@ -173,18 +189,18 @@ def run_doctor(
         )
         if p
     ]
-    extras: list[str] = []
+    log_extras: list[str] = []
     for pth, label in (
         (receipt_log, "receipt log"),
         (cursor_path(receipt_log), "sink cursor"),
     ):
         inspected = inspect_existing(pth, label)
         if inspected is not None and not isinstance(inspected, str):
-            extras.extend(inspected.extra_warnings())
+            log_extras.extend(inspected.extra_warnings())
     if log_probs:
-        add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_FAIL, "; ".join(log_probs + extras))
-    elif extras:
-        add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_WARN, "; ".join(extras))
+        add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_FAIL, "; ".join(log_probs + log_extras))
+    elif log_extras:
+        add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_WARN, "; ".join(log_extras))
     elif not receipt_log.exists() and not cursor_path(receipt_log).exists():
         add(CHECK_RECEIPT_LOG_PERMISSIONS, STATUS_PASS, "no receipt log or cursor yet")
     else:
@@ -297,21 +313,5 @@ def _signal_check(conn: Any, add: Callable[[str, str, str], None]) -> None:
 
 
 def _log_statement_check(conn: Any, add: Callable[[str, str, str], None]) -> None:
-    try:
-        super_row = conn.execute(_SUPER_SQL).fetchone()
-        if _bool_row(super_row):
-            add(CHECK_LOG_STATEMENT, STATUS_PASS, "superuser can SET log_statement")
-            return
-        ver_row = conn.execute(_VERSION_SQL).fetchone()
-        ver = int(ver_row[0]) if ver_row and ver_row[0] is not None else 0
-        if ver < _PG15:
-            add(CHECK_LOG_STATEMENT, STATUS_FAIL, f"{_LOG_STATEMENT_NEED} (server {ver})")
-            return
-        row = conn.execute(_PARAM_SQL).fetchone()
-    except Exception as exc:  # noqa: BLE001 - never SET; missing function is a fail
-        add(CHECK_LOG_STATEMENT, STATUS_FAIL, f"{_LOG_STATEMENT_NEED} ({exc})")
-        return
-    if _bool_row(row):
-        add(CHECK_LOG_STATEMENT, STATUS_PASS, "has SET privilege on log_statement")
-    else:
-        add(CHECK_LOG_STATEMENT, STATUS_FAIL, _LOG_STATEMENT_NEED)
+    ok, detail = log_statement_capability(conn)
+    add(CHECK_LOG_STATEMENT, STATUS_PASS if ok else STATUS_FAIL, detail)

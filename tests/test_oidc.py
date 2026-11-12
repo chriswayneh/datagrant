@@ -898,6 +898,7 @@ def test_cli_oidc_end_to_end_flows_receipts_and_mode_mismatch(
     monkeypatch.setattr(rq_mod, "create_request", stub_create)
     monkeypatch.setattr(rq_mod, "get_request", lambda c, rid: stored_reqs[rid])
     monkeypatch.setattr(g_mod, "apply_plan", stub_apply)
+    monkeypatch.setattr(g_mod, "can_set_log_statement", lambda c: True)
 
     oidc_two = tmp_path / "oidc-two.yaml"
     oidc_two.write_text(
@@ -1527,6 +1528,7 @@ def test_red_team_pr28_m1_l2_l3_regressions(
         lambda c, t: TableCatalog({"id": ColumnType("pg_catalog", "int4")}, "public"),
     )
     monkeypatch.setattr(rq_mod, "get_request", lambda c, rid: box[rid])
+    monkeypatch.setattr(g_mod, "can_set_log_statement", lambda c: True)
 
     def write_pol(
         *, issuer: str | None = None, uclaim: str = "email", gclaim: str = "groups"
@@ -1849,6 +1851,7 @@ def test_ascii_only_principal_folding_member_validation_and_local_receipt_normal
         lambda c, t: TableCatalog({"id": ColumnType("pg_catalog", "int4")}, "public"),
     )
     monkeypatch.setattr(g_mod, "apply_plan", stub_apply)
+    monkeypatch.setattr(g_mod, "can_set_log_statement", lambda c: True)
 
     pol_file = tmp_path / "local.yaml"
     pol_file.write_text(

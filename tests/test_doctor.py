@@ -121,6 +121,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
     monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
     monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
+    monkeypatch.delenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", raising=False)
     monkeypatch.delenv("DATAGRANT_RECEIPT_SINK", raising=False)
     assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
     pol = tmp_path / "p.yaml"
@@ -196,6 +197,69 @@ def test_doctor_policy_0644_warns_does_not_fail(env: dict[str, Any]) -> None:
     assert code == cli.EXIT_OK and d["ok"] is True
     assert _by_name(d)[CHECK_POLICY_PERMISSIONS]["status"] == STATUS_WARN
     assert "group/other-accessible" in _by_name(d)[CHECK_POLICY_PERMISSIONS]["detail"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_doctor_force_strict_skips_parse_of_untrusted_file(env: dict[str, Any]) -> None:
+    pol = Path(env["pol"])
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    code, d = run("doctor", "--policy", str(pol), "--strict-policy-permissions")
+    assert code == cli.EXIT_FAILED
+    names = [c["name"] for c in d["checks"]]
+    assert names == list(CHECK_ORDER)
+    assert _by_name(d)[CHECK_POLICY]["status"] == STATUS_SKIP
+    assert "not parsed" in _by_name(d)[CHECK_POLICY]["detail"]
+    assert _by_name(d)[CHECK_POLICY_PERMISSIONS]["status"] == STATUS_FAIL
+    assert "group/other-accessible" in _by_name(d)[CHECK_POLICY_PERMISSIONS]["detail"]
+    assert "unsupported" not in json.dumps(d).lower()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_doctor_env_force_strict_skips_parse(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = Path(env["pol"])
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "1")
+    code, d = run("doctor", "--policy", str(pol))
+    assert code == cli.EXIT_FAILED
+    assert _by_name(d)[CHECK_POLICY]["status"] == STATUS_SKIP
+    assert _by_name(d)[CHECK_POLICY_PERMISSIONS]["status"] == STATUS_FAIL
+
+
+def test_doctor_strict_policy_permissions_env_typo_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "ture")
+    code, d = run("doctor")
+    assert code == cli.EXIT_USAGE
+    err = d.get("error", "")
+    assert "DATAGRANT_STRICT_POLICY_PERMISSIONS" in err
+    assert "1/true/yes/on" in err
+    assert "0/false/no/off" in err
+    assert "ture" in err
+
+
+@pytest.mark.parametrize("val", ["true", "YES", "on"])
+def test_doctor_strict_policy_permissions_env_on_values_accepted(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    os.chmod(Path(env["pol"]), 0o600)
+    code, d = run("doctor", "--policy", env["pol"])
+    assert code == cli.EXIT_OK and d["ok"] is True
+
+
+@pytest.mark.parametrize("val", ["0", "false", "no", "off"])
+def test_doctor_strict_policy_permissions_env_off_values_accepted(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    os.chmod(Path(env["pol"]), 0o600)
+    code, d = run("doctor", "--policy", env["pol"])
+    assert code == cli.EXIT_OK and d["ok"] is True
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")

@@ -45,6 +45,13 @@ EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_RECEIPT, EXIT_REVOKE_FAILED = 0, 1, 2, 3,
 DSN_ENV = "DATAGRANT_DSN"
 REDACTED = "<redacted>"
 POLICY_ENV = "DATAGRANT_POLICY"
+STRICT_POLICY_PERM_ENV = "DATAGRANT_STRICT_POLICY_PERMISSIONS"
+_STRICT_PERM_ON = frozenset({"1", "true", "yes", "on"})
+_STRICT_PERM_OFF = frozenset({"0", "false", "no", "off"})
+_STRICT_PERM_USAGE = (
+    f"${STRICT_POLICY_PERM_ENV} must be 1/true/yes/on or 0/false/no/off"
+    " (unset or empty means off)"
+)
 
 
 class CliError(Exception):
@@ -198,13 +205,60 @@ def _pg_session(
             yield conn
 
 
-def _policy(args: argparse.Namespace) -> Any:
+def _strict_policy_permissions_env() -> bool:
+    """Parse ``$DATAGRANT_STRICT_POLICY_PERMISSIONS``. Junk is a usage error."""
+    raw = os.environ.get(STRICT_POLICY_PERM_ENV)
+    if raw is None or not raw.strip():
+        return False
+    v = raw.strip().lower()
+    if v in _STRICT_PERM_ON:
+        return True
+    if v in _STRICT_PERM_OFF:
+        return False
+    raise CliError(f"{_STRICT_PERM_USAGE}; got {raw.strip()!r}", EXIT_USAGE)
+
+
+def _forced_strict_policy_permissions(args: argparse.Namespace | None = None) -> bool:
+    env_on = _strict_policy_permissions_env()
+    if args is not None and getattr(args, "strict_policy_permissions", False):
+        return True
+    return env_on
+
+
+def _policy_access_report(path: Path) -> tuple[str | None, list[str]]:
+    from datagrant.hostfs import inspect_existing
+
+    result = inspect_existing(path, "policy file")
+    if isinstance(result, str):
+        return result, []
+    if result is None:
+        return None, []
+    access = result.access_message()
+    return access, result.extra_warnings()
+
+
+def _policy(args: argparse.Namespace, ctx: Ctx | None = None, *, apply: bool = False) -> Any:
     from datagrant.policy import load_policy
 
     path = args.policy or os.environ.get(POLICY_ENV)
     if not path:
         raise CliError(f"no policy: pass --policy or set ${POLICY_ENV}", EXIT_USAGE)
-    return load_policy(path)
+    p = Path(path)
+    access, extras = _policy_access_report(p)
+    forced = _forced_strict_policy_permissions(args) if apply else False
+    if ctx is not None:
+        if access and forced and apply:
+            raise CliError(access, EXIT_FAILED)
+        if access:
+            _warn(ctx, access)
+        for e in extras:
+            _warn(ctx, e)
+    elif access and forced and apply:
+        raise CliError(access, EXIT_FAILED)
+    policy = load_policy(p)
+    if access and apply and policy.strict_policy_permissions:
+        raise CliError(access, EXIT_FAILED)
+    return policy
 
 
 def _sink(args: argparse.Namespace) -> Any:
@@ -282,16 +336,28 @@ def _host_file_gate(
             _warn(ctx, m)
 
     if policy_path is not None:
-        strict = bool(policy is not None and policy.strict_policy_permissions)
+        in_file = bool(policy is not None and policy.strict_policy_permissions)
+        forced = (
+            _forced_strict_policy_permissions(ctx.args)
+            if apply and access_creating
+            else False
+        )
         _report(
             inspect_existing(policy_path, "policy file"),
-            refuse=apply and access_creating and strict,
+            refuse=apply and access_creating and (in_file or forced),
         )
     log = _log_path(ctx.args)
     _report(
         inspect_existing(log, "receipt log"),
         refuse=apply and access_creating,
     )
+
+
+def _require_log_statement_set(conn: Any) -> None:
+    from datagrant.pg.grant import LOG_STATEMENT_NEED, can_set_log_statement
+
+    if not can_set_log_statement(conn):
+        raise CliError(LOG_STATEMENT_NEED, EXIT_FAILED)
 
 
 def _public_preflight_gate(ctx: Ctx, conn: Any, policy: Any, *, apply: bool) -> None:
@@ -708,13 +774,13 @@ def cmd_request(ctx: Ctx) -> int:
     from datagrant.policy import Request, evaluate, parse_duration
 
     a = ctx.args
-    policy = _policy(a)
+    policy = _policy(a, ctx, apply=bool(a.apply))
     _host_file_gate(
         ctx,
         access_creating=True,
         apply=bool(a.apply),
         policy=policy,
-        policy_path=_policy_path(a),
+        policy_path=None,
     )
     ttl = _request_pending_ttl(policy, a.pending_ttl)
     caller = _resolve_caller(ctx, policy)
@@ -740,6 +806,7 @@ def cmd_request(ctx: Ctx) -> int:
         _public_preflight_gate(ctx, conn, policy, apply=bool(a.apply))
         catalog = inspect_table(conn, req.table)
         if a.apply:
+            _require_log_statement_set(conn)
             sink = _sink(a)  # no signing key, no grant
             _check_outbox(ctx, sink)
             ensure_state(conn)
@@ -866,19 +933,20 @@ def cmd_approve(ctx: Ctx) -> int:
     from datagrant.policy import evaluate
 
     a = ctx.args
-    policy = _policy(a)
+    policy = _policy(a, ctx, apply=bool(a.apply))
     _host_file_gate(
         ctx,
         access_creating=True,
         apply=bool(a.apply),
         policy=policy,
-        policy_path=_policy_path(a),
+        policy_path=None,
     )
     caller = _resolve_caller(ctx, policy)
     approver, source = caller.username, caller.source
     with _pg_session(a, lock=bool(a.apply)) as conn:
         _public_preflight_gate(ctx, conn, policy, apply=bool(a.apply))
         if a.apply:
+            _require_log_statement_set(conn)
             ensure_state(conn)
         pending = get_request(conn, a.request_id)
         if pending.status != "pending" or pending.verifier is None:
@@ -1540,6 +1608,7 @@ def cmd_doctor(ctx: Ctx) -> int:
         dsn=dsn,
         sink_configured=_remote(a) is not None,
         scrub=scrub,
+        force_strict_policy_permissions=_forced_strict_policy_permissions(a),
     )
     ok = not any(c.status == STATUS_FAIL for c in checks)
     payload = {"ok": ok, "checks": [c.as_dict() for c in checks]}
@@ -1552,21 +1621,21 @@ def cmd_doctor(ctx: Ctx) -> int:
 
 def cmd_preflight(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state, preflight
-    from datagrant.policy import load_policy
 
     # Dry run does not read the policy (v0.4.0). --apply loads --policy or
     # $DATAGRANT_POLICY so strict_preflight / file-mode gates can run.
     policy = None
     if ctx.args.apply:
+        _forced_strict_policy_permissions(ctx.args)
         path = _policy_path(ctx.args)
         if path is not None:
-            policy = load_policy(path)
+            policy = _policy(ctx.args, ctx, apply=True)
         _host_file_gate(
             ctx,
             access_creating=True,
             apply=True,
             policy=policy,
-            policy_path=path,
+            policy_path=None,
         )
     with _pg_session(ctx.args, lock=bool(ctx.args.apply)) as conn:
         warnings = ensure_state(conn) if ctx.args.apply else preflight(conn)
@@ -1688,6 +1757,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pol = _SafeArgumentParser(add_help=False)
     pol.add_argument("--policy", help=f"policy YAML (default ${POLICY_ENV})")
+    pol.add_argument(
+        "--strict-policy-permissions",
+        action="store_true",
+        help=(
+            "refuse a group/other-accessible policy file on access-creating "
+            f"request/approve/preflight before parsing it (also ${STRICT_POLICY_PERM_ENV}=1). "
+            "Default is warn unless the policy file sets strict_policy_permissions"
+        ),
+    )
 
     p = _SafeArgumentParser(
         prog="datagrant",

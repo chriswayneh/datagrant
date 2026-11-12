@@ -23,6 +23,7 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
     monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
     monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
+    monkeypatch.delenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", raising=False)
     assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
     conn = FakeConn()
     state: dict[str, Any] = {"conn": conn, "applied": []}
@@ -32,6 +33,7 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         g, "apply_plan", lambda c, plan, sink, **kw: state["applied"].append((plan, sink, kw))
     )
+    monkeypatch.setattr(g, "can_set_log_statement", lambda c: True)
     for mode in ("auto", "two-person"):
         (tmp_path / f"{mode}.yaml").write_text(POLICY.format(approval=mode))
         os.chmod(tmp_path / f"{mode}.yaml", 0o600)
@@ -181,6 +183,159 @@ def test_policy_0644_warns_and_still_applies(
     code, d = run("request", "--apply", "--policy", str(pol), *REQ)
     assert code == 0 and d["status"] == "granted"
     assert "group/other-accessible" in capsys.readouterr().err
+
+
+def _assert_strict_env_usage(code: int, d: dict[str, Any]) -> None:
+    assert code == cli.EXIT_USAGE
+    err = d.get("error", "")
+    assert "DATAGRANT_STRICT_POLICY_PERMISSIONS" in err
+    assert "1/true/yes/on" in err
+    assert "0/false/no/off" in err
+
+
+@pytest.mark.parametrize("val", ["1", "true", "TRUE", " Yes ", "on"])
+def test_strict_policy_permissions_env_on_values(monkeypatch: pytest.MonkeyPatch, val: str) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    assert cli._strict_policy_permissions_env() is True
+    assert cli._forced_strict_policy_permissions() is True
+
+
+@pytest.mark.parametrize("val", ["0", "false", "NO", " off ", ""])
+def test_strict_policy_permissions_env_off_values(monkeypatch: pytest.MonkeyPatch, val: str) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    assert cli._strict_policy_permissions_env() is False
+    assert cli._forced_strict_policy_permissions() is False
+
+
+def test_strict_policy_permissions_env_unset_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", raising=False)
+    assert cli._strict_policy_permissions_env() is False
+
+
+@pytest.mark.parametrize("val", ["ture", "enabled"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("doctor",),
+        ("preflight", "--apply"),
+        (
+            "request",
+            "--apply",
+            "--policy",
+            "/nonexistent-strict-env.yaml",
+            "--dataset",
+            "clinic",
+            "--table",
+            "public.p",
+            "--columns",
+            "id",
+            "--duration",
+            "1h",
+            "--purpose",
+            "x",
+        ),
+        ("approve", "--apply", "--policy", "/nonexistent-strict-env.yaml", "aaaaaaaaaaaa"),
+    ],
+)
+def test_strict_policy_permissions_env_typo_exits_2(
+    monkeypatch: pytest.MonkeyPatch, val: str, argv: tuple[str, ...]
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    code, d = run(*argv)
+    _assert_strict_env_usage(code, d)
+    assert val in d.get("error", "")
+
+
+def test_junk_strict_env_does_not_block_revoke(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "enabled")
+    monkeypatch.setenv("DATAGRANT_POLICY", str(setup["tmp"] / "auto.yaml"))
+    monkeypatch.setattr(
+        rv, "revoke", lambda c, gid, reason, sink: rv.RevokeResult("abc", "revoked", 0)
+    )
+    code, d = run("revoke", "--apply", "abc")
+    assert code == 0
+    assert d["outcome"] == "revoked"
+
+
+def test_junk_strict_env_does_not_block_sweep(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "enabled")
+    monkeypatch.setenv("DATAGRANT_POLICY", str(setup["tmp"] / "auto.yaml"))
+    monkeypatch.setattr(rv, "sweep", lambda c, sink: [])
+    monkeypatch.setattr("datagrant.pg.requests.expire_stale_requests", lambda c: [])
+    code, d = run("sweep", "--apply")
+    assert code == 0
+    assert d.get("results") == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+@pytest.mark.parametrize("val", ["1", "true", "YES", "on"])
+def test_env_strict_policy_permissions_refuses_before_parse(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    pol = setup["tmp"] / "badver.yaml"
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    code, d = run("request", "--apply", "--policy", str(pol), *REQ)
+    assert code == cli.EXIT_FAILED
+    err = d.get("error", "")
+    assert "group/other-accessible" in err
+    assert "unsupported" not in err.lower()
+    assert "version" not in err.lower()
+    assert not setup["applied"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+@pytest.mark.parametrize("val", ["0", "false", "no", "off"])
+def test_env_strict_policy_permissions_off_does_not_force(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    pol = setup["tmp"] / "badver.yaml"
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    code, d = run("request", "--apply", "--policy", str(pol), *REQ)
+    assert code == cli.EXIT_FAILED
+    err = d.get("error", "")
+    assert "version" in err.lower()
+    assert "group/other-accessible" not in err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_flag_strict_policy_permissions_refuses_before_parse(setup: dict[str, Any]) -> None:
+    pol = setup["tmp"] / "badver.yaml"
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    code, d = run(
+        "request",
+        "--apply",
+        "--strict-policy-permissions",
+        "--policy",
+        str(pol),
+        *REQ,
+    )
+    assert code == cli.EXIT_FAILED
+    err = d.get("error", "")
+    assert "group/other-accessible" in err
+    assert "unsupported" not in err.lower()
+    assert not setup["applied"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_env_strict_policy_permissions_dry_run_still_parses(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = setup["tmp"] / "badver.yaml"
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "1")
+    code, d = run("request", "--policy", str(pol), *REQ)
+    assert code == cli.EXIT_FAILED
+    assert "version" in d.get("error", "").lower()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")

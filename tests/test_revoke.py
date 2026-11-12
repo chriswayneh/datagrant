@@ -42,7 +42,7 @@ class FakeConn:
         self.log.append("COMMIT")
 
     def execute(self, q: Any, params: Any = None) -> _Cur:
-        text = q.as_string(None)
+        text = q.as_string(None) if hasattr(q, "as_string") else str(q)
         self.log.append(text)
         return _Cur(self.handler(text, params))
 
@@ -207,7 +207,17 @@ def test_requests_module_sql() -> None:
         None,
         "[]",
     )
-    c = FakeConn(lambda text, params: [row] if "FROM" in text and "requests" in text else [])
+    def pending_handler(text: str, params: Any) -> list[tuple[Any, ...]]:
+        low = text.lower()
+        if "rolsuper" in low or "has_parameter_privilege" in low:
+            return [(True,)]
+        if "server_version_num" in low:
+            return [(160003,)]
+        if "from" in low and "requests" in low:
+            return [row]
+        return []
+
+    c = FakeConn(pending_handler)
     p = rq.create_request(c, req, policy_sha256="sha", verifier="V", now=now)  # type: ignore[arg-type]
     assert p.status == "pending" and p.expires_at == now + rq.DEFAULT_PENDING_TTL
     with pytest.raises(GrantError, match="ttl"):
