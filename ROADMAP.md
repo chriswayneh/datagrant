@@ -10,7 +10,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | v0.2.0 | Tighter privacy controls and off-host evidence | ✅ Released |
 | v0.3.0 | Real identity | ✅ Released |
 | v0.4.0 | Approvals and policy limits | ✅ Released |
-| v0.5.0 | Ops hardening | Ready, release pending |
+| v0.5.0 | Ops hardening | ✅ Released |
 | v0.6.0+ | More warehouses | Planned |
 
 ## v0.1.0: done
@@ -46,7 +46,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | --- | --- | :---: |
 | Approvals and policy limits | Policy-wide N-of-M quorum (cap 8); `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty; policy-capped pending TTL, `max_columns`, max concurrent grants, denial/expiry receipts on `--apply`. No break-glass (emergency path is a reviewed policy edit to `auto`). Design: [docs/design/approvals-policy-limits.md](docs/design/approvals-policy-limits.md). | ✅ |
 
-## v0.5.0: ready, release pending
+## v0.5.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
