@@ -46,6 +46,12 @@ DSN_ENV = "DATAGRANT_DSN"
 REDACTED = "<redacted>"
 POLICY_ENV = "DATAGRANT_POLICY"
 STRICT_POLICY_PERM_ENV = "DATAGRANT_STRICT_POLICY_PERMISSIONS"
+_STRICT_PERM_ON = frozenset({"1", "true", "yes", "on"})
+_STRICT_PERM_OFF = frozenset({"0", "false", "no", "off"})
+_STRICT_PERM_USAGE = (
+    f"${STRICT_POLICY_PERM_ENV} must be 1/true/yes/on or 0/false/no/off"
+    " (unset or empty means off)"
+)
 
 
 class CliError(Exception):
@@ -199,11 +205,24 @@ def _pg_session(
             yield conn
 
 
+def _strict_policy_permissions_env() -> bool:
+    """Parse ``$DATAGRANT_STRICT_POLICY_PERMISSIONS``. Junk is a usage error."""
+    raw = os.environ.get(STRICT_POLICY_PERM_ENV)
+    if raw is None or not raw.strip():
+        return False
+    v = raw.strip().lower()
+    if v in _STRICT_PERM_ON:
+        return True
+    if v in _STRICT_PERM_OFF:
+        return False
+    raise CliError(f"{_STRICT_PERM_USAGE}; got {raw.strip()!r}", EXIT_USAGE)
+
+
 def _forced_strict_policy_permissions(args: argparse.Namespace | None = None) -> bool:
+    env_on = _strict_policy_permissions_env()
     if args is not None and getattr(args, "strict_policy_permissions", False):
         return True
-    v = os.environ.get(STRICT_POLICY_PERM_ENV, "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
+    return env_on
 
 
 def _policy_access_report(path: Path) -> tuple[str | None, list[str]]:
@@ -1912,6 +1931,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
             return EXIT_USAGE
     dsn = getattr(args, "dsn", None) or os.environ.get(DSN_ENV)
     try:
+        _strict_policy_permissions_env()
         return int(args.fn(ctx))
     except CliError as exc:
         _err(ctx, redact(str(exc), dsn), exc.code)

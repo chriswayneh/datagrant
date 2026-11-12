@@ -229,6 +229,39 @@ def test_doctor_env_force_strict_skips_parse(
     assert _by_name(d)[CHECK_POLICY_PERMISSIONS]["status"] == STATUS_FAIL
 
 
+def test_doctor_strict_policy_permissions_env_typo_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "ture")
+    code, d = run("doctor")
+    assert code == cli.EXIT_USAGE
+    err = d.get("error", "")
+    assert "DATAGRANT_STRICT_POLICY_PERMISSIONS" in err
+    assert "1/true/yes/on" in err
+    assert "0/false/no/off" in err
+    assert "ture" in err
+
+
+@pytest.mark.parametrize("val", ["true", "YES", "on"])
+def test_doctor_strict_policy_permissions_env_on_values_accepted(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    os.chmod(Path(env["pol"]), 0o600)
+    code, d = run("doctor", "--policy", env["pol"])
+    assert code == cli.EXIT_OK and d["ok"] is True
+
+
+@pytest.mark.parametrize("val", ["0", "false", "no", "off"])
+def test_doctor_strict_policy_permissions_env_off_values_accepted(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", val)
+    os.chmod(Path(env["pol"]), 0o600)
+    code, d = run("doctor", "--policy", env["pol"])
+    assert code == cli.EXIT_OK and d["ok"] is True
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_doctor_strict_policy_permissions_fails_0644(env: dict[str, Any]) -> None:
     pol = Path(env["pol"])
