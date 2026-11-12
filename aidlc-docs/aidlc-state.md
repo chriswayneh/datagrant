@@ -12,7 +12,7 @@
 | Construction | Code generation | ✅ U1–U8, v0.2.0, v0.3.0, v0.4.0, v0.5.0 done |
 | Construction | Build and test | ✅ CI: lint/type/test matrix, Postgres integration, demo, demo-compose |
 | Construction | M2 / v0.4.0 | ✅ Released (PRs #33 to #38, tag `v0.4.0` at `7ab4e3c`, 2026-11-10 CT). |
-| Construction | M3 / v0.5.0 | Implemented (PRs #40 design, #41 lock, #42 doctor, #43 strict_preflight, #44 log_statement, #45 docs). v0.5.0 ready, release pending; not tagged. |
+| Construction | M3 / v0.5.0 | ✅ Released (PRs #40 to #45, tag `v0.5.0` at `9aadcf2`, 2026-11-11 CT). |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
-**Current stage:** v0.4.0 released. v0.5.0 ready, release pending (ops hardening). Inception (U1–U8) approved 2026-11-02.
+**Current stage:** v0.5.0 released. Inception (U1–U8) approved 2026-11-02.
