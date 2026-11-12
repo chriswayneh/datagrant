@@ -32,7 +32,7 @@ POLICY = parse_policy(
                     {
                         "name": "public.dg_logstmt",
                         "allowed_groups": ["ml"],
-                        "columns": {"id": "passthrough", "zip": "null"},
+                        "columns": {"id": "passthrough", "zip": "hash"},
                     }
                 ],
             }
@@ -49,6 +49,7 @@ def admin() -> Iterator[psycopg.Connection]:
         conn.execute("DROP TABLE IF EXISTS public.dg_logstmt")
         conn.execute("CREATE TABLE public.dg_logstmt (id int, zip text)")
         conn.execute("INSERT INTO public.dg_logstmt VALUES (1, '90210')")
+        conn.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
         ensure_state(conn)
         yield conn
         rows = conn.execute("SELECT role_name, view_name FROM datagrant.grants").fetchall()
@@ -102,8 +103,15 @@ def test_apply_plan_issues_set_local_log_statement(admin: psycopg.Connection) ->
     )
     apply_plan(admin, plan, receipts=None)
     texts = [_sql_text(q).lower() for q in seen]
-    log_i = next(i for i, t in enumerate(texts) if "log_statement" in t and "none" in t)
-    key_i = next(i for i, t in enumerate(texts) if "hash_keys" in t)
-    role_i = next(i for i, t in enumerate(texts) if "create role" in t)
+
+    def _idx(needle: str, *, extra: str | None = None) -> int:
+        for i, t in enumerate(texts):
+            if needle in t and (extra is None or extra in t):
+                return i
+        raise AssertionError(f"missing {needle!r} in captured SQL: {texts!r}")
+
+    log_i = _idx("log_statement", extra="none")
+    key_i = _idx("hash_keys")
+    role_i = _idx("create role")
     assert log_i < key_i < role_i
     assert "set local log_statement" in texts[log_i]
