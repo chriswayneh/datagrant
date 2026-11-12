@@ -14,6 +14,7 @@ from psycopg import sql
 from datagrant.keys import HashKey
 from datagrant.pg.grant import apply_plan, build_plan, can_set_log_statement, ensure_state
 from datagrant.pg.mask import inspect_table
+from datagrant.pg.requests import create_request
 from datagrant.policy import Request, evaluate, parse_policy
 
 DSN = os.environ.get("DATAGRANT_TEST_DSN")
@@ -58,7 +59,7 @@ def admin() -> Iterator[psycopg.Connection]:
             if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
                 conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
                 conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
-        conn.execute("TRUNCATE datagrant.grants, datagrant.hash_keys")
+        conn.execute("TRUNCATE datagrant.grants, datagrant.hash_keys, datagrant.requests")
         conn.execute("DROP TABLE public.dg_logstmt")
 
 
@@ -115,3 +116,44 @@ def test_apply_plan_issues_set_local_log_statement(admin: psycopg.Connection) ->
     role_i = _idx("create role")
     assert log_i < key_i < role_i
     assert "set local log_statement" in texts[log_i]
+
+
+def test_create_request_verifier_absent_from_captured_sql(admin: psycopg.Connection) -> None:
+    """Two-person pending INSERT binds the SCRAM verifier after SET LOCAL log_statement."""
+    assert can_set_log_statement(admin)
+    verifier = "SCRAM-SHA-256$sentinel-not-in-sql-Zq9"
+    seen: list[tuple[Any, Any]] = []
+    orig = admin.execute
+
+    def wrapped(q: Any, params: Any = None) -> Any:
+        seen.append((q, params))
+        return orig(q, params)
+
+    admin.execute = wrapped  # type: ignore[method-assign]
+    req = Request(
+        "alice",
+        "clinic",
+        "public.dg_logstmt",
+        ("id", "zip"),
+        timedelta(hours=1),
+        "eval",
+        None,
+    )
+    pending = create_request(
+        admin,
+        req,
+        policy_sha256="a" * 64,
+        verifier=verifier,
+        ttl=timedelta(hours=1),
+    )
+    assert pending.verifier == verifier
+    texts = [_sql_text(q) for q, _p in seen]
+    joined = "\n".join(texts)
+    assert verifier not in joined
+    log_i = next(
+        i for i, t in enumerate(texts) if "log_statement" in t.lower() and "none" in t.lower()
+    )
+    ins_i = next(i for i, t in enumerate(texts) if "insert" in t.lower() and "requests" in t.lower())
+    assert log_i < ins_i
+    insert_params = seen[ins_i][1]
+    assert insert_params is not None and verifier in insert_params

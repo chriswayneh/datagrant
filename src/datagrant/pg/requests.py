@@ -18,7 +18,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from datagrant.pg.grant import STATE_SCHEMA, GrantError
+from datagrant.pg.grant import STATE_SCHEMA, GrantError, pin_log_statement
 from datagrant.policy import Request
 
 _SAFE_PATH = sql.SQL("SET LOCAL search_path = pg_catalog, pg_temp")
@@ -70,6 +70,7 @@ def create_request(
     rid = secrets.token_hex(6)
     with conn.transaction():
         conn.execute(_SAFE_PATH)
+        pin_log_statement(conn)
         ident_dict = dict(requester_identity) if requester_identity is not None else None
         conn.execute(
             sql.SQL(

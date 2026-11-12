@@ -24,6 +24,7 @@ from datagrant.pg.grant import (
     log_statement_capability,
 )
 from datagrant.pg.mask import ColumnType, TableCatalog
+from datagrant.pg.requests import create_request
 from datagrant.policy import Decision, Request
 
 NOW = datetime(2026, 11, 2, 23, 0, tzinfo=UTC)
@@ -154,6 +155,26 @@ def test_apply_plan_sets_when_parameter_privilege() -> None:
     assert any("has_parameter_privilege" in t for t in texts)
     assert any("log_statement" in t and "none" in t for t in texts)
     assert any("create role" in t for t in texts)
+
+
+def test_create_request_pins_log_statement_before_verifier() -> None:
+    conn = RecConn(superuser=True)
+    verifier = "SCRAM-SHA-256$sentinel-not-in-sql-Zq9"
+    req = Request(
+        "alice",
+        "clinic",
+        "public.patients",
+        ("id",),
+        timedelta(hours=1),
+        "eval",
+        None,
+    )
+    create_request(conn, req, policy_sha256="f" * 64, verifier=verifier)
+    texts = _sqls(conn)
+    log_i = next(i for i, t in enumerate(texts) if "log_statement" in t and "none" in t)
+    ins_i = next(i for i, t in enumerate(texts) if "insert" in t and "requests" in t)
+    assert log_i < ins_i
+    assert verifier.lower() not in " ".join(texts)
 
 
 def test_apply_plan_refuses_without_set_privilege() -> None:
