@@ -50,7 +50,14 @@ class FakeConn:
 
     def execute(self, q: Any, params: Any = None) -> Any:
         self.queries.append((q, params))
-        rows = self.rows
+        text = q.as_string(None) if hasattr(q, "as_string") else str(q)
+        low = str(text).lower()
+        if "has_parameter_privilege" in low or "rolsuper" in low:
+            rows: list[tuple[Any, ...]] = [(True,)]
+        elif "server_version_num" in low:
+            rows = [(160003,)]
+        else:
+            rows = self.rows
 
         class C:
             def fetchall(self) -> list[tuple[Any, ...]]:
@@ -87,6 +94,8 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         g, "apply_plan", lambda c, plan, sink, **kw: state["applied"].append((plan, sink, kw))
     )
+    monkeypatch.setattr(g, "can_set_log_statement", lambda c: True)
+    monkeypatch.setattr(g, "pin_log_statement", lambda c: None)
     for mode in ("auto", "two-person"):
         (tmp_path / f"{mode}.yaml").write_text(POLICY.format(approval=mode))
     state["tmp"] = tmp_path

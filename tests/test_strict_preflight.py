@@ -23,6 +23,7 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
     monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
     monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
+    monkeypatch.delenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", raising=False)
     assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
     conn = FakeConn()
     state: dict[str, Any] = {"conn": conn, "applied": []}
@@ -32,6 +33,7 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         g, "apply_plan", lambda c, plan, sink, **kw: state["applied"].append((plan, sink, kw))
     )
+    monkeypatch.setattr(g, "can_set_log_statement", lambda c: True)
     for mode in ("auto", "two-person"):
         (tmp_path / f"{mode}.yaml").write_text(POLICY.format(approval=mode))
         os.chmod(tmp_path / f"{mode}.yaml", 0o600)
@@ -181,6 +183,56 @@ def test_policy_0644_warns_and_still_applies(
     code, d = run("request", "--apply", "--policy", str(pol), *REQ)
     assert code == 0 and d["status"] == "granted"
     assert "group/other-accessible" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_env_strict_policy_permissions_refuses_before_parse(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = setup["tmp"] / "badver.yaml"
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "1")
+    code, d = run("request", "--apply", "--policy", str(pol), *REQ)
+    assert code == cli.EXIT_FAILED
+    err = d.get("error", "")
+    assert "group/other-accessible" in err
+    assert "unsupported" not in err.lower()
+    assert "version" not in err.lower()
+    assert not setup["applied"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_flag_strict_policy_permissions_refuses_before_parse(setup: dict[str, Any]) -> None:
+    pol = setup["tmp"] / "badver.yaml"
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    code, d = run(
+        "request",
+        "--apply",
+        "--strict-policy-permissions",
+        "--policy",
+        str(pol),
+        *REQ,
+    )
+    assert code == cli.EXIT_FAILED
+    err = d.get("error", "")
+    assert "group/other-accessible" in err
+    assert "unsupported" not in err.lower()
+    assert not setup["applied"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_env_strict_policy_permissions_dry_run_still_parses(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = setup["tmp"] / "badver.yaml"
+    pol.write_text("version: 2\n")
+    os.chmod(pol, 0o644)
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "1")
+    code, d = run("request", "--policy", str(pol), *REQ)
+    assert code == cli.EXIT_FAILED
+    assert "version" in d.get("error", "").lower()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")

@@ -35,6 +35,61 @@ class GrantError(RuntimeError):
     """Raised when a grant cannot be planned or applied."""
 
 
+LOG_STATEMENT_NEED = (
+    "role cannot SET log_statement; needs superuser or PostgreSQL 15+"
+    " GRANT SET ON PARAMETER log_statement"
+)
+_PG15 = 150000
+_SUPER_SQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user"
+_VERSION_SQL = "SELECT current_setting('server_version_num')"
+_PARAM_SQL = (
+    "SELECT pg_catalog.has_parameter_privilege(current_user, 'log_statement', 'SET')"
+)
+SET_LOCAL_LOG_STATEMENT = sql.SQL("SET LOCAL log_statement = 'none'")
+
+
+def _bool_row(row: Any) -> bool:
+    if not row:
+        return False
+    v = row[0]
+    if isinstance(v, str):
+        return v.lower() in {"t", "true", "on", "1"}
+    return bool(v)
+
+
+def log_statement_capability(conn: Any) -> tuple[bool, str]:
+    """Whether the connected role can SET log_statement. Never issues SET."""
+    try:
+        super_row = conn.execute(_SUPER_SQL).fetchone()
+        if _bool_row(super_row):
+            return True, "superuser can SET log_statement"
+        ver_row = conn.execute(_VERSION_SQL).fetchone()
+        ver = int(ver_row[0]) if ver_row and ver_row[0] is not None else 0
+        if ver < _PG15:
+            return False, f"{LOG_STATEMENT_NEED} (server {ver})"
+        row = conn.execute(_PARAM_SQL).fetchone()
+    except Exception as exc:  # noqa: BLE001 - probe only; missing function is a fail
+        return False, f"{LOG_STATEMENT_NEED} ({exc})"
+    if _bool_row(row):
+        return True, "has SET privilege on log_statement"
+    return False, LOG_STATEMENT_NEED
+
+
+def can_set_log_statement(conn: Any) -> bool:
+    return log_statement_capability(conn)[0]
+
+
+def pin_log_statement(conn: Any) -> None:
+    """``SET LOCAL log_statement = none`` so grant DDL is not captured.
+
+    Raises ``GrantError`` if the role cannot SET that GUC.
+    """
+    ok, detail = log_statement_capability(conn)
+    if not ok:
+        raise GrantError(detail)
+    conn.execute(SET_LOCAL_LOG_STATEMENT)
+
+
 @dataclass(frozen=True)
 class GrantPlan:
     grant_id: str
@@ -335,6 +390,7 @@ def apply_plan(
         with conn.transaction():
             # Resolve every unqualified name to built-ins only (CVE-2018-1058 class).
             conn.execute(sql.SQL("SET LOCAL search_path = pg_catalog, pg_temp"))
+            pin_log_statement(conn)
             current = conn.execute(sql.SQL("SELECT current_database()")).fetchone()
             if current != (plan.database,):
                 raise GrantError(
