@@ -217,9 +217,12 @@ def test_strict_policy_permissions_env_unset_is_off(monkeypatch: pytest.MonkeyPa
     "argv",
     [
         ("doctor",),
-        ("preflight",),
+        ("preflight", "--apply"),
         (
             "request",
+            "--apply",
+            "--policy",
+            "/nonexistent-strict-env.yaml",
             "--dataset",
             "clinic",
             "--table",
@@ -231,6 +234,7 @@ def test_strict_policy_permissions_env_unset_is_off(monkeypatch: pytest.MonkeyPa
             "--purpose",
             "x",
         ),
+        ("approve", "--apply", "--policy", "/nonexistent-strict-env.yaml", "aaaaaaaaaaaa"),
     ],
 )
 def test_strict_policy_permissions_env_typo_exits_2(
@@ -240,6 +244,31 @@ def test_strict_policy_permissions_env_typo_exits_2(
     code, d = run(*argv)
     _assert_strict_env_usage(code, d)
     assert val in d.get("error", "")
+
+
+def test_junk_strict_env_does_not_block_revoke(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "enabled")
+    monkeypatch.setenv("DATAGRANT_POLICY", str(setup["tmp"] / "auto.yaml"))
+    monkeypatch.setattr(
+        rv, "revoke", lambda c, gid, reason, sink: rv.RevokeResult("abc", "revoked", 0)
+    )
+    code, d = run("revoke", "--apply", "abc")
+    assert code == 0
+    assert d["outcome"] == "revoked"
+
+
+def test_junk_strict_env_does_not_block_sweep(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "enabled")
+    monkeypatch.setenv("DATAGRANT_POLICY", str(setup["tmp"] / "auto.yaml"))
+    monkeypatch.setattr(rv, "sweep", lambda c, sink: [])
+    monkeypatch.setattr("datagrant.pg.requests.expire_stale_requests", lambda c: [])
+    code, d = run("sweep", "--apply")
+    assert code == 0
+    assert d.get("results") == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")

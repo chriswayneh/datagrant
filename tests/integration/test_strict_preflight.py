@@ -118,6 +118,19 @@ def test_strict_preflight_revoke_still_runs(env: dict[str, Path]) -> None:
     assert rd["outcome"] == "revoked"
 
 
+def test_junk_strict_env_does_not_block_revoke(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = _write_policy(env["tmp"])
+    code, d = run("request", "--apply", "--policy", str(pol), *REQ)
+    assert code == EXIT_OK, d
+    monkeypatch.setenv("DATAGRANT_STRICT_POLICY_PERMISSIONS", "enabled")
+    monkeypatch.setenv("DATAGRANT_POLICY", str(pol))
+    code, rd = run("revoke", "--apply", d["grant_id"])
+    assert code == EXIT_OK, rd
+    assert rd["outcome"] == "revoked"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_policy_0644_warns_and_grants(env: dict[str, Path]) -> None:
     pol = _write_policy(env["tmp"], mode=0o644)

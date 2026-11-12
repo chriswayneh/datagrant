@@ -245,7 +245,7 @@ def _policy(args: argparse.Namespace, ctx: Ctx | None = None, *, apply: bool = F
         raise CliError(f"no policy: pass --policy or set ${POLICY_ENV}", EXIT_USAGE)
     p = Path(path)
     access, extras = _policy_access_report(p)
-    forced = _forced_strict_policy_permissions(args)
+    forced = _forced_strict_policy_permissions(args) if apply else False
     if ctx is not None:
         if access and forced and apply:
             raise CliError(access, EXIT_FAILED)
@@ -336,8 +336,12 @@ def _host_file_gate(
             _warn(ctx, m)
 
     if policy_path is not None:
-        forced = _forced_strict_policy_permissions(ctx.args)
         in_file = bool(policy is not None and policy.strict_policy_permissions)
+        forced = (
+            _forced_strict_policy_permissions(ctx.args)
+            if apply and access_creating
+            else False
+        )
         _report(
             inspect_existing(policy_path, "policy file"),
             refuse=apply and access_creating and (in_file or forced),
@@ -1622,6 +1626,7 @@ def cmd_preflight(ctx: Ctx) -> int:
     # $DATAGRANT_POLICY so strict_preflight / file-mode gates can run.
     policy = None
     if ctx.args.apply:
+        _forced_strict_policy_permissions(ctx.args)
         path = _policy_path(ctx.args)
         if path is not None:
             policy = _policy(ctx.args, ctx, apply=True)
@@ -1931,7 +1936,6 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
             return EXIT_USAGE
     dsn = getattr(args, "dsn", None) or os.environ.get(DSN_ENV)
     try:
-        _strict_policy_permissions_env()
         return int(args.fn(ctx))
     except CliError as exc:
         _err(ctx, redact(str(exc), dsn), exc.code)
