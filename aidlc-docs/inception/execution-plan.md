@@ -38,8 +38,8 @@ v0.1.0 units U1–U8 above stay the approved original plan. Chris authorized a v
 
 Implemented (PRs #33 to #38). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). v0.4.0 released 2026-11-10. No break-glass.
 
-## Post-v0.4.0: M3 / v0.5.0 (design)
+## Post-v0.4.0: M3 / v0.5.0 (implemented)
 
 Chris authorized a v1.0 plan that names **M3 = ops hardening**, target v0.5.0. Warehouses (Snowflake/BigQuery) are proposed for **v0.6.0+**, not this milestone. Rate limits and `max_rows` stay out. No break-glass.
 
-Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). Construction PRs wait on design approval in [audit.md](../audit.md).
+Implemented (PRs #40 to #45). Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). v0.5.0 is ready, release pending; not tagged.
