@@ -13,7 +13,7 @@ dependencies = ["PyYAML>=6.0.1,<7", "psycopg>=3.2,<4", "cryptography>=44,<51"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov>=7", "ruff>=0.4", "mypy>=1.8", "types-PyYAML>=6.0", "psycopg[binary]>=3.2,<4", "bandit>=1.7"]
-snowflake = ["snowflake-connector-python>=3.12,<4"]
+snowflake = ["snowflake-connector-python>=4.7.3,<6"]
 
 [project.scripts]
 datagrant = "datagrant.cli:main"

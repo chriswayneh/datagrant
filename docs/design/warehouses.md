@@ -204,6 +204,7 @@ Invariant: **key never in view text, never in `CREATE USER` text.**
 - Revoke SQL (unit): DISABLE first, cancel queries, drop view and role. Sweep expires by `expires_at`. Receipt failure after DISABLE is exit 3.
 - Expiry docs/tests: `DAYS_TO_EXPIRY` is not treated as sub-day enforcement; sweep cadence is.
 - Compat: existing Postgres unit and integration tests still pass without a Snowflake extra.
+- Extra pin: `snowflake-connector-python>=4.7.3,<6` (not `>=3.12,<4`, which resolved 3.18.1 / PYSEC-2026-4301). CI job `pip-audit-snowflake` installs `.[snowflake]` and runs `pip-audit`. No live Snowflake calls.
 - Live (optional): if `DATAGRANT_TEST_SNOWFLAKE_DSN` is set, issue, SELECT through the grant service user with the shown key pair, revoke, confirm the user cannot log in. GET_DDL / query-history checks on a throwaway account must not show the hash key. Fictional data only. CI default is unset (skip).
 - No real IdP, no real PHI/PII. Fictional names only.
 

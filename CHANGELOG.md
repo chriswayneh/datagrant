@@ -6,11 +6,12 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ### Added
 - Optional dataset `engine` (`postgres` default, or `snowflake`) and Snowflake-only `schema`. Unknown engines and a table-level `engine` are policy errors. Omitting `engine` is v0.5.0. Mixed Postgres and Snowflake files parse (`datagrant policy check`).
-- Snowflake `--apply` routing (no grant SQL yet): requires the optional extra `datagrant[snowflake]` (`pip install 'datagrant[snowflake]'`) and `--snowflake-dsn` / `$DATAGRANT_SNOWFLAKE_DSN` (service user, key-pair auth; never logged). Prefer the env var over the flag (`ps` / shell history). Postgres `--apply` does not read Snowflake settings or import the extra. CI does not install the extra and does not call Snowflake. ([design](docs/design/warehouses.md))
+- Snowflake `--apply` routing (no grant SQL yet): requires the optional extra `datagrant[snowflake]` (`pip install 'datagrant[snowflake]'`, `snowflake-connector-python>=4.7.3,<6`) and `--snowflake-dsn` / `$DATAGRANT_SNOWFLAKE_DSN` (service user, key-pair auth; never logged). Prefer the env var over the flag (`ps` / shell history). Postgres `--apply` does not read Snowflake settings or import the extra. CI installs `.[snowflake]` only for pip-audit; it does not call Snowflake. ([design](docs/design/warehouses.md))
 
 ### Fixed
 - Usage errors redact `--dsn` / `--snowflake-dsn` values (space or `=` form) and scrub `$DATAGRANT_DSN` / `$DATAGRANT_SNOWFLAKE_DSN`. CLI errors and warnings also strip those DSNs and `password=` / `token=` / `private_key=` pairs.
 - `approve` refuses (not_approved) when the pending request's dataset `engine` is not `postgres`, so a policy flip to `engine: snowflake` cannot run the Postgres grant plan.
+- Snowflake extra `snowflake-connector-python>=4.7.3,<6` (was `>=3.12,<4`, which resolved 3.18.1 / PYSEC-2026-4301 and pulled cryptography 46). CI job `pip-audit-snowflake` installs `.[snowflake]` and runs `pip-audit`.
 
 ## [0.5.0] - 2026-11-11
 
