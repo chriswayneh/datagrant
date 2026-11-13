@@ -63,12 +63,16 @@ class CliError(Exception):
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_KV = re.compile(
-    r"(?<![A-Za-z0-9_-])((?:password|token|private_key)\s*=\s*)"
+    r"(?<![A-Za-z0-9_-])"
+    r"([A-Za-z_]*(?:pass(?:word|wd|code|phrase)?|pwd|secret|token|private_key)"
+    r"[A-Za-z_]*\s*=\s*)"
     r"('(?:[^'\\]|\\.)*'|\S+)",
     re.IGNORECASE,
 )
 _PW_URL = re.compile(r"(\w+://[^:/@\s]*:)[^@\s]*@")
 _SECRET_FLAG_RE = re.compile(r"(--(?:snowflake-)?dsn)(=|\s+)(\S+)", re.IGNORECASE)
+_DSN_TAIL_RE = re.compile(r"(--(?:snowflake-)?dsn)\b.*", re.IGNORECASE | re.DOTALL)
+_UNRECOGNIZED_ARGS = "unrecognized arguments:"
 
 
 def redact(text: str, dsn: str | None = None) -> str:
@@ -105,13 +109,33 @@ def _secret_dsn_values(args: argparse.Namespace | None = None) -> tuple[str, ...
 
 
 def _cli_redact(text: str, args: argparse.Namespace | None = None) -> str:
-    """Scrub DSN flags, env DSN values, and password=/token=/private_key= pairs."""
+    """Scrub DSN flags, env DSN values, and secret key=value pairs."""
     text = str(text)
-    text = _SECRET_FLAG_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
-    for dsn in _secret_dsn_values(args):
-        text = redact(text, dsn)
+    dsns = _secret_dsn_values(args)
+    for dsn in dsns:
         text = text.replace(dsn, "<redacted>")
+    text = _SECRET_FLAG_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    for dsn in dsns:
+        text = redact(text, dsn)
     return redact(text)
+
+
+def _scrub_unrecognized_arguments(message: str) -> str:
+    """Keep option names only; replace every other unrecognized token with <redacted>."""
+    idx = message.lower().find(_UNRECOGNIZED_ARGS)
+    if idx < 0:
+        return message
+    head = message[: idx + len(_UNRECOGNIZED_ARGS)]
+    tokens: list[str] = []
+    for tok in message[idx + len(_UNRECOGNIZED_ARGS) :].split():
+        if tok.startswith("-"):
+            name, eq, _val = tok.partition("=")
+            tokens.append(name)
+            if eq:
+                tokens.append("<redacted>")
+        else:
+            tokens.append("<redacted>")
+    return head + ((" " + " ".join(tokens)) if tokens else "")
 
 
 @dataclass
@@ -1745,7 +1769,9 @@ class _SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         from datagrant.oidc import _JWS_LIKE_RE
 
-        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(_cli_redact(message)))
+        clean = _scrub_unrecognized_arguments(message)
+        clean = _DSN_TAIL_RE.sub(r"\1 <redacted>", clean)
+        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(_cli_redact(clean)))
         self.print_usage(sys.stderr)
         print(f"{self.prog}: error: {clean}", file=sys.stderr)
         raise SystemExit(EXIT_USAGE)

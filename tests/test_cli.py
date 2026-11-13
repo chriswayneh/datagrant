@@ -349,6 +349,57 @@ def test_redact_does_not_mangle_oidc_token_flag() -> None:
     assert "token=***" not in redact(blob)
 
 
+def test_argparse_error_redacts_private_key_file_pwd_and_passcode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv = [
+        "approve",
+        "x",
+        "--snowflake-dsn",
+        "account=a user=b private_key_file_pwd=KeyPw999 passcode=123456",
+    ]
+    assert main(argv) == EXIT_USAGE
+    err = capsys.readouterr().err
+    for secret in ("KeyPw999", "123456"):
+        assert secret not in err
+
+
+def test_argparse_error_redacts_env_and_flag_spaced_snowflake_dsn(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "account=a private_key_file_pwd=EnvPw777"
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", dsn)
+    assert main(["approve", "x", "--snowflake-dsn", dsn]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "EnvPw777" not in err
+    assert dsn not in err
+
+
+def test_argparse_error_redacts_url_password_with_space(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["approve", "x", "--snowflake-dsn=snowflake://u:P@ss w0rd@acct"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "w0rd" not in err
+
+
+def test_cli_redact_replaces_literal_dsn_before_regexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dsn = "account=a private_key_file_pwd=EnvPw777"
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", dsn)
+    out = cli._cli_redact(f"fail --snowflake-dsn {dsn} trailing")
+    assert "EnvPw777" not in out
+    assert dsn not in out
+
+
+def test_redact_widens_secret_kv_keys() -> None:
+    blob = "private_key_file_pwd=KeyPw999 passcode=123456 passphrase=Phs1 secret=Tok9"
+    cleaned = redact(blob)
+    for secret in ("KeyPw999", "123456", "Phs1", "Tok9"):
+        assert secret not in cleaned
+
+
 def test_err_and_warn_strip_snowflake_dsn_and_kv(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
