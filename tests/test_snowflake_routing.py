@@ -12,7 +12,6 @@ import pytest
 from datagrant import cli
 from datagrant.cli import EXIT_FAILED, EXIT_OK, EXIT_USAGE
 from datagrant.snowflake_support import (
-    APPLY_UNAVAILABLE,
     EXTRA_HINT,
     MAX_DSN_BYTES,
     SNOWFLAKE_DSN_ENV,
@@ -96,7 +95,7 @@ def test_snowflake_dry_run_skips_postgres_dsn(
     assert cli.main([*SF_REQ, "--policy", str(path)], text.append) == EXIT_OK
     assert EXTRA_HINT in text[0]
     assert SNOWFLAKE_DSN_ENV in text[0]
-    assert APPLY_UNAVAILABLE in text[0]
+    assert "not enabled yet" not in text[0]
     assert "BEGIN PRIVATE KEY" not in text[0]
 
 
@@ -153,20 +152,23 @@ class _FakeSf:
         return None
 
 
-def test_snowflake_apply_refused_until_revoke_sweep(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def _sf_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conn: _FakeSf) -> Path:
     monkeypatch.setattr("datagrant.snowflake_support.driver_present", lambda: True)
-    monkeypatch.setattr(
-        "datagrant.snowflake_support.connect",
-        lambda dsn: (_ for _ in ()).throw(AssertionError("connect on gated apply")),
-    )
+    monkeypatch.setattr("datagrant.snowflake_support.connect", lambda dsn: conn)
     monkeypatch.delenv("DATAGRANT_DSN", raising=False)
-    monkeypatch.delenv(SNOWFLAKE_DSN_ENV, raising=False)
     monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
     monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
     monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
+    monkeypatch.setenv(SNOWFLAKE_DSN_ENV, "snowflake://svc@xy12345/CLINIC_DB")
     assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
+    return tmp_path / "r.jsonl"
+
+
+def test_snowflake_apply_issues_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    conn = _FakeSf()
+    _sf_keys(tmp_path, monkeypatch, conn)
     path = _policy(tmp_path)
     dsn = "snowflake://svc@xy12345/CLINIC_DB?warehouse=WH"
     out: list[str] = []
@@ -175,10 +177,23 @@ def test_snowflake_apply_refused_until_revoke_sweep(
         out.append,
     )
     err = capsys.readouterr().err
-    assert code == EXIT_USAGE
-    assert out and APPLY_UNAVAILABLE in out[0]
+    assert code == EXIT_OK
+    body = json.loads(out[0])
+    assert body["status"] == "granted"
+    assert body["engine"] == "snowflake"
+    assert "BEGIN PRIVATE KEY" in body["private_key"]
+    sqls = [s for s, _p in conn.queries]
+    assert any(s.startswith("CREATE USER") for s in sqls)
+    assert any("DISABLED = FALSE" in s for s in sqls)
+    assert all("BEGIN PRIVATE KEY" not in s for s in sqls)
+    recs = [
+        json.loads(line)["receipt"]
+        for line in (tmp_path / "r.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert recs and recs[0]["event"] == "issued"
     assert "supersecret" not in err
-    assert "supersecret" not in (out[0] if out else "")
+    assert "supersecret" not in out[0]
 
 
 def test_snowflake_dsn_too_long(
@@ -324,28 +339,25 @@ def test_two_person_request_stores_public_key_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     conn = _FakeSf()
-    monkeypatch.setattr("datagrant.snowflake_support.driver_present", lambda: True)
-    monkeypatch.setattr("datagrant.snowflake_support.connect", lambda dsn: conn)
-    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
-    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
-    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
-    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
-    monkeypatch.setenv(SNOWFLAKE_DSN_ENV, "snowflake://svc@xy12345/CLINIC_DB")
-    assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
-    pol = tmp_path / "two.yaml"
-    pol.write_text(
-        MIXED.replace("approval: auto", "approval: two-person").replace(
-            "groups:\n  ml: [alice]\n",
-            "approvers: [sec]\ngroups:\n  ml: [alice]\n  sec: [carol]\n",
-        )
-    )
-    pol.chmod(0o600)
+    _sf_keys(tmp_path, monkeypatch, conn)
+    path = _two_person_policy(tmp_path)
     out: list[str] = []
-    code = cli.main([*SF_REQ, "--policy", str(pol), "--apply", "--json"], out.append)
+    code = cli.main([*SF_REQ, "--policy", str(path), "--apply", "--json"], out.append)
     capsys.readouterr()
-    assert code == EXIT_USAGE
-    assert out and APPLY_UNAVAILABLE in out[0]
-    assert conn.queries == []
+    assert code == EXIT_OK
+    body = json.loads(out[0])
+    assert body["status"] == "pending"
+    assert body["engine"] == "snowflake"
+    assert "BEGIN PRIVATE KEY" in body["private_key"]
+    inserts = [
+        (s, p) for s, p in conn.queries if s.startswith('INSERT INTO "DATAGRANT"."REQUESTS"')
+    ]
+    assert inserts
+    _sql, params = inserts[0]
+    blob = " ".join(str(x) for x in params)
+    assert "BEGIN PRIVATE KEY" not in blob
+    assert any("RSA_PUBLIC_KEY" in s or "PUBLIC_KEY" in str(p) for s, p in inserts)
+    assert not any(s.startswith("CREATE USER") for s, _p in conn.queries)
 
 
 def _sf_policy_with_filter(tmp_path: Path, *, two_person: bool = False) -> Path:
@@ -464,58 +476,27 @@ def _two_person_policy(tmp_path: Path) -> Path:
     return pol
 
 
-def test_snowflake_approve_apply_refused_until_revoke_sweep(
+def test_snowflake_approve_apply_issues_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from datetime import UTC, datetime
-
-    now = datetime(2026, 11, 13, 3, 0, tzinfo=UTC)
-    pending = (
-        "aabbccddeeff",
-        "alice",
-        "snow_clinic",
-        "PUBLIC.PATIENTS",
-        '["PATIENT_ID"]',
-        None,
-        3600,
-        "eval",
-        "a" * 64,
-        "PUBKEY",
-        "b" * 64,
-        now.isoformat(),
-        now.isoformat(),
-        "pending",
-        None,
-    )
-    conn = _FakeSf(pending_row=pending)
-    monkeypatch.setattr("datagrant.snowflake_support.driver_present", lambda: True)
-    monkeypatch.setattr("datagrant.snowflake_support.connect", lambda dsn: conn)
-    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
-    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
-    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
-    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
-    monkeypatch.setenv(SNOWFLAKE_DSN_ENV, "snowflake://svc@xy12345/CLINIC_DB")
-    assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
-    path = _two_person_policy(tmp_path)
-    out: list[str] = []
-    code = cli.main(
-        [
-            "approve",
-            "aabbccddeeff",
-            "--apply",
-            "--policy",
-            str(path),
-            "--as-user",
-            "carol",
-            "--json",
-        ],
-        out.append,
-    )
+    conn = _FakeSf(pending_row=_pending_tuple())
+    code, body = _approve_apply(tmp_path, monkeypatch, conn)
     capsys.readouterr()
-    assert code == EXIT_USAGE
-    assert out and APPLY_UNAVAILABLE in out[0]
-    assert not any("CREATE USER" in s for s, _p in conn.queries)
-    assert "error" in json.loads(out[0])
+    assert code == EXIT_OK
+    granted = json.loads(body)
+    assert granted["status"] == "granted"
+    assert granted["engine"] == "snowflake"
+    sqls = [s for s, _p in conn.queries]
+    claim = next(i for i, s in enumerate(sqls) if s.startswith('UPDATE "DATAGRANT"."REQUESTS"'))
+    user = next(i for i, s in enumerate(sqls) if s.startswith("CREATE USER"))
+    assert claim < user
+    assert any("DISABLED = FALSE" in s for s in sqls)
+    recs = [
+        json.loads(line)["receipt"]
+        for line in (tmp_path / "r.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert recs and recs[0]["event"] == "issued"
 
 
 def test_snowflake_approve_identity_mode_mismatch(
@@ -602,15 +583,7 @@ def _pending_tuple(*, status: str = "pending") -> tuple[Any, ...]:
 def _approve_apply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conn: _FakeSf
 ) -> tuple[int, str]:
-    monkeypatch.setattr("datagrant.snowflake_support.GRANT_APPLY_ENABLED", True)
-    monkeypatch.setattr("datagrant.snowflake_support.driver_present", lambda: True)
-    monkeypatch.setattr("datagrant.snowflake_support.connect", lambda dsn: conn)
-    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
-    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
-    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
-    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
-    monkeypatch.setenv(SNOWFLAKE_DSN_ENV, "snowflake://svc@xy12345/CLINIC_DB")
-    assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
+    _sf_keys(tmp_path, monkeypatch, conn)
     path = _two_person_policy(tmp_path)
     out: list[str] = []
     code = cli.main(

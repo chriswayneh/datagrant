@@ -425,7 +425,7 @@ def reverse_drop(conn: Any, plan: GrantPlan, *, enabled: bool) -> None:
     """Drop created objects in reverse order. DISABLE first if ENABLE ran."""
     view_id = f"{q(VIEW_SCHEMA)}.{q('G_' + plan.grant_id)}"
     if enabled:
-        _exec(conn, f"ALTER USER {q(plan.user)} SET DISABLED = TRUE")
+        _exec(conn, f"ALTER USER IF EXISTS {q(plan.user)} SET DISABLED = TRUE")
     _exec(conn, f"DROP VIEW IF EXISTS {view_id}")
     _exec(conn, f"DROP ROLE IF EXISTS {q(plan.role)}")
     _exec(conn, f"DROP USER IF EXISTS {q(plan.user)}")
@@ -522,7 +522,7 @@ def apply_plan(
             ) from exc
         active = _run(conn, active_sql)
         if _rowcount(active, conn) != 1:
-            _exec(conn, f"ALTER USER {q(plan.user)} SET DISABLED = TRUE")
+            _exec(conn, f"ALTER USER IF EXISTS {q(plan.user)} SET DISABLED = TRUE")
             reverse_drop(conn, plan, enabled=True)
             append_revoked(plan, receipts, reason="lost_enabling")
             raise GrantError(f"grant {plan.grant_id}: not enabling after ENABLE; objects dropped")

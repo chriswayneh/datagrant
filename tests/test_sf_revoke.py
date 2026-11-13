@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from datagrant import cli
-from datagrant.cli import EXIT_OK, EXIT_REVOKE_FAILED, EXIT_USAGE
+from datagrant.cli import EXIT_OK, EXIT_REVOKE_FAILED
 from datagrant.keys import init_keys, load_signing_key
 from datagrant.pg.grant import ReceiptSink
 from datagrant.receipt import ReceiptError
@@ -30,7 +30,7 @@ from datagrant.sf.revoke import (
     revoke,
     sweep,
 )
-from datagrant.snowflake_support import APPLY_UNAVAILABLE, SNOWFLAKE_DSN_ENV
+from datagrant.snowflake_support import SNOWFLAKE_DSN_ENV
 
 NOW = datetime(2026, 11, 13, 3, 0, tzinfo=UTC)
 GID = "abcdef012345"
@@ -456,9 +456,7 @@ def test_cli_revoke_disable_failure_is_exit_4(
     assert not any(s.startswith("DROP USER") for s in _sqls(conn))
 
 
-def test_cli_sweep_apply_and_request_apply_still_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_sweep_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     due = grant_row(status="active", expired=True)
     conn = StoreConn({GID: due}, requests={"aabbccddeeff": request_row()})
     _cli_env(tmp_path, monkeypatch, conn)
@@ -475,39 +473,6 @@ def test_cli_sweep_apply_and_request_apply_still_refused(
     assert conn.requests["aabbccddeeff"]["status"] == "expired"
     assert "aabbccddeeff" in body["expired_requests"]
     assert not any("DROP USER" in s and "aabbccddeeff" in str(p) for s, p in conn.queries)
-    pol = tmp_path / "p.yaml"
-    pol.write_text(
-        "version: 1\napproval: auto\nmax_duration: 8h\ngroups:\n  ml: [alice]\n"
-        "datasets:\n  - name: snow_clinic\n    engine: snowflake\n    database: CLINIC_DB\n"
-        "    tables:\n      - name: PUBLIC.PATIENTS\n        allowed_groups: [ml]\n"
-        "        columns: {PATIENT_ID: passthrough}\n"
-    )
-    pol.chmod(0o600)
-    out = []
-    code = cli.main(
-        [
-            "request",
-            "--dataset",
-            "snow_clinic",
-            "--table",
-            "PUBLIC.PATIENTS",
-            "--columns",
-            "PATIENT_ID",
-            "--duration",
-            "1h",
-            "--purpose",
-            "eval",
-            "--as-user",
-            "alice",
-            "--policy",
-            str(pol),
-            "--apply",
-            "--json",
-        ],
-        out.append,
-    )
-    assert code == EXIT_USAGE
-    assert APPLY_UNAVAILABLE in out[0]
 
 
 class _ConnFetch:

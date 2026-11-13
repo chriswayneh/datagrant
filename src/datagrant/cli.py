@@ -937,9 +937,15 @@ def _snowflake_request(
     ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any, ttl: timedelta
 ) -> int:
     """Snowflake auto grant or two-person pending (public key only until approve)."""
-    from datagrant.sf.grant import ROW_FILTER_UNAVAILABLE, build_plan
+    from datagrant.sf.grant import (
+        ROW_FILTER_UNAVAILABLE,
+        GrantError,
+        apply_plan,
+        build_plan,
+        create_pending,
+        new_keypair,
+    )
     from datagrant.snowflake_support import (
-        APPLY_UNAVAILABLE,
         EXTRA_HINT,
         SnowflakeSetupError,
         _dsn_kwargs,
@@ -990,8 +996,7 @@ def _snowflake_request(
             },
             "dry run: allowed by policy; engine=snowflake; with --apply datagrant would "
             f"require {EXTRA_HINT} and ${SNOWFLAKE_DSN_ENV} and {what}:\n"
-            + "\n".join(x + ";" for x in sqls)
-            + f"\n{APPLY_UNAVAILABLE}",
+            + "\n".join(x + ";" for x in sqls),
         )
         return EXIT_OK
     try:
@@ -999,7 +1004,59 @@ def _snowflake_request(
         resolve_dsn(getattr(a, "snowflake_dsn", None))
     except SnowflakeSetupError as exc:
         raise CliError(str(exc), EXIT_USAGE) from None
-    raise CliError(APPLY_UNAVAILABLE, EXIT_USAGE)
+    try:
+        with _sf_session(a) as conn:
+            pair = new_keypair()
+            sink = _sink(a)
+            _check_outbox(ctx, sink)
+            if two_person:
+                rid = create_pending(
+                    conn,
+                    req,
+                    policy_sha256=policy.sha256,
+                    public_body=pair.public_body,
+                    fingerprint=pair.fingerprint,
+                    ttl=ttl,
+                    requester_identity=caller.request_state_dict(),
+                )
+                n_req = policy.approvals_required
+                expires = datetime.now(UTC) + ttl
+                ctx.emit(
+                    {
+                        "status": "pending",
+                        "engine": "snowflake",
+                        "request_id": rid,
+                        "requester": req.requester,
+                        "identity_source": caller.source,
+                        "pending_expires_at": expires,
+                        "public_key_fingerprint": pair.fingerprint,
+                        "private_key": pair.private_pem,
+                        "approvals_recorded": 0,
+                        "approvals_required": n_req,
+                        "approvals": f"0/{n_req}",
+                    },
+                    f"request {rid} is pending approval by another person"
+                    f" (approvals 0/{n_req}, expires {expires.isoformat()}).\n"
+                    f"one-time private key (shown once, works after approval): {pair.private_pem}",
+                )
+                return EXIT_OK
+            plan = build_plan(
+                decision,
+                req,
+                database=ds.database,
+                schema=ds.schema,
+                warehouse=warehouse if isinstance(warehouse, str) else None,
+                public_body=pair.public_body,
+                fingerprint=pair.fingerprint,
+                hash_key=hash_key,
+                requester_identity=caller.receipt_dict(),
+                private_pem=pair.private_pem,
+            )
+            apply_plan(conn, plan, sink)
+            _deliver_sf_issued(ctx, conn, plan, sink)
+            return _print_sf_grant(ctx, plan, pair.private_pem, req.requester, caller.source)
+    except GrantError as exc:
+        raise CliError(str(exc), EXIT_FAILED) from None
 
 
 def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
@@ -1014,7 +1071,6 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
         get_pending,
         issue_approved,
     )
-    from datagrant.snowflake_support import APPLY_UNAVAILABLE, GRANT_APPLY_ENABLED
 
     a = ctx.args
     approver = caller.username
@@ -1147,12 +1203,9 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                         "sql": sqls,
                     },
                     f"dry run: {approver} may approve request {pending.id}; with --apply:\n"
-                    + "\n".join(x + ";" for x in sqls)
-                    + f"\n{APPLY_UNAVAILABLE}",
+                    + "\n".join(x + ";" for x in sqls),
                 )
                 return EXIT_OK
-            if not GRANT_APPLY_ENABLED:
-                raise CliError(APPLY_UNAVAILABLE, EXIT_USAGE)
             sink = _sink(a)
             _check_outbox(ctx, sink)
             issue_approved(conn, plan, pending.id, approver=approver, receipts=sink)

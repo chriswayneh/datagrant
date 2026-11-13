@@ -72,6 +72,7 @@ class FakeConn:
         rowcount: int = 1,
         fail_params: Any = None,
         flip_before: str | None = None,
+        missing_user: bool = False,
     ):
         self.queries: list[tuple[str, Any]] = []
         self.fail_on = fail_on
@@ -79,6 +80,7 @@ class FakeConn:
         self.rowcount = rowcount
         self.fail_params = fail_params
         self.flip_before = flip_before
+        self.missing_user = missing_user
         self.status: dict[str, str] = {}
 
     def cursor(self) -> FakeConn:
@@ -91,6 +93,13 @@ class FakeConn:
         if self.fail_on and self.fail_on.upper() in sql.upper():
             raise RuntimeError(f"stub:{self.fail_on}")
         su = sql.upper()
+        if (
+            self.missing_user
+            and "ALTER USER" in su
+            and "DISABLED = TRUE" in su
+            and "IF EXISTS" not in su
+        ):
+            raise RuntimeError("stub:user gone")
         args: tuple[Any, ...] = () if params is None else tuple(params)
         if "GRANTS" in su and su.startswith("INSERT") and args:
             self.status[str(args[0])] = str(args[15]) if len(args) > 15 else "issuing"
@@ -605,6 +614,23 @@ def test_revoked_row_before_active_disables_and_drops(tmp_path: Path) -> None:
     events = _receipt_events(tmp_path)
     assert events[0] == "issued"
     assert "revoked" in events
+
+
+def test_lost_enabling_if_exists_writes_receipt_when_user_dropped(tmp_path: Path) -> None:
+    conn = FakeConn(flip_before="active", missing_user=True)
+    with pytest.raises(GrantError, match="not enabling after ENABLE"):
+        apply_plan(conn, _plan(), _sink(tmp_path))
+    sqls = _sqls(conn)
+    assert any("ALTER USER IF EXISTS" in s and "DISABLED = TRUE" in s for s in sqls)
+    assert not any("DISABLED = TRUE" in s and "IF EXISTS" not in s for s in sqls)
+    recs = [
+        json.loads(line)["receipt"]
+        for line in (tmp_path / "r.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert recs[0]["event"] == "issued"
+    revoked = [r for r in recs if r["event"] == "revoked"]
+    assert revoked and revoked[-1]["details"]["reason"] == "lost_enabling"
 
 
 def test_deliver_sf_issued_writes_revoked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
