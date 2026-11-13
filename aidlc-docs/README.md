@@ -5,13 +5,14 @@ datagrant follows the [AWS AI-Driven Development Life Cycle](https://github.com/
 | Stage | Folder | Roadmap | Gate |
 | --- | --- | --- | --- |
 | Inception | [inception/](inception/) | v0.1.0 | Maintainer approves vision, requirements, stories, units |
-| Construction | [construction/](construction/) | v0.2.0 to v0.5.0 | Maintainer approves design and NFRs per unit before code; test plan before release |
+| Construction | [construction/](construction/) | v0.2.0 to v0.6.0 | Maintainer approves design and NFRs per unit before code; test plan before release |
 | Operations | [operations/](operations/) | v0.9.0 to v1.0.0 | Maintainer approves runbook and threat model |
 
 - [aidlc-state.md](aidlc-state.md) tracks the current stage.
 - [audit.md](audit.md) is the append-only log of decisions and approvals.
 - M2 / v0.4.0 (approvals and policy limits): released 2026-11-10. Design: [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md).
-- M3 / v0.5.0 (ops hardening): released 2026-11-11. Design: [docs/design/ops-hardening.md](../docs/design/ops-hardening.md). Warehouses are v0.6.0+ (not this milestone).
+- M3 / v0.5.0 (ops hardening): released 2026-11-11. Design: [docs/design/ops-hardening.md](../docs/design/ops-hardening.md).
+- M4 / v0.6.0 (warehouses): design proposed. [docs/design/warehouses.md](../docs/design/warehouses.md). Construction waits on maintainer approval in [audit.md](audit.md). Snowflake first (recommended); BigQuery is v0.7.0+.
 
 Working rules: see [AGENTS.md](../AGENTS.md).
 

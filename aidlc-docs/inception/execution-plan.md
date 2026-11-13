@@ -43,3 +43,9 @@ Implemented (PRs #33 to #38). Design: [docs/design/approvals-policy-limits.md](.
 Chris authorized a v1.0 plan that names **M3 = ops hardening**, target v0.5.0. Warehouses (Snowflake/BigQuery) are proposed for **v0.6.0+**, not this milestone. Rate limits and `max_rows` stay out. No break-glass.
 
 Implemented (PRs #40 to #45). Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). v0.5.0 released 2026-11-11.
+
+## Post-v0.5.0: M4 / v0.6.0 (design)
+
+Chris authorized a v1.0 plan that parked **warehouses (Snowflake/BigQuery)** after ops hardening. M3 released as v0.5.0. M4 is that warehouse work, target v0.6.0. This design recommends **Snowflake first**; BigQuery is **v0.7.0+**. Rate limits and `max_rows` stay out. No break-glass.
+
+Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Construction PRs wait on design approval in [audit.md](../audit.md).
