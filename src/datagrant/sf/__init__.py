@@ -1,1 +1,1 @@
-"""Snowflake grant engine (M4 construction PR 2)."""
+"""Snowflake grant engine, revoke, and sweep (M4)."""

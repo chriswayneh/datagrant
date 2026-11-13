@@ -857,6 +857,19 @@ def _sf_session(args: argparse.Namespace) -> Iterator[Any]:
             close()
 
 
+def _sf_dsn_only(args: argparse.Namespace) -> bool:
+    from datagrant.snowflake_support import SnowflakeSetupError
+    from datagrant.snowflake_support import resolve_dsn as resolve_sf_dsn
+
+    have_pg = bool(getattr(args, "dsn", None) or (os.environ.get(DSN_ENV) or "").strip())
+    try:
+        resolve_sf_dsn(getattr(args, "snowflake_dsn", None))
+        have_sf = True
+    except SnowflakeSetupError:
+        have_sf = False
+    return have_sf and not have_pg
+
+
 def _deliver_sf_issued(ctx: Ctx, conn: Any, plan: Any, local: Any) -> None:
     """Flush the outbox. Required sink failure DISABLE/drops the Snowflake grant."""
     from datagrant.outbox import flush, quick
@@ -994,8 +1007,14 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
     from types import SimpleNamespace
 
     from datagrant.policy import Request, evaluate
-    from datagrant.sf.grant import ROW_FILTER_UNAVAILABLE, GrantError, build_plan, get_pending
-    from datagrant.snowflake_support import APPLY_UNAVAILABLE
+    from datagrant.sf.grant import (
+        ROW_FILTER_UNAVAILABLE,
+        GrantError,
+        build_plan,
+        get_pending,
+        issue_approved,
+    )
+    from datagrant.snowflake_support import APPLY_UNAVAILABLE, GRANT_APPLY_ENABLED
 
     a = ctx.args
     approver = caller.username
@@ -1132,7 +1151,27 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                     + f"\n{APPLY_UNAVAILABLE}",
                 )
                 return EXIT_OK
-            raise CliError(APPLY_UNAVAILABLE, EXIT_USAGE)
+            if not GRANT_APPLY_ENABLED:
+                raise CliError(APPLY_UNAVAILABLE, EXIT_USAGE)
+            sink = _sink(a)
+            _check_outbox(ctx, sink)
+            issue_approved(conn, plan, pending.id, approver=approver, receipts=sink)
+            try:
+                _deliver_sf_issued(ctx, conn, plan, sink)
+            except BaseException:
+                from datagrant.sf.grant import mark_request_failed
+
+                mark_request_failed(conn, pending.id)
+                raise
+            return _print_sf_grant(
+                ctx,
+                plan,
+                None,
+                req.requester,
+                caller.source,
+                approvals_recorded=1,
+                approvals_required=1,
+            )
     except GrantError as exc:
         raise CliError(str(exc), EXIT_FAILED) from None
 
@@ -1705,7 +1744,183 @@ def _grant_rows(conn: Any, where: str, params: tuple[Any, ...]) -> list[dict[str
     return out
 
 
+def _snowflake_grant_list(ctx: Ctx) -> int:
+    from datagrant.sf.revoke import list_grants
+
+    with _sf_session(ctx.args) as conn:
+        rows = list_grants(conn, active_only=not bool(getattr(ctx.args, "all", False)))
+    text = (
+        "\n".join(
+            f"{r['id']}  {r['status']:<8} {r.get('requester') or ''!s:<12} "
+            f"{r.get('dataset')}/{r.get('table_name')}"
+            for r in rows
+        )
+        or "no grants"
+    )
+    ctx.emit({"grants": rows, "engine": "snowflake"}, text)
+    return EXIT_OK
+
+
+def _snowflake_grant_status(ctx: Ctx) -> int:
+    from datagrant.sf.revoke import get_grant
+
+    with _sf_session(ctx.args) as conn:
+        row = get_grant(conn, ctx.args.grant_id)
+    if row is None:
+        raise CliError(f"unknown grant {ctx.args.grant_id}")
+    ctx.emit(row, "\n".join(f"{k}: {'-' if v is None else v}" for k, v in row.items()))
+    return EXIT_OK
+
+
+def _snowflake_revoke(ctx: Ctx) -> int:
+    from datagrant.sf.revoke import get_grant, revoke
+
+    if not ctx.args.apply:
+        with _sf_session(ctx.args) as conn:
+            row = get_grant(conn, ctx.args.grant_id)
+        if row is None:
+            raise CliError(f"unknown grant {ctx.args.grant_id}")
+        active = row["status"] not in {"revoked", "expired", "failed"}
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "snowflake",
+                "grant_id": ctx.args.grant_id,
+                "status": row["status"],
+                "would_revoke": active,
+            },
+            f"dry run: grant {ctx.args.grant_id} is {row['status']}; "
+            + (
+                "--apply would DISABLE the user and drop view/role/user"
+                if active
+                else "nothing to do"
+            ),
+        )
+        return EXIT_OK
+    sink, key_problem = _revoke_receipts(ctx)
+    with _sf_session(ctx.args) as conn:
+        r = revoke(conn, ctx.args.grant_id, "manual", sink)
+    delivery = _deliver_quick(ctx, sink)
+    code = _exit_for([r] if r.outcome != "noop" else [], key_problem)
+    msg = f"grant {r.grant_id}: {r.outcome}"
+    if r.error:
+        msg += f"\nerror: {r.error}"
+    if r.receipt_error or (key_problem and r.outcome != "noop"):
+        msg += f"\nreceipt not written: {r.receipt_error or key_problem}"
+    ctx.emit(
+        _result_dict(r) | {"key_problem": key_problem, "sink": delivery, "engine": "snowflake"},
+        msg,
+    )
+    return code
+
+
+def _snowflake_sweep(ctx: Ctx) -> int:
+    from datagrant.receipt import GrantFacts, ReceiptError
+    from datagrant.sf.revoke import (
+        due_grant_ids,
+        expire_stale_requests,
+        pending_expired_ids,
+        sweep,
+    )
+
+    if not ctx.args.apply:
+        with _sf_session(ctx.args) as conn:
+            due_ids = due_grant_ids(conn)
+            stale = pending_expired_ids(conn)
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "snowflake",
+                "would_revoke": due_ids,
+                "would_expire_requests": stale,
+            },
+            "dry run: --apply would "
+            + (
+                f"revoke expired Snowflake grants {', '.join(due_ids)}"
+                if due_ids
+                else "revoke no grants"
+            )
+            + (f" and expire requests {', '.join(stale)}" if stale else ""),
+        )
+        return EXIT_OK
+    sink, key_problem = _revoke_receipts(ctx)
+    with _sf_session(ctx.args) as conn:
+        results = sweep(conn, sink)
+        expired = expire_stale_requests(conn)
+    expired_requests = [str(p["id"]) for p in expired]
+    request_receipt_error: str | None = None
+    if expired:
+        if sink is None:
+            request_receipt_error = key_problem or "signing key unavailable"
+        else:
+            for item in expired:
+                try:
+                    raw_cols = item.get("columns")
+                    cols = tuple(
+                        json.loads(raw_cols) if isinstance(raw_cols, str) else (raw_cols or ())
+                    )
+                    created = item["created_at"]
+                    expires = item["expires_at"]
+                    if isinstance(created, str):
+                        created = datetime.fromisoformat(created)
+                    if isinstance(expires, str):
+                        expires = datetime.fromisoformat(expires)
+                    facts = GrantFacts(
+                        str(item["id"]),
+                        str(item.get("requester") or ""),
+                        str(item.get("dataset") or ""),
+                        str(item.get("table_name") or ""),
+                        cols,
+                        {},
+                        item.get("row_filter"),
+                        str(item.get("purpose") or ""),
+                        created,
+                        expires,
+                        str(item.get("policy_sha256") or ""),
+                        1,
+                        "two-person",
+                    )
+                    receipt.append(
+                        sink.log,
+                        "request_expired",
+                        facts,
+                        sink.key,
+                        host=sink.host,
+                        details={"request_id": item["id"], "engine": "snowflake"},
+                    )
+                except ReceiptError as exc:
+                    request_receipt_error = str(exc)
+    delivery = _deliver_quick(ctx, sink)
+    lines = [
+        f"grant {r.grant_id}: {r.outcome}"
+        + (f" ({r.error})" if r.error else "")
+        + (f" [receipt not written: {r.receipt_error}]" if r.receipt_error else "")
+        for r in results
+    ]
+    lines += [f"request {rid}: expired" for rid in expired_requests]
+    if key_problem and (results or expired_requests):
+        lines.append(f"receipts not written: {key_problem}")
+    elif request_receipt_error:
+        lines.append(f"receipts not written: {request_receipt_error}")
+    ctx.emit(
+        {
+            "results": [_result_dict(r) for r in results],
+            "expired_requests": expired_requests,
+            "key_problem": key_problem,
+            "sink": delivery,
+            "engine": "snowflake",
+        },
+        "\n".join(lines) or "nothing to sweep",
+    )
+    code = _exit_for(results, key_problem)
+    if code == EXIT_OK and expired_requests and (key_problem or request_receipt_error):
+        return EXIT_RECEIPT
+    return code
+
+
 def cmd_grant_list(ctx: Ctx) -> int:
+    if _sf_dsn_only(ctx.args):
+        return _snowflake_grant_list(ctx)
 
     with _connect(ctx.args) as conn:
         rows = _grant_rows(conn, "" if ctx.args.all else "WHERE status = 'active'", ())
@@ -1723,6 +1938,8 @@ def cmd_grant_list(ctx: Ctx) -> int:
 
 
 def cmd_grant_status(ctx: Ctx) -> int:
+    if _sf_dsn_only(ctx.args):
+        return _snowflake_grant_status(ctx)
 
     with _connect(ctx.args) as conn:
         rows = _grant_rows(conn, "WHERE id = %s", (ctx.args.grant_id,))
@@ -1762,6 +1979,8 @@ def cmd_revoke(ctx: Ctx) -> int:
     from datagrant.pg.grant import ensure_state
     from datagrant.pg.revoke import revoke
 
+    if _sf_dsn_only(ctx.args):
+        return _snowflake_revoke(ctx)
     _host_file_gate(
         ctx,
         access_creating=False,
@@ -1818,6 +2037,8 @@ def cmd_sweep(ctx: Ctx) -> int:
     from datagrant.pg.revoke import sweep
     from datagrant.receipt import ReceiptError
 
+    if _sf_dsn_only(ctx.args):
+        return _snowflake_sweep(ctx)
     _host_file_gate(
         ctx,
         access_creating=False,
@@ -2034,6 +2255,10 @@ def cmd_preflight(ctx: Ctx) -> int:
 
 
 _SINK = ("receipt_sink", "receipt_sink_mode")
+_SF_DSN_HELP = (
+    f"Snowflake admin DSN (default ${SNOWFLAKE_DSN_ENV}); service user with "
+    "private_key_file (key-pair only, password not supported); ignored for postgres"
+)
 _GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
 _REVOKING = ("json", "dsn", "signing_key", "receipt_log", *_SINK)
 _DOCTOR = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
@@ -2191,10 +2416,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--row-filter")
     r.add_argument("--duration", required=True, help="e.g. 30m, 2h")
     r.add_argument("--purpose", required=True)
-    r.add_argument(
-        "--snowflake-dsn",
-        help=f"Snowflake admin settings (default ${SNOWFLAKE_DSN_ENV}); ignored for postgres",
-    )
+    r.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     r.add_argument(
         "--pending-ttl",
         default=None,
@@ -2207,10 +2429,7 @@ def build_parser() -> argparse.ArgumentParser:
         "approve", parents=[*only(*_GRANTING), ident, pol, apply], help="approve a pending request"
     )
     ap.add_argument("request_id")
-    ap.add_argument(
-        "--snowflake-dsn",
-        help=f"Snowflake admin settings (default ${SNOWFLAKE_DSN_ENV}); ignored for postgres",
-    )
+    ap.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     ap.set_defaults(fn=cmd_approve)
 
     g = sub.add_parser("grant", help="inspect grants").add_subparsers(
@@ -2218,19 +2437,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gl = g.add_parser("list", parents=only("json", "dsn"), help="list active grants")
     gl.add_argument("--all", action="store_true", help="include revoked/expired")
+    gl.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     gl.set_defaults(fn=cmd_grant_list)
     gs = g.add_parser("status", parents=only("json", "dsn"), help="show one grant")
     gs.add_argument("grant_id")
+    gs.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     gs.set_defaults(fn=cmd_grant_status)
 
     rv = sub.add_parser("revoke", parents=[*only(*_REVOKING), apply], help="revoke a grant now")
     rv.add_argument("grant_id")
+    rv.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     rv.set_defaults(fn=cmd_revoke)
-    sub.add_parser(
+    sw = sub.add_parser(
         "sweep",
         parents=[*only(*_REVOKING), apply],
         help="revoke expired grants (run on a schedule)",
-    ).set_defaults(fn=cmd_sweep)
+    )
+    sw.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
+    sw.set_defaults(fn=cmd_sweep)
 
     rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(
         dest="sub", required=True, parser_class=_SafeArgumentParser

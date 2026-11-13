@@ -17,7 +17,8 @@ SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
 EXTRA_HINT = "pip install 'datagrant[snowflake]'"
 MAX_DSN_BYTES = 8192
 PARAMSTYLE = "qmark"
-APPLY_UNAVAILABLE = "Snowflake --apply is not available until revoke and sweep land"
+APPLY_UNAVAILABLE = "Snowflake --apply for grant issue and approve is not enabled yet"
+GRANT_APPLY_ENABLED = False
 _DSN_ALLOWED = frozenset(
     {
         "account",
@@ -114,6 +115,10 @@ def _raw_dsn_fields(dsn: str) -> dict[str, str]:
 def _dsn_kwargs(dsn: str) -> dict[str, Any]:
     """Allowlisted Snowflake connect kwargs. Never log the result."""
     raw = _raw_dsn_fields(dsn)
+    if any(k in raw for k in ("password", "passwd", "pwd", "passcode", "passphrase")):
+        raise SnowflakeSetupError(
+            "Snowflake DSN password auth is not supported; use private_key_file (key-pair only)"
+        )
     proto = raw.pop("protocol", None)
     if proto is not None and str(proto).strip().lower() != "https":
         raise SnowflakeSetupError("Snowflake DSN protocol must be https")
@@ -170,8 +175,11 @@ def connect(dsn: str) -> Any:
     mod.paramstyle = PARAMSTYLE
     kwargs = _dsn_kwargs(dsn)
     path = kwargs.pop("private_key_file", None)
-    if path:
-        kwargs["private_key"] = _load_private_key(str(path))
+    if not path:
+        raise SnowflakeSetupError(
+            "Snowflake DSN requires private_key_file (key-pair only; password is not supported)"
+        )
+    kwargs["private_key"] = _load_private_key(str(path))
     kwargs["paramstyle"] = PARAMSTYLE
     conn = mod.connect(**kwargs)
     try:

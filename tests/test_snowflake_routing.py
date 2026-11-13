@@ -128,19 +128,26 @@ def test_snowflake_apply_missing_dsn(
 
 
 class _FakeSf:
-    def __init__(self, pending_row: tuple[Any, ...] | None = None) -> None:
+    def __init__(self, pending_row: tuple[Any, ...] | None = None, rowcount: int = 1) -> None:
         self.queries: list[tuple[str, Any]] = []
         self.pending_row = pending_row
+        self.rowcount = rowcount
+        self.fail_on: str | None = None
 
     def cursor(self) -> _FakeSf:
         return self
 
     def execute(self, sql: str, params: Any = None) -> _FakeSf:
         self.queries.append((sql, params))
+        if self.fail_on and self.fail_on.upper() in sql.upper():
+            raise RuntimeError(f"stub:{self.fail_on}")
         return self
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self.pending_row
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return []
 
     def close(self) -> None:
         return None
@@ -252,13 +259,20 @@ def test_dsn_kwargs_and_connect_never_need_network(monkeypatch: pytest.MonkeyPat
             return captured
 
     monkeypatch.setattr("datagrant.snowflake_support.load_connector", lambda: _Mod())
-    got = connect("snowflake://svc@xy12345/DB")
+    monkeypatch.setattr("datagrant.snowflake_support._load_private_key", lambda p: b"DER")
+    got = connect("snowflake://svc@xy12345/DB?private_key_file=/tmp/k.p8")
     assert got["account"] == "xy12345"
     assert got["user"] == "svc"
     assert got["paramstyle"] == "qmark"
+    assert got["private_key"] == b"DER"
+    assert "private_key_file" not in got
     assert got["paramstyle"] not in {"pyformat", "format"}
-    with pytest.raises(Exception, match="unsupported Snowflake DSN|must not set|must be https"):
+    with pytest.raises(Exception, match="password auth is not supported"):
         _dsn_kwargs("snowflake://svc:supersecret@xy12345/CLINIC_DB")
+    with pytest.raises(Exception, match="password auth is not supported"):
+        _dsn_kwargs("account=xy user=svc password=supersecret")
+    with pytest.raises(Exception, match="private_key_file"):
+        connect("snowflake://svc@xy12345/DB")
     with pytest.raises(Exception, match="must not set insecure_mode"):
         _dsn_kwargs("account=xy user=svc insecure_mode=true")
     with pytest.raises(Exception, match="must not set ocsp_fail_open"):
@@ -287,8 +301,9 @@ def test_connect_refuses_pyformat_paramstyle(monkeypatch: pytest.MonkeyPatch) ->
             return _Frozen()
 
     monkeypatch.setattr("datagrant.snowflake_support.load_connector", lambda: _Mod())
+    monkeypatch.setattr("datagrant.snowflake_support._load_private_key", lambda p: b"DER")
     with pytest.raises(SnowflakeSetupError, match="qmark"):
-        connect("account=xy user=svc")
+        connect("account=xy user=svc private_key_file=/tmp/k.p8")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
@@ -559,3 +574,89 @@ def test_snowflake_approve_identity_mode_mismatch(
         if line.strip()
     ]
     assert recs and recs[0]["event"] == "not_approved"
+
+
+def _pending_tuple(*, status: str = "pending") -> tuple[Any, ...]:
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 11, 13, 3, 0, tzinfo=UTC)
+    return (
+        "aabbccddeeff",
+        "alice",
+        "snow_clinic",
+        "PUBLIC.PATIENTS",
+        '["PATIENT_ID"]',
+        None,
+        3600,
+        "eval",
+        "a" * 64,
+        "PUBKEY",
+        "b" * 64,
+        now.isoformat(),
+        now.isoformat(),
+        status,
+        None,
+    )
+
+
+def _approve_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conn: _FakeSf
+) -> tuple[int, str]:
+    monkeypatch.setattr("datagrant.snowflake_support.GRANT_APPLY_ENABLED", True)
+    monkeypatch.setattr("datagrant.snowflake_support.driver_present", lambda: True)
+    monkeypatch.setattr("datagrant.snowflake_support.connect", lambda dsn: conn)
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
+    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
+    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
+    monkeypatch.setenv(SNOWFLAKE_DSN_ENV, "snowflake://svc@xy12345/CLINIC_DB")
+    assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
+    path = _two_person_policy(tmp_path)
+    out: list[str] = []
+    code = cli.main(
+        [
+            "approve",
+            "aabbccddeeff",
+            "--apply",
+            "--policy",
+            str(path),
+            "--as-user",
+            "carol",
+            "--json",
+        ],
+        out.append,
+    )
+    return code, out[0] if out else ""
+
+
+def test_snowflake_approve_double_claim_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(pending_row=_pending_tuple(), rowcount=0)
+    code, body = _approve_apply(tmp_path, monkeypatch, conn)
+    assert code == EXIT_FAILED
+    assert "not pending or expired" in body
+    assert not any("CREATE USER" in s for s, _p in conn.queries)
+    claim = next(s for s, _p in conn.queries if s.startswith('UPDATE "DATAGRANT"."REQUESTS"'))
+    assert "EXPIRES_AT > CURRENT_TIMESTAMP()" in claim
+    assert "?" in claim
+
+
+def test_snowflake_approve_expired_pending_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(pending_row=_pending_tuple(), rowcount=0)
+    code, body = _approve_apply(tmp_path, monkeypatch, conn)
+    assert code == EXIT_FAILED
+    assert "not pending or expired" in body
+    assert not any(p == ("failed", "aabbccddeeff") for _s, p in conn.queries)
+
+
+def test_snowflake_approve_apply_failure_marks_request_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(pending_row=_pending_tuple(), rowcount=1)
+    conn.fail_on = "CREATE USER"
+    code, _body = _approve_apply(tmp_path, monkeypatch, conn)
+    assert code == EXIT_FAILED
+    assert any(p == ("failed", "aabbccddeeff") for _s, p in conn.queries)

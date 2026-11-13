@@ -1,9 +1,10 @@
 """Snowflake per-grant engine: SERVICE user, secure view, issuing-row fail-safe.
 
 DDL autocommits. Order: issuing row, DISABLED user, view, role, row update,
-issued receipt, ENABLE, then active. Reverse-drop on failure. The hash key is
-bound into ``datagrant._hash_master`` and read by a SQL secure UDF; it is never
-in view SQL or CREATE USER SQL. Revoke/sweep are a later construction PR.
+issued receipt, claim issuing to enabling, ENABLE, then active from enabling.
+Reverse-drop on failure. The hash key is bound into ``datagrant._hash_master``
+and read by a SQL secure UDF; it is never in view SQL or CREATE USER SQL.
+Revoke and sweep live in ``datagrant.sf.revoke``.
 """
 
 from __future__ import annotations
@@ -291,13 +292,23 @@ def build_plan(
     update_row = Bound(
         (
             f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET ROLE_NAME = ?, VIEW_NAME = ?,"  # nosec B608
-            " USER_NAME = ?, PUBLIC_KEY_FINGERPRINT = ? WHERE ID = ?"
+            " USER_NAME = ?, PUBLIC_KEY_FINGERPRINT = ? WHERE ID = ? AND STATUS = ?"
         ),
-        (role, view_name, user, fingerprint, gid),
+        (role, view_name, user, fingerprint, gid, "issuing"),
+    )
+    enabling = Bound(
+        (
+            f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET STATUS = ?"  # nosec B608
+            " WHERE ID = ? AND STATUS = ?"
+        ),
+        ("enabling", gid, "issuing"),
     )
     active = Bound(
-        f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET STATUS = ? WHERE ID = ?",  # nosec B608
-        ("active", gid),
+        (
+            f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET STATUS = ?"  # nosec B608
+            " WHERE ID = ? AND STATUS = ?"
+        ),
+        ("active", gid, "enabling"),
     )
     stmts: tuple[Stmt, ...] = (
         insert,
@@ -313,6 +324,7 @@ def build_plan(
         f"GRANT USAGE ON SCHEMA {q(VIEW_SCHEMA)} TO ROLE {q(role)}",
         *((f"GRANT USAGE ON WAREHOUSE {q(warehouse)} TO ROLE {q(role)}",) if warehouse else ()),
         update_row,
+        enabling,
         f"ALTER USER {q(user)} SET DISABLED = FALSE",
         active,
     )
@@ -444,7 +456,7 @@ def apply_plan(
     plan: GrantPlan,
     receipts: ReceiptSink | None = None,
 ) -> None:
-    """Run the fail-safe sequence. No ENABLE without an issued receipt."""
+    """Run the fail-safe sequence. No ENABLE without an issued receipt and an issuing row."""
     enabled = False
     created = False
     issued = False
@@ -453,7 +465,9 @@ def apply_plan(
             _exec(conn, stmt)
         if plan.hash_key is not None:
             _bind_hash_key(conn, plan.hash_key)
-        insert_sql, create_user, *middle, enable_sql, active_sql = plan.statements
+        insert_sql, create_user, *middle, update_sql, enabling_sql, enable_sql, active_sql = (
+            plan.statements
+        )
         _run(conn, insert_sql)
         created = True
         _run(conn, create_user)
@@ -462,6 +476,10 @@ def apply_plan(
             raise GrantError("private key must not appear in CREATE USER SQL")
         for item in middle:
             _run(conn, item)
+        updated = _run(conn, update_sql)
+        if _rowcount(updated, conn) != 1:
+            reverse_drop(conn, plan, enabled=False)
+            raise GrantError(f"grant {plan.grant_id}: not issuing at row update; objects dropped")
         if receipts is None:
             raise GrantError(f"grant {plan.grant_id}: issued receipt is required before ENABLE")
         if plan.facts is None:
@@ -486,6 +504,11 @@ def apply_plan(
             raise GrantError(
                 f"grant {plan.grant_id}: receipt not written ({exc}); objects dropped"
             ) from exc
+        enabling = _run(conn, enabling_sql)
+        if _rowcount(enabling, conn) != 1:
+            reverse_drop(conn, plan, enabled=False)
+            append_revoked(plan, receipts, reason="lost_issuing")
+            raise GrantError(f"grant {plan.grant_id}: not issuing at ENABLE; objects dropped")
         try:
             _run(conn, enable_sql)
             enabled = True
@@ -497,7 +520,12 @@ def apply_plan(
             raise GrantError(
                 f"grant {plan.grant_id}: ENABLE failed ({exc}); objects dropped"
             ) from exc
-        _run(conn, active_sql)
+        active = _run(conn, active_sql)
+        if _rowcount(active, conn) != 1:
+            _exec(conn, f"ALTER USER {q(plan.user)} SET DISABLED = TRUE")
+            reverse_drop(conn, plan, enabled=True)
+            append_revoked(plan, receipts, reason="lost_enabling")
+            raise GrantError(f"grant {plan.grant_id}: not enabling after ENABLE; objects dropped")
     except GrantError:
         raise
     except Exception as exc:
@@ -618,3 +646,20 @@ def mark_request_failed(conn: Any, request_id: str) -> None:
         f"UPDATE {q(STATE_SCHEMA)}.{q('REQUESTS')} SET STATUS = ? WHERE ID = ?",  # nosec B608
         ("failed", request_id),
     )
+
+
+def issue_approved(
+    conn: Any,
+    plan: GrantPlan,
+    request_id: str,
+    *,
+    approver: str,
+    receipts: ReceiptSink | None = None,
+) -> None:
+    """Claim a pending request, then apply. Mark the request failed if apply fails."""
+    claim_pending(conn, request_id, approver=approver)
+    try:
+        apply_plan(conn, plan, receipts)
+    except BaseException:
+        mark_request_failed(conn, request_id)
+        raise
