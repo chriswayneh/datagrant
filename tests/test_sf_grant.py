@@ -14,7 +14,6 @@ from datagrant.pg.grant import ReceiptSink
 from datagrant.policy import Decision, Request
 from datagrant.sf.grant import (
     HASH_TABLE,
-    ROW_FILTER_UNAVAILABLE,
     Bound,
     GrantError,
     apply_plan,
@@ -86,6 +85,11 @@ class FakeConn:
         self.live_count = live_count
         self._count_row: tuple[Any, ...] | None = None
         self.status: dict[str, str] = {}
+        self.catalog_rows: list[tuple[Any, ...]] = [
+            ("PATIENT_ID", "NUMBER"),
+            ("SSN", "VARCHAR"),
+            ("REGION", "VARCHAR"),
+        ]
 
     def cursor(self) -> FakeConn:
         return self
@@ -144,6 +148,12 @@ class FakeConn:
             self._count_row = None
             return row
         return self.pending_row
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        last = self.queries[-1][0].upper() if self.queries else ""
+        if "INFORMATION_SCHEMA" in last and "COLUMNS" in last:
+            return list(self.catalog_rows)
+        return []
 
     def close(self) -> None:
         return None
@@ -728,23 +738,61 @@ def test_deliver_sf_issued_writes_revoked(tmp_path: Path, monkeypatch: pytest.Mo
     assert "revoked" in events
 
 
-def test_build_plan_and_pending_refuse_row_filter() -> None:
+def test_build_plan_emits_quoted_row_filter() -> None:
+    from datagrant.sf.mask import TableCatalog
+
     pair = new_keypair()
-    with pytest.raises(GrantError, match="row filters"):
+    catalog = TableCatalog({"PATIENT_ID": "NUMBER", "SSN": "VARCHAR", "REGION": "VARCHAR"})
+    plan = build_plan(
+        dec(),
+        req(row_filter="REGION = 'west'"),
+        database="CLINIC_DB",
+        public_body=pair.public_body,
+        fingerprint=pair.fingerprint,
+        hash_key=KEY,
+        catalog=catalog,
+    )
+    view = next(s for s in plan.statements if "CREATE SECURE VIEW" in stmt_sql(s))
+    assert "WHERE \"REGION\" = 'west'" in view
+    rid = create_pending(
+        FakeConn(),
+        req(row_filter="REGION = 'west'"),
+        policy_sha256="a" * 64,
+        public_body=pair.public_body,
+        fingerprint=pair.fingerprint,
+        ttl=timedelta(hours=1),
+    )
+    assert rid
+
+
+def test_null_mask_uses_catalog_type() -> None:
+    from datagrant.sf.mask import TableCatalog
+
+    pair = new_keypair()
+    catalog = TableCatalog({"PATIENT_ID": "NUMBER", "SSN": "VARCHAR"})
+    plan = build_plan(
+        dec(masks={"PATIENT_ID": "passthrough", "SSN": "null"}),
+        req(),
+        database="CLINIC_DB",
+        public_body=pair.public_body,
+        fingerprint=pair.fingerprint,
+        catalog=catalog,
+    )
+    view = next(s for s in plan.statements if "CREATE SECURE VIEW" in stmt_sql(s))
+    assert 'CAST(NULL AS VARCHAR) AS "SSN"' in view
+
+
+def test_missing_catalog_column_fails() -> None:
+    from datagrant.sf.mask import TableCatalog
+
+    pair = new_keypair()
+    with pytest.raises(GrantError, match="does not exist"):
         build_plan(
             dec(),
-            req(row_filter="REGION = 'west'"),
+            req(),
             database="CLINIC_DB",
             public_body=pair.public_body,
             fingerprint=pair.fingerprint,
             hash_key=KEY,
-        )
-    with pytest.raises(GrantError, match=ROW_FILTER_UNAVAILABLE):
-        create_pending(
-            FakeConn(),
-            req(row_filter="REGION = 'west'"),
-            policy_sha256="a" * 64,
-            public_body=pair.public_body,
-            fingerprint=pair.fingerprint,
-            ttl=timedelta(hours=1),
+            catalog=TableCatalog({"OTHER": "VARCHAR"}),
         )
