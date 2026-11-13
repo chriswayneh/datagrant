@@ -33,7 +33,7 @@ v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_c
 | `engine` | Optional. `postgres` (default, including omitted) or `snowflake`. Unknown strings are errors. A table-level `engine` is an unknown-key error. Omitting it on every dataset is v0.5.0. |
 | `schema` | Optional Snowflake default schema. Only valid when `engine` is `snowflake`. Table `name` stays `schema.table`. |
 | `tables` | List of tables. |
-| `hash_scope` | Optional. Name of the hash scope (`[A-Za-z0-9_.-]`, up to 64 characters). Defaults to the dataset name, so each dataset hashes differently. Give two datasets the same `hash_scope` only when their hashes should be joinable. |
+| `hash_scope` | Optional. Name of the hash scope (`[A-Za-z0-9_.-]`, up to 64 characters). Defaults to the dataset name, so each dataset hashes differently. Give two datasets the same `hash_scope` only when their hashes should be joinable. Snowflake hashes are **not** joinable with Postgres hashes of the same value, even with the same `hash_scope`. |
 | `max_concurrent_grants` | Optional positive integer. Tighter of this and the policy-wide cap, if either is set. Count is the requester's live grants in that engine's store (all datasets of that engine; see the top-level key). |
 
 ## Tables
@@ -61,9 +61,9 @@ v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_c
 | `redact` | The constant `[REDACTED]`. |
 | `null` | NULL, cast to the column's type. |
 | `partial` | Asterisks plus the last 4 characters. Values shorter than 8 characters are fully masked. |
-| `hash` | A hex HMAC-SHA256 of the value under a key derived from the local hash key and the dataset's `hash_scope`. It needs `pgcrypto`, and fails closed without it or without the key. Equal inputs give equal outputs within one hash scope (see [linkability](security.md#known-limits)). |
+| `hash` | A hex HMAC-SHA256 of the value under a key derived from the local hash key and the dataset's `hash_scope`. Postgres needs `pgcrypto` and fails closed without it or without the key. Snowflake calls `datagrant.hash_hmac` (key not in view SQL). Equal inputs give equal outputs within one hash scope on the same engine (see [linkability](security.md#known-limits)). Snowflake hashes are not joinable with Postgres hashes. |
 
-Column types are read from the catalog when the grant is created.
+Column types are read from the catalog when the grant is created (Postgres `pg_attribute`; Snowflake `INFORMATION_SCHEMA.COLUMNS`). The five mask names are the same on both engines.
 
 ## Row filters
 
@@ -75,7 +75,7 @@ op      := = | <> | != | < | <= | > | >=
 literal := 'string' ('' escapes) | integer | decimal | TRUE | FALSE
 ```
 
-Keywords are case-insensitive. The filter is at most 1000 characters and nests at most 16 levels deep. Every identifier must be in the table's `columns` or `filter_columns`; anything else is a policy error. The filter is parsed and re-emitted with quoted identifiers and literals, so it is never interpolated. A column used only in `filter_columns` is not in the view (see [security](security.md)).
+Keywords are case-insensitive. The filter is at most 1000 characters and nests at most 16 levels deep. Every identifier must be in the table's `columns` or `filter_columns`; anything else is a policy error. The filter is parsed and re-emitted with quoted identifiers and literals (Postgres `psycopg.sql`; Snowflake `q` / `lit`), so it is never interpolated. A column used only in `filter_columns` is not in the view (see [security](security.md)). Snowflake `--apply` inspects the table and refuses if a filter column is missing from the catalog.
 
 ```yaml
 - name: public.visits

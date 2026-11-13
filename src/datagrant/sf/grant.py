@@ -27,6 +27,8 @@ from datagrant.keys import HashKey
 from datagrant.pg.grant import ReceiptSink
 from datagrant.policy import Decision, Request
 from datagrant.receipt import GrantFacts, ReceiptError
+from datagrant.rowfilter import RowFilterError
+from datagrant.sf.mask import TableCatalog, render_row_filter
 
 STATE_SCHEMA = "DATAGRANT"
 VIEW_SCHEMA = "DATAGRANT_VIEWS"
@@ -38,7 +40,6 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SCOPE_LABEL = "datagrant/hash-scope/v1:"
 RSA_BITS = 2048
 REDACTED = "<redacted>"
-ROW_FILTER_UNAVAILABLE = "Snowflake row filters are not implemented yet"
 SECONDS_PER_DAY = 86400.0
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -142,11 +143,16 @@ def _split_table(table: str, default_schema: str | None) -> tuple[str, str]:
     raise GrantError(f"table {table!r} needs a schema")
 
 
-def _col_expr(col: str, mask: str, hash_scope: str) -> str:
+def _col_expr(col: str, mask: str, hash_scope: str, catalog: TableCatalog | None = None) -> str:
     ident = q(col)
+    dtype = catalog.columns.get(col) if catalog is not None else None
+    if catalog is not None and dtype is None:
+        raise GrantError(f"column {col!r} does not exist in the table")
     if mask == "passthrough":
         return ident
     if mask == "null":
+        if dtype is not None:
+            return f"CAST(NULL AS {dtype}) AS {ident}"
         return f"NULL AS {ident}"
     if mask == "redact":
         return f"{lit('[REDACTED]')} AS {ident}"
@@ -160,11 +166,6 @@ def _col_expr(col: str, mask: str, hash_scope: str) -> str:
         fn = f"{q(STATE_SCHEMA)}.{q(HASH_UDF)}"
         return f"{fn}({lit(hash_scope)}, TO_VARCHAR({ident})) AS {ident}"
     raise GrantError(f"unknown mask {mask!r}")
-
-
-def _reject_row_filter(req: Request) -> None:
-    if req.row_filter is not None:
-        raise GrantError(ROW_FILTER_UNAVAILABLE)
 
 
 def _reject_controls(label: str, value: str) -> None:
@@ -231,13 +232,13 @@ def build_plan(
     requester_identity: Mapping[str, Any] | None = None,
     approver_identities: Sequence[Mapping[str, Any]] | None = None,
     private_pem: str | None = None,
+    catalog: TableCatalog | None = None,
 ) -> GrantPlan:
     """Pure SQL plan. ``public_body`` is the RSA public key (no private key)."""
     if not decision.allowed:
         raise GrantError("cannot build a grant for a denied decision")
     if decision.approval == "two-person" and not approvers:
         raise GrantError("two-person approval: the grant needs an approver")
-    _reject_row_filter(req)
     _reject_controls("purpose", req.purpose)
     gid = grant_id or secrets.token_hex(6)
     if not _GRANT_ID_RE.fullmatch(gid):
@@ -256,10 +257,20 @@ def build_plan(
     if needs_hash and hash_key is None:
         raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
     scope = decision.hash_scope or req.dataset
-    cols = ", ".join(_col_expr(c, decision.masks[c], scope) for c in req.columns)
+    cols = ", ".join(_col_expr(c, decision.masks[c], scope, catalog) for c in req.columns)
     from_tbl = f"{q(database)}.{q(tschema)}.{q(tname)}"
     view_id = f"{q(VIEW_SCHEMA)}.{q(view)}"
     select = f"SELECT {cols} FROM {from_tbl}"  # nosec B608
+    if req.row_filter is not None:
+        try:
+            cond, used = render_row_filter(req.row_filter)
+        except RowFilterError as exc:
+            raise GrantError(str(exc)) from None
+        if catalog is not None:
+            missing = sorted(c for c in used if c not in catalog.columns)
+            if missing:
+                raise GrantError(f"row filter columns not in table: {', '.join(missing)}")
+        select = f"{select} WHERE {cond}"  # nosec B608
     comment = f"datagrant:{gid}"
     insert = Bound(
         (
@@ -602,7 +613,6 @@ def create_pending(
     requester_identity: Mapping[str, Any] | None = None,
 ) -> str:
     """Store a two-person pending request. Public key plus fingerprint only."""
-    _reject_row_filter(req)
     _reject_controls("purpose", req.purpose)
     now = now or datetime.now(UTC)
     rid = secrets.token_hex(6)

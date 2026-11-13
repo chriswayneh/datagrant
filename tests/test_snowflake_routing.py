@@ -139,6 +139,12 @@ class _FakeSf:
         self.live_count = live_count
         self.fail_on: str | None = None
         self._one: tuple[Any, ...] | None = pending_row
+        self.catalog_rows: list[tuple[Any, ...]] = [
+            ("PATIENT_ID", "NUMBER"),
+            ("SSN", "VARCHAR"),
+            ("REGION", "VARCHAR"),
+            ("SAMPLE_ID", "VARCHAR"),
+        ]
 
     def cursor(self) -> _FakeSf:
         return self
@@ -164,6 +170,9 @@ class _FakeSf:
         return self._one
 
     def fetchall(self) -> list[tuple[Any, ...]]:
+        last = self.queries[-1][0].upper() if self.queries else ""
+        if "INFORMATION_SCHEMA" in last and "COLUMNS" in last:
+            return list(self.catalog_rows)
         return []
 
     def close(self) -> None:
@@ -396,91 +405,44 @@ def _sf_policy_with_filter(tmp_path: Path, *, two_person: bool = False) -> Path:
     return path
 
 
-def test_snowflake_request_row_filter_refused(
+def test_snowflake_request_row_filter_in_view(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
-    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
-    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
-    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
-    assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
+    conn = _FakeSf()
+    _sf_keys(tmp_path, monkeypatch, conn)
     path = _sf_policy_with_filter(tmp_path)
-    argv = [*SF_REQ, "--row-filter", "PATIENT_ID = 1", "--policy", str(path), "--json"]
-    out: list[str] = []
-    assert cli.main(argv, out.append) == EXIT_FAILED
-    body = json.loads(out[0])
-    assert body["allowed"] is False
-    assert any("row filters" in r for r in body["reasons"])
-    out = []
-    assert cli.main([*argv, "--apply"], out.append) == EXIT_FAILED
-    applied = json.loads(out[0])
-    assert applied["allowed"] is False
-    recs = [
-        json.loads(line)["receipt"]
-        for line in (tmp_path / "r.jsonl").read_text().splitlines()
-        if line.strip()
+    argv = [
+        *SF_REQ,
+        "--row-filter",
+        "PATIENT_ID = 1",
+        "--policy",
+        str(path),
+        "--json",
+        "--snowflake-dsn",
+        "snowflake://svc@xy12345/CLINIC_DB?warehouse=WH",
+        "--apply",
     ]
-    assert recs and recs[0]["event"] == "denied"
-    assert any("row filters" in r for r in recs[0]["details"]["reasons"])
+    out: list[str] = []
+    assert cli.main(argv, out.append) == EXIT_OK
+    body = json.loads(out[0])
+    assert body["status"] == "granted"
+    view = next(s for s, _p in conn.queries if s.startswith("CREATE SECURE VIEW"))
+    assert 'WHERE "PATIENT_ID" = 1' in view
+    assert any("INFORMATION_SCHEMA" in s for s, _p in conn.queries)
 
 
-def test_snowflake_approve_row_filter_not_approved(
+def test_snowflake_approve_row_filter_in_view(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from datetime import UTC, datetime
-
-    now = datetime(2026, 11, 13, 3, 0, tzinfo=UTC)
-    pending = (
-        "aabbccddeeff",
-        "alice",
-        "snow_clinic",
-        "PUBLIC.PATIENTS",
-        '["PATIENT_ID"]',
-        "PATIENT_ID = 1",
-        3600,
-        "eval",
-        "a" * 64,
-        "PUBKEY",
-        "b" * 64,
-        now.isoformat(),
-        now.isoformat(),
-        "pending",
-        None,
-    )
+    pending = _pending_tuple(row_filter="PATIENT_ID = 1")
     conn = _FakeSf(pending_row=pending)
-    monkeypatch.setattr("datagrant.snowflake_support.driver_present", lambda: True)
-    monkeypatch.setattr("datagrant.snowflake_support.connect", lambda dsn: conn)
-    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
-    monkeypatch.setenv("DATAGRANT_HASH_KEY", str(tmp_path / "k" / "hash.key"))
-    monkeypatch.setenv("DATAGRANT_SIGNING_KEY", str(tmp_path / "k" / "signing.key"))
-    monkeypatch.setenv("DATAGRANT_RECEIPT_LOG", str(tmp_path / "r.jsonl"))
-    monkeypatch.setenv(SNOWFLAKE_DSN_ENV, "snowflake://svc@xy12345/CLINIC_DB")
-    assert cli.main(["keys", "init", "--apply"], lambda s: None) == 0
     path = _sf_policy_with_filter(tmp_path, two_person=True)
-    out: list[str] = []
-    code = cli.main(
-        [
-            "approve",
-            "aabbccddeeff",
-            "--apply",
-            "--policy",
-            str(path),
-            "--as-user",
-            "carol",
-            "--json",
-        ],
-        out.append,
-    )
-    assert code == EXIT_FAILED
-    body = json.loads(out[0])
-    assert body.get("approved") is False
-    recs = [
-        json.loads(line)["receipt"]
-        for line in (tmp_path / "r.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
-    assert recs and recs[0]["event"] == "not_approved"
-    assert any("row filters" in r for r in recs[0]["details"]["reasons"])
+    code, body = _approve_apply(tmp_path, monkeypatch, conn, policy=path)
+    assert code == EXIT_OK
+    granted = json.loads(body)
+    assert granted["status"] == "granted"
+    view = next(s for s, _p in conn.queries if s.startswith("CREATE SECURE VIEW"))
+    assert 'WHERE "PATIENT_ID" = 1' in view
 
 
 def _two_person_policy(tmp_path: Path) -> Path:
@@ -582,6 +544,7 @@ def _pending_tuple(
     dataset: str = "snow_clinic",
     table: str = "PUBLIC.PATIENTS",
     columns: str = '["PATIENT_ID"]',
+    row_filter: str | None = None,
 ) -> tuple[Any, ...]:
     from datetime import UTC, datetime
 
@@ -592,7 +555,7 @@ def _pending_tuple(
         dataset,
         table,
         columns,
-        None,
+        row_filter,
         3600,
         "eval",
         "a" * 64,

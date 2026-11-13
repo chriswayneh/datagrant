@@ -962,7 +962,6 @@ def _snowflake_request(
 ) -> int:
     """Snowflake auto grant or two-person pending (public key only until approve)."""
     from datagrant.sf.grant import (
-        ROW_FILTER_UNAVAILABLE,
         GrantError,
         apply_plan,
         build_plan,
@@ -970,6 +969,7 @@ def _snowflake_request(
         ensure_state,
         new_keypair,
     )
+    from datagrant.sf.mask import inspect_table
     from datagrant.snowflake_support import (
         EXTRA_HINT,
         SnowflakeSetupError,
@@ -979,8 +979,6 @@ def _snowflake_request(
 
     a = ctx.args
     ds = policy.datasets[req.dataset]
-    if req.row_filter is not None:
-        return _refuse_request(ctx, req, policy, [ROW_FILTER_UNAVAILABLE], caller)
     two_person = decision.approval == "two-person"
     if two_person and policy.approvals_required > 1:
         raise CliError(
@@ -1032,6 +1030,7 @@ def _snowflake_request(
     try:
         with _sf_session(a) as conn:
             ensure_state(conn)
+            catalog = inspect_table(conn, req.table, database=ds.database, schema=ds.schema)
             cap_reason = _sf_concurrent_reason(conn, policy, req.requester, req.dataset)
             if cap_reason:
                 return _refuse_request(ctx, req, policy, [cap_reason], caller)
@@ -1080,6 +1079,7 @@ def _snowflake_request(
                 hash_key=hash_key,
                 requester_identity=caller.receipt_dict(),
                 private_pem=pair.private_pem,
+                catalog=catalog,
             )
             apply_plan(
                 conn,
@@ -1099,13 +1099,13 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
 
     from datagrant.policy import Request, evaluate
     from datagrant.sf.grant import (
-        ROW_FILTER_UNAVAILABLE,
         GrantError,
         build_plan,
         ensure_state,
         get_pending,
         issue_approved,
     )
+    from datagrant.sf.mask import inspect_table
 
     a = ctx.args
     approver = caller.username
@@ -1151,8 +1151,6 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                     [f"request {pending.id} is {pending.status}, not pending"],
                     caller,
                 )
-            if req.row_filter is not None:
-                return _refuse_approve(ctx, pending, policy, [ROW_FILTER_UNAVAILABLE], caller)
             ds = policy.datasets.get(req.dataset)
             if ds is None or ds.engine != "snowflake":
                 msg = f"request {pending.id} is not a Snowflake pending request"
@@ -1257,6 +1255,7 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                 if _needs_hash(decision, cols)
                 else None
             )
+            catalog = inspect_table(conn, req.table, database=ds.database, schema=ds.schema)
             plan = build_plan(
                 decision,
                 req,
@@ -1271,6 +1270,7 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                 if not isinstance(ident_raw, dict)
                 else ident_raw,
                 approver_identities=(caller.approver_receipt_dict(),),
+                catalog=catalog,
             )
             if not a.apply:
                 sqls = _redacted_sql(plan)
