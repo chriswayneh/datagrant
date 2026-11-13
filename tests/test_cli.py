@@ -406,6 +406,18 @@ def test_sweep_missing_dsn_message_stays_verbatim(
     assert "pass --dsn <redacted>" not in err
 
 
+def test_doctor_missing_dsn_message_stays_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    monkeypatch.delenv("DATAGRANT_SNOWFLAKE_DSN", raising=False)
+    out: list[str] = []
+    assert main(["doctor"], out.append) == EXIT_FAILED
+    blob = "\n".join(out)
+    assert "pass --dsn or set $DATAGRANT_DSN" in blob
+    assert "pass --dsn <redacted>" not in blob
+
+
 def test_redact_widens_secret_kv_keys() -> None:
     blob = "private_key_file_pwd=KeyPw999 passcode=123456 passphrase=Phs1 secret=Tok9"
     cleaned = redact(blob)

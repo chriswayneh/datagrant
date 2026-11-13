@@ -1696,7 +1696,7 @@ def cmd_doctor(ctx: Ctx) -> int:
     log = _log_path(a)
 
     def scrub(msg: str) -> str:
-        return _hide_token(redact(msg, dsn), ctx.oidc_token)
+        return _hide_token(_cli_redact(msg, ctx.args), ctx.oidc_token)
 
     checks = run_doctor(
         signing_path=resolve_key_path("signing", a.signing_key),

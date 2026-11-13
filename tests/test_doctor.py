@@ -308,7 +308,8 @@ def test_doctor_missing_dsn_fails_not_usage(
     code, d = run("doctor", "--policy", env["pol"])
     assert code == cli.EXIT_FAILED
     assert _by_name(d)[CHECK_CONNECT]["status"] == STATUS_FAIL
-    assert "DATAGRANT_DSN" in _by_name(d)[CHECK_CONNECT]["detail"]
+    assert _by_name(d)[CHECK_CONNECT]["detail"] == "no database: pass --dsn or set $DATAGRANT_DSN"
+    assert "pass --dsn <redacted>" not in json.dumps(d)
 
 
 def test_doctor_public_warning_listed_does_not_fail(
