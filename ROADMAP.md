@@ -11,7 +11,8 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | v0.3.0 | Real identity | ✅ Released |
 | v0.4.0 | Approvals and policy limits | ✅ Released |
 | v0.5.0 | Ops hardening | ✅ Released |
-| v0.6.0+ | More warehouses | Planned |
+| v0.6.0 | Warehouses | Design |
+| v0.7.0+ | More warehouses (BigQuery) | Planned |
 
 ## v0.1.0: done
 
@@ -52,10 +53,17 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | --- | --- | :---: |
 | Ops hardening | Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). | ✅ |
 
+## v0.6.0: design
+
+| Item | What | Status |
+| --- | --- | :---: |
+| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design: [docs/design/warehouses.md](docs/design/warehouses.md). Construction waits on maintainer approval in [audit.md](aidlc-docs/audit.md). | Design |
+
 ## Next
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| Snowflake and BigQuery | The same request, mask, expire and receipt model on other warehouses. | v0.6.0+ |
+| Warehouses (Snowflake first) | PHI/PII that is not in Postgres still needs the same grant story. See the v0.6.0 design above. | v0.6.0 |
+| BigQuery | The same model on BigQuery (IAM / authorized views, not a password user). | v0.7.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.

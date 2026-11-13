@@ -119,3 +119,7 @@ Implemented (PRs #34 to #38). v0.4.0 released 2026-11-10. Policy limits (`pendin
 ## M3 / v0.5.0: ops hardening (implemented)
 
 Implemented (PRs #41 to #45). v0.5.0 released 2026-11-11. Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `--strict-policy-permissions` / `$DATAGRANT_STRICT_POLICY_PERMISSIONS`; `SET LOCAL log_statement` when the admin can SET it. Warehouses, rate limits, and `max_rows` are out of this milestone. Authoritative pages: [docs/cli.md](../../docs/cli.md), [docs/operations.md](../../docs/operations.md), [docs/security.md](../../docs/security.md). Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
+
+## M4 / v0.6.0: warehouses (design)
+
+Proposed. Construction waits on maintainer approval in [audit.md](../audit.md). Snowflake first (secure view, per-grant `TYPE=SERVICE` user, key pair shown once, local receipts). BigQuery later (v0.7.0+). Postgres CLI unchanged. Rate limits, `max_rows`, and break-glass stay out. Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
