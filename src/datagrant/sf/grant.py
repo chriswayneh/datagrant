@@ -35,6 +35,7 @@ VIEW_SCHEMA = "DATAGRANT_VIEWS"
 HASH_TABLE = "_HASH_MASTER"
 HASH_UDF = "HASH_HMAC"
 HASH_MASTER_ID = "master"
+SRC_ALIAS = "SRC"
 _GRANT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SCOPE_LABEL = "datagrant/hash-scope/v1:"
@@ -143,13 +144,18 @@ def _split_table(table: str, default_schema: str | None) -> tuple[str, str]:
     raise GrantError(f"table {table!r} needs a schema")
 
 
+def _src_col(col: str) -> str:
+    return f"{q(SRC_ALIAS)}.{q(col)}"
+
+
 def _col_expr(col: str, mask: str, hash_scope: str, catalog: TableCatalog | None = None) -> str:
     ident = q(col)
+    src = _src_col(col)
     dtype = catalog.columns.get(col) if catalog is not None else None
     if catalog is not None and dtype is None:
         raise GrantError(f"column {col!r} does not exist in the table")
     if mask == "passthrough":
-        return ident
+        return f"{src} AS {ident}"
     if mask == "null":
         if dtype is not None:
             return f"CAST(NULL AS {dtype}) AS {ident}"
@@ -158,13 +164,13 @@ def _col_expr(col: str, mask: str, hash_scope: str, catalog: TableCatalog | None
         return f"{lit('[REDACTED]')} AS {ident}"
     if mask == "partial":
         return (
-            f"CASE WHEN LENGTH(TO_VARCHAR({ident})) >= 8 THEN "
-            f"REPEAT('*', LENGTH(TO_VARCHAR({ident})) - 4) || RIGHT(TO_VARCHAR({ident}), 4) "
-            f"ELSE REPEAT('*', LENGTH(TO_VARCHAR({ident}))) END AS {ident}"
+            f"CASE WHEN LENGTH(TO_VARCHAR({src})) >= 8 THEN "
+            f"REPEAT('*', LENGTH(TO_VARCHAR({src})) - 4) || RIGHT(TO_VARCHAR({src}), 4) "
+            f"ELSE REPEAT('*', LENGTH(TO_VARCHAR({src}))) END AS {ident}"
         )
     if mask == "hash":
         fn = f"{q(STATE_SCHEMA)}.{q(HASH_UDF)}"
-        return f"{fn}({lit(hash_scope)}, TO_VARCHAR({ident})) AS {ident}"
+        return f"{fn}({lit(hash_scope)}, TO_VARCHAR({src})) AS {ident}"
     raise GrantError(f"unknown mask {mask!r}")
 
 
@@ -260,10 +266,10 @@ def build_plan(
     cols = ", ".join(_col_expr(c, decision.masks[c], scope, catalog) for c in req.columns)
     from_tbl = f"{q(database)}.{q(tschema)}.{q(tname)}"
     view_id = f"{q(VIEW_SCHEMA)}.{q(view)}"
-    select = f"SELECT {cols} FROM {from_tbl}"  # nosec B608
+    select = f"SELECT {cols} FROM {from_tbl} AS {q(SRC_ALIAS)}"  # nosec B608
     if req.row_filter is not None:
         try:
-            cond, used = render_row_filter(req.row_filter)
+            cond, used = render_row_filter(req.row_filter, table_alias=SRC_ALIAS)
         except RowFilterError as exc:
             raise GrantError(str(exc)) from None
         if catalog is not None:

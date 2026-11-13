@@ -4,7 +4,7 @@
 datagrant [--json] [--dsn DSN] [--signing-key FILE] [--hash-key FILE] [--receipt-log FILE] [--receipt-sink URL] [--receipt-sink-mode MODE] [--version] COMMAND ...
 ```
 
-Run `datagrant COMMAND --help` for the exact flags of your installed version. This page matches v0.5.0.
+Run `datagrant COMMAND --help` for the exact flags of your installed version. This page matches v0.6.0.
 
 ## Conventions
 

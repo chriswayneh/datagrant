@@ -64,10 +64,11 @@ def inspect_table(
 
 
 class _SfFilter:
-    def __init__(self, tokens: list[tuple[str, str]]) -> None:
+    def __init__(self, tokens: list[tuple[str, str]], table_alias: str | None = None) -> None:
         self.toks = tokens
         self.i = 0
         self.columns: set[str] = set()
+        self.table_alias = table_alias
 
     def _peek_word(self) -> str | None:
         if self.i < len(self.toks) and self.toks[self.i][0] == "word":
@@ -114,8 +115,9 @@ class _SfFilter:
             return f"({inner})"
         if kind != "word" or val.lower() in _KEYWORDS:
             raise RowFilterError(f"expected a column name, got {val!r}")
-        col = q(val)
+        ident = q(val)
         self.columns.add(val)
+        col = f"{q(self.table_alias)}.{ident}" if self.table_alias else ident
         if self._peek_word() == "is":
             self.i += 1
             neg = self._peek_word() == "not"
@@ -143,7 +145,7 @@ class _SfFilter:
         raise RowFilterError(f"expected a literal, got {val!r}")
 
 
-def render_row_filter(text: str) -> tuple[str, frozenset[str]]:
+def render_row_filter(text: str, *, table_alias: str | None = None) -> tuple[str, frozenset[str]]:
     """Re-emit a policy row filter as Snowflake SQL. Never interpolates raw text."""
-    p = _SfFilter(_tokenize(text))
+    p = _SfFilter(_tokenize(text), table_alias=table_alias)
     return p.parse(), frozenset(p.columns)

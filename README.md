@@ -14,7 +14,7 @@
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
 
-**Status:** [v0.5.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.5.0) is released ([release notes](docs/release-notes/v0.5.0.md)). v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Status:** v0.6.0 is ready, release pending ([release notes](docs/release-notes/v0.6.0.md)); [v0.5.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.5.0) is the latest published release. v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
 ## Demo
 
@@ -41,7 +41,7 @@ See [docs/demo.md](docs/demo.md) for every step. The GIF above replays real outp
 
 ## Features
 
-Only features that ship in v0.5.0 (verified against the CLI and source):
+Only features that ship in v0.6.0 (verified against the CLI and source):
 
 - [x] **Deny-by-default policy.** One YAML file decides who can request what, and for how long. Unknown keys are errors; evaluation refuses anything not allowed explicitly.
 - [x] **Narrow grants.**
@@ -57,6 +57,7 @@ Only features that ship in v0.5.0 (verified against the CLI and source):
 - [x] **Two-person approval.** A different person in an `approvers` group must approve; self-approval is refused. Policy is re-checked at approval time.
 - [x] **Approvals and policy limits** (v0.4.0). Policy-wide `approvals_required` (1..8), optional `distinct-groups` SoD, `pending_ttl` / `max_columns` / `max_concurrent_grants`, and `--apply` receipts `denied` / `not_approved` / `approval_recorded` / `request_expired`. See the [policy reference](docs/policy.md) and [CLI](docs/cli.md).
 - [x] **Ops hardening** (v0.5.0). Session advisory lock on mutating `--apply`; `datagrant doctor`; optional `strict_preflight` and `strict_policy_permissions`; `--strict-policy-permissions` / `$DATAGRANT_STRICT_POLICY_PERMISSIONS`; receipt-log 0600 on access-creating `--apply`; `SET LOCAL log_statement = 'none'` when the admin can SET it. See the [CLI](docs/cli.md) and [operations](docs/operations.md#ops-hardening-v050).
+- [x] **Snowflake grants** (v0.6.0). Optional dataset `engine: snowflake`, per-grant `TYPE=SERVICE` user and key pair shown once, secure view, local receipts. Extra `datagrant[snowflake]`. Hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). See the [policy reference](docs/policy.md) and [CLI](docs/cli.md).
 - [x] **OIDC identity** (v0.3.0). Optional `policy.identity.mode: oidc` verifies an ID token on `request` and `approve`. Default local mode still records the OS user or `--as-user`. See the [policy identity block](docs/policy.md#identity), [CLI](docs/cli.md#oidc-identity) and the [OIDC request and approve demo](docs/demo-oidc.md).
 - [x] **Signed, hash-chained receipts.** ed25519 signatures in an append-only JSONL log. Verify with `datagrant receipts verify` (optional `--expect-head` to catch truncation).
 - [x] **External receipt sink** (v0.2.0). Copy every receipt to an HTTPS webhook or an append-only file elsewhere, with an outbox and `receipts push` for outages, an optional `required` mode, and `receipts verify --sink` to catch local truncation or rewrites.
@@ -135,7 +136,7 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 - **Identity depends on the policy.** Default local mode records the OS user or `--as-user` and is not authentication. Optional `identity.mode: oidc` (v0.3.0) verifies an ID token on `request` and `approve`. In local mode, quorum and `distinct-groups` are claimed names. Anyone who holds the admin connection string can still bypass datagrant. See [docs/security.md](docs/security.md).
 - **Row filters reveal what they match.** A column listed only in `filter_columns` is hidden, but the grantee knows every row matches the filter.
 - **Masking still shows some shape.** You can see whether a value is empty (NULL stays NULL under `partial` and `hash`), and `partial` keeps its length.
-- **Hashed values can be matched** across grants on the same dataset (or datasets sharing a `hash_scope`), but not across datasets.
+- **Hashed values can be matched** across grants on the same dataset (or datasets sharing a `hash_scope`), but not across datasets. Snowflake hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding).
 - **Deleting the newest receipts** is only caught with an external receipt sink and `receipts verify --sink` (v0.2.0), or if you saved the latest hash somewhere else and check it with `--expect-head`. Receipts not yet delivered to the sink can't be checked off-host.
 - **On Windows, the receipt log, the file sink and outbox flushes aren't locked,** so only one process should write at a time.
 - **Statement logging.** `apply_plan` and two-person `create_request` issue `SET LOCAL log_statement = 'none'` when the admin can SET that GUC. `request` / `approve --apply` refuse if it cannot. Residual: `log_min_duration_statement = 0` and `log_min_error_statement` can still capture parameters or a failed `CREATE ROLE` verifier. See [docs/security.md](docs/security.md).
