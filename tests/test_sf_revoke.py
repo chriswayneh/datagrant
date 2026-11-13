@@ -247,8 +247,11 @@ class StoreConn:
             self._rows = [self._one] if self._one is not None else []
             return
         if "STATUS IN" in su:
-            wanted = {str(a) for a in args}
-            self._rows = [(gid,) for gid, r in self.grants.items() if r["status"] in wanted]
+            wanted = {str(a) for a in args if isinstance(a, str)}
+            items = [r for r in self.grants.values() if r["status"] in wanted]
+            if "DATEADD" in su:
+                items = [r for r in items if r.get("stale")]
+            self._rows = [(r["id"],) for r in items]
             return
         status = str(args[0]) if args else None
         items = [r for r in self.grants.values() if status is None or r["status"] == status]
@@ -371,7 +374,8 @@ def test_sweep_skips_young_issuing_and_cleans_stale(tmp_path: Path) -> None:
     assert store["333333333333"]["status"] == "expired"
     dateadd = next((s, p) for s, p in conn.queries if s and "DATEADD" in s)
     assert "?" in dateadd[0]
-    assert dateadd[1] == ("issuing", -ISSUING_GRACE_MINUTES)
+    assert "STATUS IN" in dateadd[0]
+    assert dateadd[1] == ("issuing", "enabling", -ISSUING_GRACE_MINUTES)
     assert ISSUING_GRACE_MINUTES == 10
     events = _events(tmp_path)
     assert "expired" in events
@@ -665,6 +669,8 @@ def test_sweep_skips_duplicate_ids_and_retries_inflight(
         ids = real(c, sql, params)
         su = sql.upper()
         if "STATUS IN" in su:
+            if "DATEADD" in su:
+                return [due_id, stale_id]
             return [due_id, inflight_id]
         if params and params[0] == "active":
             return [due_id, due_id]
@@ -682,6 +688,28 @@ def test_sweep_skips_duplicate_ids_and_retries_inflight(
     assert store[due_id]["status"] == "expired"
     assert store[stale_id]["status"] == "failed"
     assert store[inflight_id]["status"] == "revoked"
+
+
+def test_revoke_and_sweep_treat_enabling_like_issuing(tmp_path: Path) -> None:
+    sink = _sink(tmp_path)
+    young = grant_row(id="111111111111", status="enabling", stale=False, expired=False)
+    stale = grant_row(id="222222222222", status="enabling", stale=True, expired=False)
+    store = {r["id"]: r for r in (young, stale)}
+    conn = StoreConn(store)
+    preview = due_grant_ids(conn)
+    assert "111111111111" not in preview
+    assert "222222222222" in preview
+    results = sweep(conn, sink)
+    outcomes = {r.grant_id: r.outcome for r in results}
+    assert "111111111111" not in outcomes
+    assert outcomes["222222222222"] == "revoked"
+    assert store["111111111111"]["status"] == "enabling"
+    assert store["222222222222"]["status"] == "failed"
+    assert "revoke_failed" in _events(tmp_path)
+    live = StoreConn({GID: grant_row(status="enabling")})
+    r = revoke(live, GID, "manual", sink)
+    assert r.outcome == "revoked"
+    assert live.grants[GID]["status"] == "revoked"
 
 
 def test_list_grants_all_and_cli_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

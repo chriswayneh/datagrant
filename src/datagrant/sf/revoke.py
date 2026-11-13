@@ -1,10 +1,11 @@
 """Snowflake revoke and sweep (M4 construction PR 3).
 
 DISABLE the grant user first, cancel its queries, then DROP VIEW / ROLE / USER
-(IF EXISTS) so a partial issuing row is safe. Claim the grants row with qmark
-binds and a rowcount check so two sweeps cannot double-revoke. Issuing rows
-younger than 10 minutes are skipped; older ones are dropped and marked failed.
-Pending request TTL expiry does not drop Snowflake objects.
+(IF EXISTS) so a partial issuing or enabling row is safe. Claim the grants row
+with qmark binds and a rowcount check so two sweeps cannot double-revoke.
+Issuing and enabling rows younger than 10 minutes are skipped; older ones are
+dropped and marked failed. Pending request TTL expiry does not drop Snowflake
+objects.
 """
 
 from __future__ import annotations
@@ -358,11 +359,11 @@ def revoke(
             else ("stale_issuing" if status == "sweeping" else "manual")
         )
         return _cleanup(conn, row, retry_reason, receipts)
-    if status == "issuing":
+    if status in {"issuing", "enabling"}:
         claimed = _claim(
             conn,
             grant_id,
-            from_status="issuing",
+            from_status=status,
             to_status="sweeping",
         )
         if not claimed:
@@ -378,7 +379,7 @@ def _list_ids(conn: Any, sql: str, params: tuple[Any, ...]) -> list[str]:
 
 
 def sweep(conn: Any, receipts: ReceiptSink | None = None) -> list[RevokeResult]:
-    """Expire due active grants and clean stale issuing rows. Atomic per row."""
+    """Expire due active grants and clean stale issuing/enabling rows. Atomic per row."""
     due = _list_ids(
         conn,
         (
@@ -391,10 +392,10 @@ def sweep(conn: Any, receipts: ReceiptSink | None = None) -> list[RevokeResult]:
         conn,
         (
             f"SELECT ID FROM {q(STATE_SCHEMA)}.{q('GRANTS')}"  # nosec B608
-            " WHERE STATUS = ? AND STARTED_AT <= DATEADD(MINUTE, ?, CURRENT_TIMESTAMP())"
+            " WHERE STATUS IN (?, ?) AND STARTED_AT <= DATEADD(MINUTE, ?, CURRENT_TIMESTAMP())"
             " ORDER BY STARTED_AT, ID"
         ),
-        ("issuing", -ISSUING_GRACE_MINUTES),
+        ("issuing", "enabling", -ISSUING_GRACE_MINUTES),
     )
     inflight = _list_ids(
         conn,
@@ -425,7 +426,7 @@ def sweep(conn: Any, receipts: ReceiptSink | None = None) -> list[RevokeResult]:
 
 
 def due_grant_ids(conn: Any) -> list[str]:
-    """Expired active grants plus issuing rows past the 10-minute grace (read-only)."""
+    """Expired active grants plus issuing/enabling rows past the 10-minute grace."""
     due = _list_ids(
         conn,
         (
@@ -438,10 +439,10 @@ def due_grant_ids(conn: Any) -> list[str]:
         conn,
         (
             f"SELECT ID FROM {q(STATE_SCHEMA)}.{q('GRANTS')}"  # nosec B608
-            " WHERE STATUS = ? AND STARTED_AT <= DATEADD(MINUTE, ?, CURRENT_TIMESTAMP())"
+            " WHERE STATUS IN (?, ?) AND STARTED_AT <= DATEADD(MINUTE, ?, CURRENT_TIMESTAMP())"
             " ORDER BY STARTED_AT, ID"
         ),
-        ("issuing", -ISSUING_GRACE_MINUTES),
+        ("issuing", "enabling", -ISSUING_GRACE_MINUTES),
     )
     return due + [g for g in stale if g not in due]
 

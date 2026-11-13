@@ -57,7 +57,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PR 1 (merged #48): policy `engine` and Snowflake `--apply` routing. Construction PR 2 (merged #49): Snowflake grant engine. Construction PR 3: Snowflake revoke and sweep (atomic claims, 10-minute issuing grace, pending TTL with no object drop); `claim_pending` / `mark_request_failed` on approve; key-pair-only DSN. Snowflake `--apply` for grant issue and approve stays refused until a follow-up PR. Design: [docs/design/warehouses.md](docs/design/warehouses.md). | Construction |
+| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PR 1 (merged #48): policy `engine` and Snowflake `--apply` routing. Construction PR 2 (merged #49): Snowflake grant engine. Construction PR 3: Snowflake revoke and sweep (atomic claims, 10-minute issuing/enabling grace, pending TTL with no object drop); `claim_pending` / `mark_request_failed` on approve; issue claims `issuing` to `enabling` before ENABLE; key-pair-only DSN. Snowflake `--apply` for grant issue and approve stays refused until a follow-up PR. Design: [docs/design/warehouses.md](docs/design/warehouses.md). | Construction |
 
 ## Next
 
