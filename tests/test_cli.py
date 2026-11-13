@@ -309,15 +309,15 @@ def test_preflight_help_says_dry_run(capsys: pytest.CaptureFixture[str]) -> None
 @pytest.mark.parametrize(
     ("argv", "secret"),
     [
-        (["approve", "x", "--snowflake-dsn", "snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
-        (["approve", "x", "--snowflake-dsn=snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
+        (["keys", "init", "--snowflake-dsn", "snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
+        (["keys", "init", "--snowflake-dsn=snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
         (["keys", "init", "--dsn", "postgresql://u:PgPw1234@h/db"], "PgPw1234"),
         (["keys", "init", "--dsn=postgresql://u:PgPw1234@h/db"], "PgPw1234"),
-        (["approve", "x", "--snowflake-dsn", "password=Pw9999"], "Pw9999"),
-        (["approve", "x", "--snowflake-dsn=password=Pw9999"], "Pw9999"),
+        (["keys", "init", "--snowflake-dsn", "password=Pw9999"], "Pw9999"),
+        (["keys", "init", "--snowflake-dsn=password=Pw9999"], "Pw9999"),
         (["keys", "init", "--dsn", "token=TOKVALUE123"], "TOKVALUE123"),
         (["keys", "init", "--dsn=token=TOKVALUE123"], "TOKVALUE123"),
-        (["approve", "x", "--snowflake-dsn", "private_key=PKSECRET99"], "PKSECRET99"),
+        (["keys", "init", "--snowflake-dsn", "private_key=PKSECRET99"], "PKSECRET99"),
         (["keys", "init", "--dsn=private_key=PKSECRET99"], "PKSECRET99"),
     ],
 )
