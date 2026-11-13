@@ -109,12 +109,11 @@ def _secret_dsn_values(args: argparse.Namespace | None = None) -> tuple[str, ...
 
 
 def _cli_redact(text: str, args: argparse.Namespace | None = None) -> str:
-    """Scrub DSN flags, env DSN values, and secret key=value pairs."""
+    """Scrub literal DSN values and secret key=value pairs. Does not rewrite flag names."""
     text = str(text)
     dsns = _secret_dsn_values(args)
     for dsn in dsns:
         text = text.replace(dsn, "<redacted>")
-    text = _SECRET_FLAG_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
     for dsn in dsns:
         text = redact(text, dsn)
     return redact(text)
@@ -1770,6 +1769,7 @@ class _SafeArgumentParser(argparse.ArgumentParser):
         from datagrant.oidc import _JWS_LIKE_RE
 
         clean = _scrub_unrecognized_arguments(message)
+        clean = _SECRET_FLAG_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", clean)
         clean = _DSN_TAIL_RE.sub(r"\1 <redacted>", clean)
         clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(_cli_redact(clean)))
         self.print_usage(sys.stderr)

@@ -391,6 +391,19 @@ def test_cli_redact_replaces_literal_dsn_before_regexes(
     out = cli._cli_redact(f"fail --snowflake-dsn {dsn} trailing")
     assert "EnvPw777" not in out
     assert dsn not in out
+    assert "trailing" in out
+    assert "pass --dsn or set" in cli._cli_redact("no database: pass --dsn or set $DATAGRANT_DSN")
+
+
+def test_sweep_missing_dsn_message_stays_verbatim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    monkeypatch.delenv("DATAGRANT_SNOWFLAKE_DSN", raising=False)
+    assert main(["sweep"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "pass --dsn or set $DATAGRANT_DSN" in err
+    assert "pass --dsn <redacted>" not in err
 
 
 def test_redact_widens_secret_kv_keys() -> None:

@@ -115,7 +115,8 @@ def test_snowflake_apply_missing_dsn(
     code = cli.main([*SF_REQ, "--policy", str(path), "--apply"])
     assert code == EXIT_USAGE
     err = capsys.readouterr().err
-    assert SNOWFLAKE_DSN_ENV in err
+    assert "pass --snowflake-dsn or set $DATAGRANT_SNOWFLAKE_DSN" in err
+    assert "pass --snowflake-dsn <redacted>" not in err
     assert "datagrant[snowflake]" not in err
 
 
