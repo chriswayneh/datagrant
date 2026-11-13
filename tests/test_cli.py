@@ -304,3 +304,65 @@ def test_preflight_help_says_dry_run(capsys: pytest.CaptureFixture[str]) -> None
     out = _help([], capsys)
     assert "dry run; --apply creates state" in out
     assert "create state;" not in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "secret"),
+    [
+        (["approve", "x", "--snowflake-dsn", "snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
+        (["approve", "x", "--snowflake-dsn=snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
+        (["keys", "init", "--dsn", "postgresql://u:PgPw1234@h/db"], "PgPw1234"),
+        (["keys", "init", "--dsn=postgresql://u:PgPw1234@h/db"], "PgPw1234"),
+        (["approve", "x", "--snowflake-dsn", "password=Pw9999"], "Pw9999"),
+        (["approve", "x", "--snowflake-dsn=password=Pw9999"], "Pw9999"),
+        (["keys", "init", "--dsn", "token=TOKVALUE123"], "TOKVALUE123"),
+        (["keys", "init", "--dsn=token=TOKVALUE123"], "TOKVALUE123"),
+        (["approve", "x", "--snowflake-dsn", "private_key=PKSECRET99"], "PKSECRET99"),
+        (["keys", "init", "--dsn=private_key=PKSECRET99"], "PKSECRET99"),
+    ],
+)
+def test_argparse_error_redacts_secret_flags(
+    argv: list[str], secret: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(argv) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert secret not in err
+    assert "<redacted>" in err
+
+
+def test_argparse_error_redacts_env_dsns(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("DATAGRANT_DSN", "postgresql://u:EnvPw9999@h/db")
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", "snowflake://admin:SfEnvPw88@acct/db")
+    assert main(["keys", "init", "--bogus=postgresql://u:EnvPw9999@h/db"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "EnvPw9999" not in err
+    assert main(["approve", "x", "--bogus=snowflake://admin:SfEnvPw88@acct/db"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "SfEnvPw88" not in err
+
+
+def test_redact_does_not_mangle_oidc_token_flag() -> None:
+    blob = "unrecognized arguments: --oidc-token=aaaaaaaa.bbbbbbbb.cccccccc"
+    assert blob in redact(blob)
+    assert "token=***" not in redact(blob)
+
+
+def test_err_and_warn_strip_snowflake_dsn_and_kv(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", "snowflake://admin:S3cretPw@acct/db")
+    args = argparse.Namespace(json=False, dsn=None, snowflake_dsn=None)
+    ctx = cli.Ctx(args, lambda s: None)
+    leak = (
+        "fail snowflake://admin:S3cretPw@acct/db password=Pw9999 "
+        "token=TOKVALUE123 private_key=PKSECRET99"
+    )
+    cli._err(ctx, leak, EXIT_USAGE)
+    cli._warn(ctx, leak)
+    err = capsys.readouterr().err
+    for secret in ("S3cretPw", "Pw9999", "TOKVALUE123", "PKSECRET99"):
+        assert secret not in err

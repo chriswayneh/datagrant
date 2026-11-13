@@ -11,14 +11,14 @@ Run `datagrant COMMAND --help` for the exact flags of your installed version. Th
 - **Dry run by default.** Any command that changes something (`keys init`, `request`, `approve`, `revoke`, `sweep`, `preflight`) only reports what it would do unless you pass `--apply`. `--dry-run` is accepted as a no-op. Passing both `--apply` and `--dry-run` exits 2. `doctor` is read-only and does not take `--apply`.
 - **`--json`** gives machine-readable output and can go before or after the command.
 - **Per-command flags.** Each command accepts only the shared flags it uses (see the table below). Using a flag a command doesn't take, for example `policy check --dsn ...`, exits 2.
-- **Secrets are never echoed.** DSN `user:pass@` and `password=` forms are redacted from errors at every password length. An extracted DSN password of 4 or more characters is also removed wherever it appears in the message; shorter ones are not globally replaced, so they do not destroy the rest of the text. Sink bearer tokens and OIDC ID tokens are redacted from errors, warnings and JSON. The Snowflake admin DSN (`--snowflake-dsn` / `$DATAGRANT_SNOWFLAKE_DSN`) is never printed. The one-time database password is printed once, to the person it belongs to. There is no `--oidc-token` flag: putting a token on `argv` would leak via `ps` and shell history.
+- **Secrets are never echoed.** DSN `user:pass@` and `password=` / `token=` / `private_key=` forms are redacted from errors and warnings at every password length. An extracted DSN password of 4 or more characters is also removed wherever it appears in the message; shorter ones are not globally replaced, so they do not destroy the rest of the text. Usage errors redact the token after `--dsn` and `--snowflake-dsn` (space or `=` form) and scrub `$DATAGRANT_DSN` / `$DATAGRANT_SNOWFLAKE_DSN` when set. Sink bearer tokens and OIDC ID tokens are redacted from errors, warnings and JSON. Prefer `$DATAGRANT_DSN` and `$DATAGRANT_SNOWFLAKE_DSN` over the flags: argv is visible in `ps` and shell history. The one-time database password is printed once, to the person it belongs to. There is no `--oidc-token` flag.
 
 ## Environment and defaults
 
 | Setting | Flag | Environment | Default |
 | --- | --- | --- | --- |
-| Admin connection | `--dsn` | `DATAGRANT_DSN` | none (required where used). Postgres datasets only. |
-| Snowflake admin settings | `--snowflake-dsn` (`request` only) | `DATAGRANT_SNOWFLAKE_DSN` | none. Required on Snowflake `--apply`. Postgres `--apply` does not read it. Never logged. |
+| Admin connection | `--dsn` | `DATAGRANT_DSN` | none (required where used). Postgres datasets only. Prefer the env var over the flag (`ps` / shell history). |
+| Snowflake admin settings | `--snowflake-dsn` (`request` only) | `DATAGRANT_SNOWFLAKE_DSN` | none. Required on Snowflake `--apply`. Prefer the env var over the flag (`ps` / shell history). Postgres `--apply` does not read it. Never logged. |
 | Policy file | `--policy` | `DATAGRANT_POLICY` | none (required where used) |
 | Signing key | `--signing-key` | `DATAGRANT_SIGNING_KEY` | `~/.config/datagrant/signing.key` |
 | Hash key | `--hash-key` | `DATAGRANT_HASH_KEY` | `~/.config/datagrant/hash.key` |

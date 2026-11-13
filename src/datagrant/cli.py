@@ -62,8 +62,13 @@ class CliError(Exception):
 
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-_PW_KV = re.compile(r"(password\s*=\s*)('(?:[^'\\]|\\.)*'|\S+)", re.IGNORECASE)
+_SECRET_KV = re.compile(
+    r"(?<![A-Za-z0-9_-])((?:password|token|private_key)\s*=\s*)"
+    r"('(?:[^'\\]|\\.)*'|\S+)",
+    re.IGNORECASE,
+)
 _PW_URL = re.compile(r"(\w+://[^:/@\s]*:)[^@\s]*@")
+_SECRET_FLAG_RE = re.compile(r"(--(?:snowflake-)?dsn)(=|\s+)(\S+)", re.IGNORECASE)
 
 
 def redact(text: str, dsn: str | None = None) -> str:
@@ -80,7 +85,33 @@ def redact(text: str, dsn: str | None = None) -> str:
         # password= forms are still stripped below at every length.
         if isinstance(pw, str) and len(pw) >= 4:
             text = text.replace(pw, "***")
-    return _PW_URL.sub(r"\1***@", _PW_KV.sub(r"\1***", text))
+    return _PW_URL.sub(r"\1***@", _SECRET_KV.sub(r"\1***", text))
+
+
+def _secret_dsn_values(args: argparse.Namespace | None = None) -> tuple[str, ...]:
+    found: list[str] = []
+    seen: set[str] = set()
+    raws: list[object] = [os.environ.get(DSN_ENV), os.environ.get(SNOWFLAKE_DSN_ENV)]
+    if args is not None:
+        raws.extend((getattr(args, "dsn", None), getattr(args, "snowflake_dsn", None)))
+    for raw in raws:
+        if not isinstance(raw, str):
+            continue
+        v = raw.strip()
+        if len(v) >= 4 and v not in seen:
+            seen.add(v)
+            found.append(v)
+    return tuple(found)
+
+
+def _cli_redact(text: str, args: argparse.Namespace | None = None) -> str:
+    """Scrub DSN flags, env DSN values, and password=/token=/private_key= pairs."""
+    text = str(text)
+    text = _SECRET_FLAG_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    for dsn in _secret_dsn_values(args):
+        text = redact(text, dsn)
+        text = text.replace(dsn, "<redacted>")
+    return redact(text)
 
 
 @dataclass
@@ -291,7 +322,10 @@ def _hide_token(text: str, extra_oidc_token: str | None = None) -> str:
 
 
 def _warn(ctx: Ctx, msg: str) -> None:
-    print(f"datagrant: warning: {_hide_token(msg, ctx.oidc_token)}", file=sys.stderr)
+    print(
+        f"datagrant: warning: {_hide_token(_cli_redact(msg, ctx.args), ctx.oidc_token)}",
+        file=sys.stderr,
+    )
 
 
 def _policy_path(args: argparse.Namespace) -> Path | None:
@@ -990,6 +1024,14 @@ def cmd_approve(ctx: Ctx) -> int:
                 [f"request {pending.id} is {pending.status}, not pending"],
                 caller,
             )
+        ds = policy.datasets.get(pending.request.dataset)
+        if ds is not None and ds.engine != "postgres":
+            msg = (
+                f"request {pending.id} targets dataset {pending.request.dataset!r} "
+                f"with engine {ds.engine!r}; approve only issues Postgres grants"
+            )
+            _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+            raise CliError(msg, EXIT_FAILED)
         req_meta = pending.requester_identity
         req_mode = req_meta.get("mode", "local") if isinstance(req_meta, dict) else "local"
         if req_mode != policy.identity.mode:
@@ -1703,7 +1745,7 @@ class _SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         from datagrant.oidc import _JWS_LIKE_RE
 
-        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(message))
+        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(_cli_redact(message)))
         self.print_usage(sys.stderr)
         print(f"{self.prog}: error: {clean}", file=sys.stderr)
         raise SystemExit(EXIT_USAGE)
@@ -1975,7 +2017,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
     try:
         return int(args.fn(ctx))
     except CliError as exc:
-        _err(ctx, redact(str(exc), dsn), exc.code)
+        _err(ctx, str(exc), exc.code)
         return exc.code
     except (
         PolicyError,
@@ -1996,7 +2038,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
 
 
 def _err(ctx: Ctx, msg: str, code: int) -> None:
-    msg = _hide_token(msg, ctx.oidc_token)
+    msg = _hide_token(_cli_redact(msg, ctx.args), ctx.oidc_token)
     if ctx.json:
         ctx.out(json.dumps({"error": msg, "exit_code": code}))
     else:
