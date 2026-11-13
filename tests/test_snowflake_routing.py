@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -290,6 +291,7 @@ def test_connect_refuses_pyformat_paramstyle(monkeypatch: pytest.MonkeyPatch) ->
         connect("account=xy user=svc")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
 def test_private_key_file_requires_0600(tmp_path: Path) -> None:
     from datagrant.snowflake_support import SnowflakeSetupError, _load_private_key
 
