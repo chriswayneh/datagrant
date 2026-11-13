@@ -395,6 +395,47 @@ def _rowcount(result: Any, conn: Any) -> int:
     return 0
 
 
+def _fetchone(result: Any, conn: Any) -> tuple[Any, ...] | None:
+    if result is not None and hasattr(result, "fetchone"):
+        row = result.fetchone()
+        if row is not None:
+            return tuple(row)
+    if hasattr(conn, "fetchone"):
+        row = conn.fetchone()
+        if row is not None:
+            return tuple(row)
+    return None
+
+
+def ensure_state(conn: Any) -> None:
+    """Create datagrant Snowflake schemas, grant tables, and hash UDF if missing."""
+    for stmt in ensure_state_sql():
+        _exec(conn, stmt)
+
+
+def count_live_grants(conn: Any, requester: str) -> int:
+    """Live grants for this requester across all Snowflake datasets.
+
+    Count is ``STATUS IN ('issuing','enabling','active')`` and
+    ``EXPIRES_AT > CURRENT_TIMESTAMP()``. In-flight issue rows count because
+    Snowflake has no advisory lock. Qmark-bound; requester never goes in SQL
+    text. Postgres grants live in a different store and are not counted here.
+    """
+    result = _exec(
+        conn,
+        (
+            f"SELECT COUNT(*) FROM {q(STATE_SCHEMA)}.{q('GRANTS')}"  # nosec B608
+            " WHERE REQUESTER = ? AND STATUS IN (?, ?, ?)"
+            " AND EXPIRES_AT > CURRENT_TIMESTAMP()"
+        ),
+        (requester, "issuing", "enabling", "active"),
+    )
+    row = _fetchone(result, conn)
+    if row is None or row[0] is None:
+        return 0
+    return int(row[0])
+
+
 def append_revoked(
     plan: GrantPlan,
     receipts: ReceiptSink | None,
@@ -425,7 +466,7 @@ def reverse_drop(conn: Any, plan: GrantPlan, *, enabled: bool) -> None:
     """Drop created objects in reverse order. DISABLE first if ENABLE ran."""
     view_id = f"{q(VIEW_SCHEMA)}.{q('G_' + plan.grant_id)}"
     if enabled:
-        _exec(conn, f"ALTER USER {q(plan.user)} SET DISABLED = TRUE")
+        _exec(conn, f"ALTER USER IF EXISTS {q(plan.user)} SET DISABLED = TRUE")
     _exec(conn, f"DROP VIEW IF EXISTS {view_id}")
     _exec(conn, f"DROP ROLE IF EXISTS {q(plan.role)}")
     _exec(conn, f"DROP USER IF EXISTS {q(plan.user)}")
@@ -455,14 +496,15 @@ def apply_plan(
     conn: Any,
     plan: GrantPlan,
     receipts: ReceiptSink | None = None,
+    *,
+    max_concurrent: int | None = None,
 ) -> None:
     """Run the fail-safe sequence. No ENABLE without an issued receipt and an issuing row."""
     enabled = False
     created = False
     issued = False
     try:
-        for stmt in ensure_state_sql():
-            _exec(conn, stmt)
+        ensure_state(conn)
         if plan.hash_key is not None:
             _bind_hash_key(conn, plan.hash_key)
         insert_sql, create_user, *middle, update_sql, enabling_sql, enable_sql, active_sql = (
@@ -470,6 +512,18 @@ def apply_plan(
         )
         _run(conn, insert_sql)
         created = True
+        if max_concurrent is not None:
+            facts = plan.facts
+            if facts is None:
+                reverse_drop(conn, plan, enabled=False)
+                raise GrantError(f"grant {plan.grant_id}: concurrent cap check needs grant facts")
+            n = count_live_grants(conn, facts.requester)
+            if n > max_concurrent:
+                reverse_drop(conn, plan, enabled=False)
+                raise GrantError(
+                    f"grant {plan.grant_id}: concurrent grant cap exceeded "
+                    f"({n} live, max_concurrent_grants is {max_concurrent}); objects dropped"
+                )
         _run(conn, create_user)
         create_sql = stmt_sql(create_user)
         if plan.private_pem and plan.private_pem in create_sql:
@@ -522,7 +576,7 @@ def apply_plan(
             ) from exc
         active = _run(conn, active_sql)
         if _rowcount(active, conn) != 1:
-            _exec(conn, f"ALTER USER {q(plan.user)} SET DISABLED = TRUE")
+            _exec(conn, f"ALTER USER IF EXISTS {q(plan.user)} SET DISABLED = TRUE")
             reverse_drop(conn, plan, enabled=True)
             append_revoked(plan, receipts, reason="lost_enabling")
             raise GrantError(f"grant {plan.grant_id}: not enabling after ENABLE; objects dropped")
@@ -553,8 +607,7 @@ def create_pending(
     now = now or datetime.now(UTC)
     rid = secrets.token_hex(6)
     ident = json.dumps(dict(requester_identity), sort_keys=True) if requester_identity else None
-    for stmt in ensure_state_sql():
-        _exec(conn, stmt)
+    ensure_state(conn)
     _run(
         conn,
         Bound(
@@ -599,11 +652,7 @@ def get_pending(conn: Any, request_id: str) -> dict[str, Any] | None:
         ),
         (request_id,),
     )
-    row = None
-    if result is not None and hasattr(result, "fetchone"):
-        row = result.fetchone()
-    elif hasattr(conn, "fetchone"):
-        row = conn.fetchone()
+    row = _fetchone(result, conn)
     if row is None:
         return None
     keys = (
@@ -655,11 +704,12 @@ def issue_approved(
     *,
     approver: str,
     receipts: ReceiptSink | None = None,
+    max_concurrent: int | None = None,
 ) -> None:
     """Claim a pending request, then apply. Mark the request failed if apply fails."""
     claim_pending(conn, request_id, approver=approver)
     try:
-        apply_plan(conn, plan, receipts)
+        apply_plan(conn, plan, receipts, max_concurrent=max_concurrent)
     except BaseException:
         mark_request_failed(conn, request_id)
         raise

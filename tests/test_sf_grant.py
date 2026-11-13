@@ -20,6 +20,7 @@ from datagrant.sf.grant import (
     apply_plan,
     build_plan,
     claim_pending,
+    count_live_grants,
     create_pending,
     days_to_expiry,
     get_pending,
@@ -72,6 +73,8 @@ class FakeConn:
         rowcount: int = 1,
         fail_params: Any = None,
         flip_before: str | None = None,
+        missing_user: bool = False,
+        live_count: int = 0,
     ):
         self.queries: list[tuple[str, Any]] = []
         self.fail_on = fail_on
@@ -79,6 +82,9 @@ class FakeConn:
         self.rowcount = rowcount
         self.fail_params = fail_params
         self.flip_before = flip_before
+        self.missing_user = missing_user
+        self.live_count = live_count
+        self._count_row: tuple[Any, ...] | None = None
         self.status: dict[str, str] = {}
 
     def cursor(self) -> FakeConn:
@@ -91,7 +97,24 @@ class FakeConn:
         if self.fail_on and self.fail_on.upper() in sql.upper():
             raise RuntimeError(f"stub:{self.fail_on}")
         su = sql.upper()
+        if (
+            self.missing_user
+            and "ALTER USER" in su
+            and "DISABLED = TRUE" in su
+            and "IF EXISTS" not in su
+        ):
+            raise RuntimeError("stub:user gone")
         args: tuple[Any, ...] = () if params is None else tuple(params)
+        if "COUNT(" in su and "GRANTS" in su:
+            n = self.live_count
+            if any(
+                q[0].upper().startswith("INSERT") and "GRANTS" in q[0].upper()
+                for q in self.queries[:-1]
+            ):
+                n += 1
+            self._count_row = (n,)
+            return self
+        self._count_row = None
         if "GRANTS" in su and su.startswith("INSERT") and args:
             self.status[str(args[0])] = str(args[15]) if len(args) > 15 else "issuing"
         elif "GRANTS" in su and su.startswith("UPDATE") and "AND STATUS" in su and args:
@@ -116,6 +139,10 @@ class FakeConn:
         return self
 
     def fetchone(self) -> tuple[Any, ...] | None:
+        if self._count_row is not None:
+            row = self._count_row
+            self._count_row = None
+            return row
         return self.pending_row
 
     def close(self) -> None:
@@ -540,6 +567,35 @@ def test_issue_approved_marks_failed_on_apply_error() -> None:
     assert "aabbccddeeff" not in failed_sql
 
 
+def test_count_live_grants_qmark_binds_issuing_enabling_active() -> None:
+    conn = FakeConn(live_count=2)
+    assert count_live_grants(conn, "alice") == 2
+    sql, params = conn.queries[-1]
+    assert "COUNT(*)" in sql
+    assert "REQUESTER = ?" in sql
+    assert "DATASET" not in sql
+    assert "STATUS IN (?, ?, ?)" in sql
+    assert "EXPIRES_AT > CURRENT_TIMESTAMP()" in sql
+    assert "alice" not in sql
+    assert params == ("alice", "issuing", "enabling", "active")
+
+
+def test_apply_plan_racing_insert_over_cap_reverse_drops(tmp_path: Path) -> None:
+    conn = FakeConn(live_count=1)
+    with pytest.raises(GrantError, match="concurrent grant cap exceeded"):
+        apply_plan(conn, _plan(), _sink(tmp_path), max_concurrent=1)
+    sqls = _sqls(conn)
+    insert_i = next(
+        i for i, s in enumerate(sqls) if s.startswith('INSERT INTO "DATAGRANT"."GRANTS"')
+    )
+    count_i = next(i for i, s in enumerate(sqls) if "COUNT(" in s)
+    assert insert_i < count_i
+    assert not any(s.startswith("CREATE USER") for s in sqls)
+    assert any("DROP USER" in s for s in sqls)
+    assert conn.status["abcdef012345"] == "failed"
+    assert _receipt_events(tmp_path) == []
+
+
 def test_active_failure_after_issued_writes_revoked(tmp_path: Path) -> None:
     conn = FakeConn(fail_params=("active", "abcdef012345", "enabling"))
     with pytest.raises(GrantError, match="failed"):
@@ -605,6 +661,23 @@ def test_revoked_row_before_active_disables_and_drops(tmp_path: Path) -> None:
     events = _receipt_events(tmp_path)
     assert events[0] == "issued"
     assert "revoked" in events
+
+
+def test_lost_enabling_if_exists_writes_receipt_when_user_dropped(tmp_path: Path) -> None:
+    conn = FakeConn(flip_before="active", missing_user=True)
+    with pytest.raises(GrantError, match="not enabling after ENABLE"):
+        apply_plan(conn, _plan(), _sink(tmp_path))
+    sqls = _sqls(conn)
+    assert any("ALTER USER IF EXISTS" in s and "DISABLED = TRUE" in s for s in sqls)
+    assert not any("DISABLED = TRUE" in s and "IF EXISTS" not in s for s in sqls)
+    recs = [
+        json.loads(line)["receipt"]
+        for line in (tmp_path / "r.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert recs[0]["event"] == "issued"
+    revoked = [r for r in recs if r["event"] == "revoked"]
+    assert revoked and revoked[-1]["details"]["reason"] == "lost_enabling"
 
 
 def test_deliver_sf_issued_writes_revoked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

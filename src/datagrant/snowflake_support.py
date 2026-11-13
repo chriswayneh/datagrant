@@ -17,8 +17,6 @@ SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
 EXTRA_HINT = "pip install 'datagrant[snowflake]'"
 MAX_DSN_BYTES = 8192
 PARAMSTYLE = "qmark"
-APPLY_UNAVAILABLE = "Snowflake --apply for grant issue and approve is not enabled yet"
-GRANT_APPLY_ENABLED = False
 _DSN_ALLOWED = frozenset(
     {
         "account",
