@@ -3,7 +3,7 @@
 DDL autocommits. Order: issuing row, DISABLED user, view, role, row update,
 issued receipt, ENABLE, then active. Reverse-drop on failure. The hash key is
 bound into ``datagrant._hash_master`` and read by a SQL secure UDF; it is never
-in view SQL or CREATE USER SQL. Revoke/sweep are a later construction PR.
+in view SQL or CREATE USER SQL. Revoke and sweep live in ``datagrant.sf.revoke``.
 """
 
 from __future__ import annotations
@@ -618,3 +618,20 @@ def mark_request_failed(conn: Any, request_id: str) -> None:
         f"UPDATE {q(STATE_SCHEMA)}.{q('REQUESTS')} SET STATUS = ? WHERE ID = ?",  # nosec B608
         ("failed", request_id),
     )
+
+
+def issue_approved(
+    conn: Any,
+    plan: GrantPlan,
+    request_id: str,
+    *,
+    approver: str,
+    receipts: ReceiptSink | None = None,
+) -> None:
+    """Claim a pending request, then apply. Mark the request failed if apply fails."""
+    claim_pending(conn, request_id, approver=approver)
+    try:
+        apply_plan(conn, plan, receipts)
+    except BaseException:
+        mark_request_failed(conn, request_id)
+        raise

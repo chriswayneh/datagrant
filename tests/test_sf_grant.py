@@ -23,6 +23,7 @@ from datagrant.sf.grant import (
     create_pending,
     days_to_expiry,
     get_pending,
+    issue_approved,
     lit,
     mark_request_failed,
     new_keypair,
@@ -461,6 +462,36 @@ def test_claim_pending_double_approve_and_expired() -> None:
     failed = FakeConn()
     mark_request_failed(failed, "aabbccddeeff")
     assert failed.queries[-1][1] == ("failed", "aabbccddeeff")
+
+
+def test_issue_approved_claims_before_apply(tmp_path: Path) -> None:
+    conn = FakeConn()
+    issue_approved(conn, _plan(), "aabbccddeeff", approver="carol", receipts=_sink(tmp_path))
+    sqls = _sqls(conn)
+    claim_i = next(i for i, s in enumerate(sqls) if s.startswith('UPDATE "DATAGRANT"."REQUESTS"'))
+    user_i = next(i for i, s in enumerate(sqls) if s.startswith("CREATE USER"))
+    assert claim_i < user_i
+    assert conn.queries[claim_i][1] == ("approved", "carol", "aabbccddeeff", "pending")
+    assert "?" in sqls[claim_i]
+    assert "carol" not in sqls[claim_i]
+
+
+def test_issue_approved_expired_or_double_does_not_apply() -> None:
+    conn = FakeConn(rowcount=0)
+    with pytest.raises(GrantError, match="not pending or expired"):
+        issue_approved(conn, _plan(), "aabbccddeeff", approver="carol")
+    assert not any("CREATE USER" in s for s in _sqls(conn))
+    assert not any(p == ("failed", "aabbccddeeff") for _s, p in conn.queries)
+
+
+def test_issue_approved_marks_failed_on_apply_error() -> None:
+    conn = FakeConn(fail_on="CREATE USER")
+    with pytest.raises(GrantError):
+        issue_approved(conn, _plan(), "aabbccddeeff", approver="carol")
+    assert any(p == ("failed", "aabbccddeeff") for _s, p in conn.queries)
+    failed_sql = next(s for s, p in conn.queries if p == ("failed", "aabbccddeeff"))
+    assert "STATUS = ?" in failed_sql
+    assert "aabbccddeeff" not in failed_sql
 
 
 def test_active_failure_after_issued_writes_revoked(tmp_path: Path) -> None:
