@@ -569,7 +569,12 @@ def cmd_policy_check(ctx: Ctx) -> int:
 def _redacted_sql(plan: Any) -> list[str]:
     out = []
     for s in plan.statements:
-        text = s if isinstance(s, str) else s.as_string(None)
+        if isinstance(s, str):
+            text = s
+        elif hasattr(s, "sql"):
+            text = s.sql
+        else:
+            text = s.as_string(None)
         text = re.sub(r"PASSWORD '[^']*'", "PASSWORD '<redacted>'", text)
         text = re.sub(r"RSA_PUBLIC_KEY = '[^']*'", "RSA_PUBLIC_KEY = '<redacted>'", text)
         out.append(text)
@@ -925,6 +930,7 @@ def _snowflake_request(
 ) -> int:
     """Snowflake auto grant or two-person pending (public key only until approve)."""
     from datagrant.sf.grant import (
+        ROW_FILTER_UNAVAILABLE,
         GrantError,
         apply_plan,
         build_plan,
@@ -940,6 +946,8 @@ def _snowflake_request(
 
     a = ctx.args
     ds = policy.datasets[req.dataset]
+    if req.row_filter is not None:
+        return _refuse_request(ctx, req, policy, [ROW_FILTER_UNAVAILABLE], caller)
     two_person = decision.approval == "two-person"
     user, source = caller.username, caller.source
     hash_key = (
@@ -1040,7 +1048,13 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
     from types import SimpleNamespace
 
     from datagrant.policy import Request, evaluate
-    from datagrant.sf.grant import GrantError, apply_plan, build_plan, get_pending
+    from datagrant.sf.grant import (
+        ROW_FILTER_UNAVAILABLE,
+        GrantError,
+        apply_plan,
+        build_plan,
+        get_pending,
+    )
 
     a = ctx.args
     approver, source = caller.username, caller.source
@@ -1085,6 +1099,10 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                     policy,
                     [f"request {pending.id} is {pending.status}, not pending"],
                     caller,
+                )
+            if req.row_filter is not None:
+                return _refuse_approve(
+                    ctx, pending, policy, [ROW_FILTER_UNAVAILABLE], caller
                 )
             ds = policy.datasets.get(req.dataset)
             if ds is None or ds.engine != "snowflake":

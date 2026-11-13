@@ -14,14 +14,19 @@ from datagrant.pg.grant import ReceiptSink
 from datagrant.policy import Decision, Request
 from datagrant.sf.grant import (
     HASH_TABLE,
+    ROW_FILTER_UNAVAILABLE,
+    Bound,
     GrantError,
     apply_plan,
     build_plan,
     create_pending,
+    days_to_expiry,
     get_pending,
+    lit,
     new_keypair,
     q,
     reverse_drop,
+    stmt_sql,
 )
 
 NOW = datetime(2026, 11, 13, 3, 0, tzinfo=UTC)
@@ -36,7 +41,7 @@ def req(**kw: object) -> Request:
         "columns": ("PATIENT_ID", "SSN"),
         "duration": timedelta(hours=2),
         "purpose": "eval",
-        "row_filter": "REGION = 'west'",
+        "row_filter": None,
     }
     base.update(kw)
     return Request(**base)  # type: ignore[arg-type]
@@ -114,13 +119,18 @@ def test_keypair_fingerprint_is_sha256_of_der() -> None:
 def test_plan_sql_order_and_invariants() -> None:
     pair = new_keypair()
     plan = _plan(pair=pair)
-    text = list(plan.statements)
+    text = [stmt_sql(s) for s in plan.statements]
     blob = "\n".join(text)
-    assert text[0].startswith('INSERT INTO "DATAGRANT"."GRANTS"')
-    assert "issuing" in text[0]
+    insert = plan.statements[0]
+    assert isinstance(insert, Bound)
+    assert insert.sql.startswith('INSERT INTO "DATAGRANT"."GRANTS"')
+    assert insert.sql.count("?") == 17
+    assert "issuing" in insert.params
+    assert "issuing" not in insert.sql
     assert text[1].startswith('CREATE USER "DG_abcdef012345" TYPE = SERVICE')
     assert "RSA_PUBLIC_KEY" in text[1]
     assert "DISABLED" in text[1]
+    assert "DAYS_TO_EXPIRY = 1" in text[1]
     assert pair.public_body in text[1]
     assert pair.private_pem not in blob
     assert "PASSWORD" not in text[1]
@@ -134,8 +144,9 @@ def test_plan_sql_order_and_invariants() -> None:
     assert usage in blob
     assert f'GRANT SELECT ON "DATAGRANT"."{HASH_TABLE}"' not in blob
     assert text[-2] == 'ALTER USER "DG_abcdef012345" SET DISABLED = FALSE'
-    assert "STATUS = 'active'" in text[-1]
-    assert text.index(text[0]) < text.index(text[1])
+    active = plan.statements[-1]
+    assert isinstance(active, Bound)
+    assert active.params == ("active", "abcdef012345")
     idx_user = next(i for i, s in enumerate(text) if s.startswith("CREATE USER"))
     idx_insert = next(i for i, s in enumerate(text) if s.startswith("INSERT INTO"))
     assert idx_insert < idx_user
@@ -143,7 +154,7 @@ def test_plan_sql_order_and_invariants() -> None:
 
 def test_view_calls_udf_not_key_bytes() -> None:
     plan = _plan()
-    view = next(s for s in plan.statements if "CREATE SECURE VIEW" in s)
+    view = next(s for s in plan.statements if "CREATE SECURE VIEW" in stmt_sql(s))
     assert '"DATAGRANT"."HASH_HMAC"' in view
     assert KEY.derived.hex() not in view
     assert "k" * 32 not in view
@@ -157,7 +168,9 @@ def test_apply_enable_last_then_active(tmp_path: Path) -> None:
     insert_i = next(i for i, s in enumerate(sqls) if 'INSERT INTO "DATAGRANT"."GRANTS"' in s)
     user_i = next(i for i, s in enumerate(sqls) if s.startswith("CREATE USER"))
     enable_i = next(i for i, s in enumerate(sqls) if "DISABLED = FALSE" in s)
-    active_i = next(i for i, s in enumerate(sqls) if "STATUS = 'active'" in s)
+    active_i = next(
+        i for i, (_s, p) in enumerate(conn.queries) if p == ("active", "abcdef012345")
+    )
     assert insert_i < user_i < enable_i < active_i
     lines = (tmp_path / "r.jsonl").read_text().strip().splitlines()
     body = json.loads(lines[0])["receipt"]
@@ -166,9 +179,12 @@ def test_apply_enable_last_then_active(tmp_path: Path) -> None:
     assert "private_key" not in json.dumps(body)
     assert plan.private_pem not in json.dumps(body)
     merge = next(s for s in sqls if "MERGE INTO" in s)
+    assert "?" in merge
+    assert "%s" not in merge
     assert KEY.derived.hex() not in merge
     params = next(p for s, p in conn.queries if s and "MERGE INTO" in s)
     assert params is not None and KEY.derived in params
+    assert KEY.derived.hex() not in "\n".join(sqls)
 
 
 def test_receipt_failure_does_not_enable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,7 +201,7 @@ def test_receipt_failure_does_not_enable(tmp_path: Path, monkeypatch: pytest.Mon
     assert any("CREATE USER" in s for s in sqls)
     assert not any("DISABLED = FALSE" in s for s in sqls)
     assert any("DROP USER" in s for s in sqls)
-    assert any("STATUS = 'failed'" in s for s in sqls)
+    assert any(p == ("failed", "abcdef012345") for _s, p in conn.queries)
     assert not (tmp_path / "r.jsonl").exists() or (tmp_path / "r.jsonl").read_text() == ""
 
 
@@ -213,7 +229,7 @@ def test_failure_after_create_user_reverse_drops(tmp_path: Path) -> None:
     assert any("CREATE USER" in s for s in sqls)
     assert not any("DISABLED = FALSE" in s for s in sqls)
     assert any("DROP USER IF EXISTS" in s for s in sqls)
-    assert any("STATUS = 'failed'" in s for s in sqls)
+    assert any(p == ("failed", "abcdef012345") for _s, p in conn.queries)
 
 
 def test_two_person_pending_stores_public_key_not_private() -> None:
@@ -229,8 +245,10 @@ def test_two_person_pending_stores_public_key_not_private() -> None:
         now=NOW,
     )
     blob = "\n".join(_sqls(conn))
-    assert pair.public_body in blob
-    assert pair.fingerprint in blob
+    pending = next((s, p) for s, p in conn.queries if s.startswith('INSERT INTO "DATAGRANT"."REQUESTS"'))
+    assert pair.public_body in pending[1]
+    assert pair.fingerprint in pending[1]
+    assert pair.public_body not in pending[0]
     assert pair.private_pem not in blob
     assert "CREATE USER" not in blob
     assert rid
@@ -299,4 +317,73 @@ def test_reverse_drop_disables_first_when_enabled() -> None:
     assert any("DROP VIEW" in s for s in sqls)
     assert any("DROP ROLE" in s for s in sqls)
     assert any("DROP USER" in s for s in sqls)
-    assert any("STATUS = 'failed'" in s for s in sqls)
+    assert any(p == ("failed", "abcdef012345") for _s, p in conn.queries)
+
+
+def test_lit_escapes_backslash_before_quote() -> None:
+    assert lit("\\") == "'\\\\'"
+    assert lit("'") == "''''"
+    assert lit("\\'") == "'\\\\'''"
+    assert lit("$$") == "'$$'"
+
+
+@pytest.mark.parametrize("payload", ["\\", "\\'", "$$", "x\\', '2099-01-01', 'active"])
+def test_dml_binds_backslash_quote_and_dollar(payload: str) -> None:
+    plan = build_plan(
+        dec(),
+        req(purpose=payload),
+        database="CLINIC_DB",
+        public_body=payload,
+        fingerprint="a" * 64,
+        grant_id="abcdef012345",
+        now=NOW,
+        hash_key=KEY,
+    )
+    insert = plan.statements[0]
+    assert isinstance(insert, Bound)
+    assert payload not in insert.sql
+    assert payload in insert.params
+    create = stmt_sql(plan.statements[1])
+    assert f"RSA_PUBLIC_KEY = {lit(payload)}" in create
+    assert "DAYS_TO_EXPIRY =" in create
+
+
+def test_days_to_expiry_ceils_duration() -> None:
+    assert days_to_expiry(timedelta(hours=2)) == 1
+    assert days_to_expiry(timedelta(days=3)) == 3
+    pair = new_keypair()
+    plan = build_plan(
+        dec(),
+        req(duration=timedelta(days=3)),
+        database="CLINIC_DB",
+        public_body=pair.public_body,
+        fingerprint=pair.fingerprint,
+        grant_id="abcdef012345",
+        now=NOW,
+        hash_key=KEY,
+    )
+    create = stmt_sql(plan.statements[1])
+    assert "DAYS_TO_EXPIRY = 3" in create
+    assert plan.days_to_expiry == 3
+
+
+def test_build_plan_and_pending_refuse_row_filter() -> None:
+    pair = new_keypair()
+    with pytest.raises(GrantError, match="row filters"):
+        build_plan(
+            dec(),
+            req(row_filter="REGION = 'west'"),
+            database="CLINIC_DB",
+            public_body=pair.public_body,
+            fingerprint=pair.fingerprint,
+            hash_key=KEY,
+        )
+    with pytest.raises(GrantError, match=ROW_FILTER_UNAVAILABLE):
+        create_pending(
+            FakeConn(),
+            req(row_filter="REGION = 'west'"),
+            policy_sha256="a" * 64,
+            public_body=pair.public_body,
+            fingerprint=pair.fingerprint,
+            ttl=timedelta(hours=1),
+        )

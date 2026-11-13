@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
 EXTRA_HINT = "pip install 'datagrant[snowflake]'"
 MAX_DSN_BYTES = 8192
+PARAMSTYLE = "qmark"
 
 
 class SnowflakeSetupError(ValueError):
@@ -86,8 +87,9 @@ def _dsn_kwargs(dsn: str) -> dict[str, Any]:
 
 
 def connect(dsn: str) -> Any:
-    """Open a Snowflake session. Caller must never log ``dsn``."""
+    """Open a Snowflake session with qmark (server-side) binds. Never log ``dsn``."""
     mod = load_connector()
+    mod.paramstyle = PARAMSTYLE
     kwargs = _dsn_kwargs(dsn)
     path = kwargs.pop("private_key_file", None)
     if path:
@@ -104,4 +106,10 @@ def connect(dsn: str) -> Any:
             kwargs["private_key"] = serialization.load_pem_private_key(raw, password=None)
         except Exception as exc:
             raise SnowflakeSetupError("cannot load Snowflake private key") from exc
-    return mod.connect(**kwargs)
+    kwargs["paramstyle"] = PARAMSTYLE
+    conn = mod.connect(**kwargs)
+    try:
+        conn.paramstyle = PARAMSTYLE
+    except (AttributeError, TypeError):
+        pass
+    return conn

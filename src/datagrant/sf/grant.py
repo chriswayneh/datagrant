@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import secrets
 from collections.abc import Mapping, Sequence
@@ -25,7 +26,6 @@ from datagrant.keys import HashKey
 from datagrant.pg.grant import ReceiptSink
 from datagrant.policy import Decision, Request
 from datagrant.receipt import GrantFacts, ReceiptError
-from datagrant.rowfilter import parse_row_filter
 
 STATE_SCHEMA = "DATAGRANT"
 VIEW_SCHEMA = "DATAGRANT_VIEWS"
@@ -37,6 +37,8 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SCOPE_LABEL = "datagrant/hash-scope/v1:"
 RSA_BITS = 2048
 REDACTED = "<redacted>"
+ROW_FILTER_UNAVAILABLE = "Snowflake row filters are not implemented yet"
+SECONDS_PER_DAY = 86400.0
 
 
 class GrantError(RuntimeError):
@@ -51,6 +53,17 @@ class KeyPair:
 
 
 @dataclass(frozen=True)
+class Bound:
+    """DML with qmark (``?``) server-side binds. Params never go in SQL text."""
+
+    sql: str
+    params: tuple[Any, ...]
+
+
+Stmt = str | Bound
+
+
+@dataclass(frozen=True)
 class GrantPlan:
     grant_id: str
     role: str
@@ -58,12 +71,13 @@ class GrantPlan:
     user: str
     expires_at: datetime
     database: str
-    statements: tuple[str, ...]
+    statements: tuple[Stmt, ...]
     hash_key: HashKey | None = field(default=None, repr=False)
     facts: GrantFacts | None = None
     public_body: str = ""
     fingerprint: str = ""
     private_pem: str | None = field(default=None, repr=False)
+    days_to_expiry: int = 1
 
 
 def q(name: str) -> str:
@@ -74,7 +88,28 @@ def q(name: str) -> str:
 
 
 def lit(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+    """Snowflake string literal for DDL only. Escape backslash before quote.
+
+    Snowflake treats ``\\'`` as a closing quote, so a backslash must be doubled
+    first or a value like ``\\'`` can break out of CREATE USER / COMMENT.
+    """
+    return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def stmt_sql(stmt: Stmt) -> str:
+    return stmt.sql if isinstance(stmt, Bound) else stmt
+
+
+def _placeholders(n: int) -> str:
+    return ", ".join("?" for _ in range(n))
+
+
+def days_to_expiry(duration: timedelta) -> int:
+    """Snowflake DAYS_TO_EXPIRY is day-granular; ceil the grant duration."""
+    seconds = duration.total_seconds()
+    if seconds <= 0:
+        raise GrantError("duration must be positive")
+    return max(1, math.ceil(seconds / SECONDS_PER_DAY))
 
 
 def new_keypair() -> KeyPair:
@@ -125,11 +160,9 @@ def _col_expr(col: str, mask: str, hash_scope: str) -> str:
     raise GrantError(f"unknown mask {mask!r}")
 
 
-def _where_sql(row_filter: str | None) -> str:
-    if row_filter is None:
-        return ""
-    cond, _ = parse_row_filter(row_filter)
-    return " WHERE " + cond.as_string(None)
+def _reject_row_filter(req: Request) -> None:
+    if req.row_filter is not None:
+        raise GrantError(ROW_FILTER_UNAVAILABLE)
 
 
 def _hash_udf_sql() -> str:
@@ -199,6 +232,7 @@ def build_plan(
         raise GrantError("cannot build a grant for a denied decision")
     if decision.approval == "two-person" and not approvers:
         raise GrantError("two-person approval: the grant needs an approver")
+    _reject_row_filter(req)
     gid = grant_id or secrets.token_hex(6)
     if not _GRANT_ID_RE.fullmatch(gid):
         raise GrantError("grant id must be 12 lowercase hex characters")
@@ -206,10 +240,12 @@ def build_plan(
     if now.tzinfo is None:
         raise GrantError("now must be timezone-aware")
     expires = now + req.duration
+    days = days_to_expiry(req.duration)
     tschema, tname = _split_table(req.table, schema)
     user = f"DG_{gid}"
     role = f"DG_R_{gid}"
     view = f"G_{gid}"
+    view_name = f"{VIEW_SCHEMA}.{view}"
     needs_hash = any(decision.masks[c] == "hash" for c in req.columns)
     if needs_hash and hash_key is None:
         raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
@@ -217,25 +253,52 @@ def build_plan(
     cols = ", ".join(_col_expr(c, decision.masks[c], scope) for c in req.columns)
     from_tbl = f"{q(database)}.{q(tschema)}.{q(tname)}"
     view_id = f"{q(VIEW_SCHEMA)}.{q(view)}"
-    select = f"SELECT {cols} FROM {from_tbl}" + _where_sql(req.row_filter)  # nosec B608
+    select = f"SELECT {cols} FROM {from_tbl}"  # nosec B608
     comment = f"datagrant:{gid}"
-    stmts = (
+    insert = Bound(
         (
             f"INSERT INTO {q(STATE_SCHEMA)}.{q('GRANTS')} "  # nosec B608
             "(ID, ROLE_NAME, VIEW_NAME, USER_NAME, DATASET, TABLE_NAME, REQUESTER, PURPOSE,"
             " COLUMNS, ROW_FILTER, APPROVAL, POLICY_SHA256, CREATED_AT, EXPIRES_AT,"
             " STARTED_AT, STATUS, PUBLIC_KEY_FINGERPRINT) VALUES ("
-            f"{lit(gid)}, {lit(role)}, {lit(f'{VIEW_SCHEMA}.{view}')}, {lit(user)},"
-            f" {lit(req.dataset)}, {lit(req.table)}, {lit(req.requester)}, {lit(req.purpose)},"
-            f" {lit(json.dumps(list(req.columns)))}, "
-            f"{'NULL' if req.row_filter is None else lit(req.row_filter)},"
-            f" {lit(decision.approval)}, {lit(decision.policy_sha256)},"
-            f" {lit(now.isoformat())}, {lit(expires.isoformat())},"
-            f" {lit(now.isoformat())}, {lit('issuing')}, {lit(fingerprint)})"
+            f"{_placeholders(17)})"
         ),
         (
+            gid,
+            role,
+            view_name,
+            user,
+            req.dataset,
+            req.table,
+            req.requester,
+            req.purpose,
+            json.dumps(list(req.columns)),
+            req.row_filter,
+            decision.approval,
+            decision.policy_sha256,
+            now.isoformat(),
+            expires.isoformat(),
+            now.isoformat(),
+            "issuing",
+            fingerprint,
+        ),
+    )
+    update_row = Bound(
+        (
+            f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET ROLE_NAME = ?, VIEW_NAME = ?,"  # nosec B608
+            " USER_NAME = ?, PUBLIC_KEY_FINGERPRINT = ? WHERE ID = ?"
+        ),
+        (role, view_name, user, fingerprint, gid),
+    )
+    active = Bound(
+        f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET STATUS = ? WHERE ID = ?",  # nosec B608
+        ("active", gid),
+    )
+    stmts: tuple[Stmt, ...] = (
+        insert,
+        (
             f"CREATE USER {q(user)} TYPE = SERVICE RSA_PUBLIC_KEY = {lit(public_body)}"
-            f" DISABLED DAYS_TO_EXPIRY = 1 COMMENT = {lit(comment)}"
+            f" DISABLED DAYS_TO_EXPIRY = {days} COMMENT = {lit(comment)}"
         ),
         f"CREATE SECURE VIEW {view_id} AS {select}",
         f"CREATE ROLE {q(role)}",
@@ -245,16 +308,9 @@ def build_plan(
             f"GRANT USAGE ON FUNCTION {q(STATE_SCHEMA)}.{q(HASH_UDF)}(VARCHAR, VARCHAR)"
             f" TO ROLE {q(role)}"
         ),
-        (
-            f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET ROLE_NAME = {lit(role)},"  # nosec B608
-            f" VIEW_NAME = {lit(f'{VIEW_SCHEMA}.{view}')}, USER_NAME = {lit(user)},"
-            f" PUBLIC_KEY_FINGERPRINT = {lit(fingerprint)} WHERE ID = {lit(gid)}"
-        ),
+        update_row,
         f"ALTER USER {q(user)} SET DISABLED = FALSE",
-        (
-            f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET STATUS = {lit('active')}"  # nosec B608
-            f" WHERE ID = {lit(gid)}"
-        ),
+        active,
     )
     facts = GrantFacts(
         gid,
@@ -287,6 +343,7 @@ def build_plan(
         public_body,
         fingerprint,
         private_pem,
+        days,
     )
 
 
@@ -295,6 +352,12 @@ def _exec(conn: Any, sql: str, params: tuple[Any, ...] | None = None) -> Any:
     if params is None:
         return cur.execute(sql)
     return cur.execute(sql, params)
+
+
+def _run(conn: Any, stmt: Stmt) -> Any:
+    if isinstance(stmt, Bound):
+        return _exec(conn, stmt.sql, stmt.params)
+    return _exec(conn, stmt)
 
 
 def _sql_blob(conn: Any) -> str:
@@ -316,17 +379,19 @@ def reverse_drop(conn: Any, plan: GrantPlan, *, enabled: bool) -> None:
     _exec(conn, f"DROP VIEW IF EXISTS {view_id}")
     _exec(conn, f"DROP ROLE IF EXISTS {q(plan.role)}")
     _exec(conn, f"DROP USER IF EXISTS {q(plan.user)}")
-    _exec(
+    _run(
         conn,
-        f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET STATUS = {lit('failed')}"  # nosec B608
-        f" WHERE ID = {lit(plan.grant_id)}",
+        Bound(
+            f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET STATUS = ? WHERE ID = ?",  # nosec B608
+            ("failed", plan.grant_id),
+        ),
     )
 
 
 def _bind_hash_key(conn: Any, key: HashKey) -> None:
     sql = (
         f"MERGE INTO {q(STATE_SCHEMA)}.{q(HASH_TABLE)} T USING "  # nosec B608
-        f"(SELECT %s AS ID, %s AS KEY) S ON T.ID = S.ID "
+        f"(SELECT ? AS ID, ? AS KEY) S ON T.ID = S.ID "
         f"WHEN MATCHED THEN UPDATE SET KEY = S.KEY "
         f"WHEN NOT MATCHED THEN INSERT (ID, KEY) VALUES (S.ID, S.KEY)"
     )
@@ -350,13 +415,14 @@ def apply_plan(
         if plan.hash_key is not None:
             _bind_hash_key(conn, plan.hash_key)
         insert_sql, create_user, *middle, enable_sql, active_sql = plan.statements
-        _exec(conn, insert_sql)
+        _run(conn, insert_sql)
         created = True
-        _exec(conn, create_user)
-        if plan.private_pem and plan.private_pem in create_user:
+        _run(conn, create_user)
+        create_sql = stmt_sql(create_user)
+        if plan.private_pem and plan.private_pem in create_sql:
             raise GrantError("private key must not appear in CREATE USER SQL")
-        for stmt in middle:
-            _exec(conn, stmt)
+        for item in middle:
+            _run(conn, item)
         if receipts is None:
             raise GrantError(f"grant {plan.grant_id}: issued receipt is required before ENABLE")
         if plan.facts is None:
@@ -381,7 +447,7 @@ def apply_plan(
                 f"grant {plan.grant_id}: receipt not written ({exc}); objects dropped"
             ) from exc
         try:
-            _exec(conn, enable_sql)
+            _run(conn, enable_sql)
             enabled = True
         except BaseException as exc:
             reverse_drop(conn, plan, enabled=True)
@@ -405,7 +471,7 @@ def apply_plan(
             raise GrantError(
                 f"grant {plan.grant_id}: ENABLE failed ({exc}); objects dropped"
             ) from exc
-        _exec(conn, active_sql)
+        _run(conn, active_sql)
     except GrantError:
         raise
     except Exception as exc:
@@ -426,24 +492,40 @@ def create_pending(
     requester_identity: Mapping[str, Any] | None = None,
 ) -> str:
     """Store a two-person pending request. Public key plus fingerprint only."""
+    _reject_row_filter(req)
     now = now or datetime.now(UTC)
     rid = secrets.token_hex(6)
     ident = json.dumps(dict(requester_identity), sort_keys=True) if requester_identity else None
     for stmt in ensure_state_sql():
         _exec(conn, stmt)
-    _exec(
+    _run(
         conn,
-        f"INSERT INTO {q(STATE_SCHEMA)}.{q('REQUESTS')} ("  # nosec B608
-        "ID, REQUESTER, DATASET, TABLE_NAME, COLUMNS, ROW_FILTER, DURATION_SECONDS,"
-        " PURPOSE, POLICY_SHA256, RSA_PUBLIC_KEY, PUBLIC_KEY_FINGERPRINT,"
-        " CREATED_AT, EXPIRES_AT, STATUS, REQUESTER_IDENTITY) VALUES ("
-        f"{lit(rid)}, {lit(req.requester)}, {lit(req.dataset)}, {lit(req.table)},"
-        f" {lit(json.dumps(list(req.columns)))},"
-        f" {'NULL' if req.row_filter is None else lit(req.row_filter)},"
-        f" {int(req.duration.total_seconds())}, {lit(req.purpose)}, {lit(policy_sha256)},"
-        f" {lit(public_body)}, {lit(fingerprint)}, {lit(now.isoformat())},"
-        f" {lit((now + ttl).isoformat())}, {lit('pending')},"
-        f" {'NULL' if ident is None else lit(ident)})",
+        Bound(
+            (
+                f"INSERT INTO {q(STATE_SCHEMA)}.{q('REQUESTS')} ("  # nosec B608
+                "ID, REQUESTER, DATASET, TABLE_NAME, COLUMNS, ROW_FILTER, DURATION_SECONDS,"
+                " PURPOSE, POLICY_SHA256, RSA_PUBLIC_KEY, PUBLIC_KEY_FINGERPRINT,"
+                " CREATED_AT, EXPIRES_AT, STATUS, REQUESTER_IDENTITY) VALUES ("
+                f"{_placeholders(15)})"
+            ),
+            (
+                rid,
+                req.requester,
+                req.dataset,
+                req.table,
+                json.dumps(list(req.columns)),
+                req.row_filter,
+                int(req.duration.total_seconds()),
+                req.purpose,
+                policy_sha256,
+                public_body,
+                fingerprint,
+                now.isoformat(),
+                (now + ttl).isoformat(),
+                "pending",
+                ident,
+            ),
+        ),
     )
     return rid
 
@@ -451,11 +533,14 @@ def create_pending(
 def get_pending(conn: Any, request_id: str) -> dict[str, Any] | None:
     result = _exec(
         conn,
-        f"SELECT ID, REQUESTER, DATASET, TABLE_NAME, COLUMNS, ROW_FILTER,"  # nosec B608
-        f" DURATION_SECONDS, PURPOSE, POLICY_SHA256, RSA_PUBLIC_KEY,"
-        f" PUBLIC_KEY_FINGERPRINT, CREATED_AT, EXPIRES_AT, STATUS,"
-        f" REQUESTER_IDENTITY FROM {q(STATE_SCHEMA)}.{q('REQUESTS')}"
-        f" WHERE ID = {lit(request_id)}",
+        (
+            f"SELECT ID, REQUESTER, DATASET, TABLE_NAME, COLUMNS, ROW_FILTER,"  # nosec B608
+            f" DURATION_SECONDS, PURPOSE, POLICY_SHA256, RSA_PUBLIC_KEY,"
+            f" PUBLIC_KEY_FINGERPRINT, CREATED_AT, EXPIRES_AT, STATUS,"
+            f" REQUESTER_IDENTITY FROM {q(STATE_SCHEMA)}.{q('REQUESTS')}"
+            " WHERE ID = ?"
+        ),
+        (request_id,),
     )
     row = None
     if result is not None and hasattr(result, "fetchone"):
