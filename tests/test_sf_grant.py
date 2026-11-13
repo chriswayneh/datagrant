@@ -213,6 +213,7 @@ def test_plan_sql_order_and_invariants() -> None:
     assert KEY.derived.hex() not in blob
     assert "HASH_HMAC" in blob
     assert 'CREATE SECURE VIEW "DATAGRANT_VIEWS"."G_abcdef012345"' in blob
+    assert 'FROM "CLINIC_DB"."PUBLIC"."PATIENTS" AS "SRC"' in blob
     role_grants = [s for s in text if "TO ROLE" in s]
     assert all("HASH_HMAC" not in s for s in role_grants)
     assert any(s.startswith('GRANT USAGE ON DATABASE "CLINIC_DB" TO ROLE') for s in text)
@@ -753,7 +754,8 @@ def test_build_plan_emits_quoted_row_filter() -> None:
         catalog=catalog,
     )
     view = next(s for s in plan.statements if "CREATE SECURE VIEW" in stmt_sql(s))
-    assert "WHERE \"REGION\" = 'west'" in view
+    assert 'FROM "CLINIC_DB"."PUBLIC"."PATIENTS" AS "SRC"' in view
+    assert "WHERE \"SRC\".\"REGION\" = 'west'" in view
     rid = create_pending(
         FakeConn(),
         req(row_filter="REGION = 'west'"),
@@ -780,6 +782,30 @@ def test_null_mask_uses_catalog_type() -> None:
     )
     view = next(s for s in plan.statements if "CREATE SECURE VIEW" in stmt_sql(s))
     assert 'CAST(NULL AS VARCHAR) AS "SSN"' in view
+    assert 'FROM "CLINIC_DB"."PUBLIC"."PATIENTS" AS "SRC"' in view
+
+
+def test_null_mask_is_null_filter_uses_base_column() -> None:
+    from datagrant.sf.mask import TableCatalog
+
+    pair = new_keypair()
+    catalog = TableCatalog({"PATIENT_ID": "NUMBER", "SSN": "VARCHAR"})
+    plan = build_plan(
+        dec(masks={"PATIENT_ID": "passthrough", "SSN": "null"}),
+        req(columns=("PATIENT_ID", "SSN"), row_filter="SSN IS NULL"),
+        database="CLINIC_DB",
+        public_body=pair.public_body,
+        fingerprint=pair.fingerprint,
+        catalog=catalog,
+    )
+    view = next(s for s in plan.statements if "CREATE SECURE VIEW" in stmt_sql(s))
+    assert 'FROM "CLINIC_DB"."PUBLIC"."PATIENTS" AS "SRC"' in view
+    assert '"SRC"."PATIENT_ID" AS "PATIENT_ID"' in view
+    assert 'CAST(NULL AS VARCHAR) AS "SSN"' in view
+    assert 'WHERE "SRC"."SSN" IS NULL' in view
+    where = view.split("WHERE", 1)[1]
+    assert '"SRC"."SSN" IS NULL' in where
+    assert 'WHERE "SSN" IS NULL' not in view
 
 
 def test_missing_catalog_column_fails() -> None:

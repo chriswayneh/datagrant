@@ -11,7 +11,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | v0.3.0 | Real identity | ✅ Released |
 | v0.4.0 | Approvals and policy limits | ✅ Released |
 | v0.5.0 | Ops hardening | ✅ Released |
-| v0.6.0 | Warehouses | Design |
+| v0.6.0 | Warehouses | Ready, release pending |
 | v0.7.0+ | More warehouses (BigQuery) | Planned |
 
 ## v0.1.0: done
@@ -53,17 +53,16 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | --- | --- | :---: |
 | Ops hardening | Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). | ✅ |
 
-## v0.6.0: construction
+## v0.6.0: ready, release pending
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PR 1 (merged #48): policy `engine` and Snowflake `--apply` routing. Construction PR 2 (merged #49): Snowflake grant engine. Construction PR 3 (merged #50): Snowflake revoke and sweep (atomic claims, 10-minute issuing/enabling grace, pending TTL with no object drop); key-pair-only DSN. Construction PR 4 (merged #51): Snowflake `--apply` for grant issue and approve (`apply_plan` / `claim_pending` / `mark_request_failed`); concurrent cap across Snowflake datasets. Construction PR 5: Snowflake masks and catalog (five mask names, type inspect, safe row-filter emit; hashes not joinable with Postgres). Design: [docs/design/warehouses.md](docs/design/warehouses.md). | Construction |
+| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PRs #48 to #52: policy `engine` and Snowflake `--apply` routing; grant engine; revoke and sweep (atomic claims, 10-minute issuing/enabling grace); grant/approve `--apply` and concurrent cap across Snowflake datasets; masks and catalog (five mask names, type inspect, `"SRC"`-qualified filters so `IS NULL` on a `null`-masked column uses the base column). Hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Design: [docs/design/warehouses.md](docs/design/warehouses.md). | ✅ |
 
 ## Next
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| Warehouses (Snowflake first) | PHI/PII that is not in Postgres still needs the same grant story. See the v0.6.0 design above. | v0.6.0 |
 | BigQuery | The same model on BigQuery (IAM / authorized views, not a password user). | v0.7.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.

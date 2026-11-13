@@ -38,6 +38,22 @@ export DATAGRANT_RECEIPT_SINK_MODE=required  # or best-effort (default)
 
 To try everything safely first, see [demo.md](demo.md).
 
+## Warehouses (v0.6.0)
+
+Details: [CLI](cli.md), [policy](policy.md), [security limits](security.md#known-limits), [design](design/warehouses.md).
+
+Snowflake is the second engine. Postgres `--apply` is unchanged. BigQuery is later.
+
+**Install.** `pip install 'datagrant[snowflake]'` (`snowflake-connector-python>=4.7.3,<6`). A Snowflake `--apply` without the extra is exit 2 and names `datagrant[snowflake]`.
+
+**DSN.** `$DATAGRANT_SNOWFLAKE_DSN` / `--snowflake-dsn` (prefer the env var). Service user, key-pair only (`private_key_file`, mode 0600, owned by the caller). A password in the DSN is refused. Postgres `--apply` does not read this. Anyone who holds the Snowflake DSN can still create users and views directly; run datagrant on a bastion that holds it.
+
+**Sweep.** Run `datagrant sweep --apply` every 1 minute (`* * * * *`). Snowflake `DAYS_TO_EXPIRY` is a calendar-day backstop, not sub-day enforcement. Missed sweeps leave the grant user ENABLE until the next successful sweep. Sweep skips `issuing`/`enabling` rows younger than 10 minutes.
+
+**Hashes.** Snowflake hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Keep separate `hash_scope` values.
+
+`make demo` stays Postgres. Try Snowflake against a throwaway account after `datagrant policy check`.
+
 ## Ops hardening (v0.5.0)
 
 Details: [CLI](cli.md), [policy](policy.md), [security limits](security.md#known-limits), [design](design/ops-hardening.md).

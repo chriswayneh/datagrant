@@ -61,6 +61,12 @@ def test_render_row_filter_quotes_idents_and_lits() -> None:
     assert sql == '"FLAG" IS NOT NULL OR "FLAG" = TRUE'
 
 
+def test_render_row_filter_qualifies_table_alias() -> None:
+    sql, cols = render_row_filter("SSN IS NULL AND REGION = 'west'", table_alias="SRC")
+    assert sql == '"SRC"."SSN" IS NULL AND "SRC"."REGION" = \'west\''
+    assert cols == frozenset({"SSN", "REGION"})
+
+
 def test_render_row_filter_rejects_injection() -> None:
     with pytest.raises(RowFilterError):
         render_row_filter("REGION = 'west'; DROP TABLE X")

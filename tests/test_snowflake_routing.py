@@ -427,7 +427,8 @@ def test_snowflake_request_row_filter_in_view(
     body = json.loads(out[0])
     assert body["status"] == "granted"
     view = next(s for s, _p in conn.queries if s.startswith("CREATE SECURE VIEW"))
-    assert 'WHERE "PATIENT_ID" = 1' in view
+    assert 'WHERE "SRC"."PATIENT_ID" = 1' in view
+    assert 'FROM "CLINIC_DB"."PUBLIC"."PATIENTS" AS "SRC"' in view
     assert any("INFORMATION_SCHEMA" in s for s, _p in conn.queries)
 
 
@@ -442,7 +443,7 @@ def test_snowflake_approve_row_filter_in_view(
     granted = json.loads(body)
     assert granted["status"] == "granted"
     view = next(s for s, _p in conn.queries if s.startswith("CREATE SECURE VIEW"))
-    assert 'WHERE "PATIENT_ID" = 1' in view
+    assert 'WHERE "SRC"."PATIENT_ID" = 1' in view
 
 
 def _two_person_policy(tmp_path: Path) -> Path:
