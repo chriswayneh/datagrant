@@ -108,7 +108,7 @@ M4 uses a **per-grant `TYPE=SERVICE` user** and **key-pair auth**:
 2. `CREATE USER ... TYPE = SERVICE RSA_PUBLIC_KEY = '<public>'` (public key only in SQL).
 3. The **private key** is shown once to the requester (stdout), or written to a caller-chosen `0600` regular file (same bar as `--oidc-token-file`). It is not stored in state, receipts, logs, or Snowflake.
 4. The `issued` receipt records only a **public-key fingerprint** (`sha256` of the DER public key), never the private key and never the public PEM.
-5. Two-person: generate at `request`, show the private key to the requester then, create the user `DISABLED` with the public key; `approve` ENABLE. The pending row stores the fingerprint and public key, not the private key.
+5. Two-person: generate at `request`, show the private key to the requester then, create the user `DISABLED` with the public key; the Nth `approve` writes the `issued` receipt, then ENABLE. The pending row stores the fingerprint and public key, not the private key.
 
 Decision 3.
 
@@ -122,12 +122,12 @@ Decision 3.
 2. Create the **secure view** in a datagrant-owned schema (mask expressions call the hash UDF; see [Hash key](#hash-key)).
 3. Create the **role**, `GRANT SELECT` on that view only, `GRANT` the role to the user, `GRANT USAGE` on the hash UDF.
 4. Write `datagrant.grants` state in Snowflake (id, requester, dataset, table, expires_at, status, public-key fingerprint).
-5. **ENABLE the user last.**
-6. Write the local `issued` receipt. No receipt, no access: DISABLE, then drop.
+5. Write the local `issued` receipt. If the receipt cannot be written: drop in reverse order while the user is still DISABLED (no login was possible). No receipt, no access.
+6. **ENABLE the user last, only after the receipt is written.**
 
-On **any failure** after step 1: drop what was created, **in reverse order** (DISABLE if already ENABLE, delete grants row, drop role, drop view, drop user). Do not leave an ENABLE user without a receipt.
+On **any failure** after step 1: drop what was created, **in reverse order** (the user is still DISABLED unless step 6 succeeded; if ENABLE already ran, DISABLE first). Do not ENABLE a user without a receipt.
 
-**Sweep garbage.** Any Snowflake user whose comment/tag starts with `datagrant:` and who is `DISABLED` (or has no matching `datagrant.grants` row with `status = 'active' AND expires_at > now()`) is half-made or leftover. Sweep drops that user, its role, and its view. A crash between CREATE USER DISABLED and ENABLE is cleaned up on the next sweep, not left as a login.
+**Sweep garbage.** Any Snowflake user whose comment/tag starts with `datagrant:` and who is `DISABLED` (or has no matching `datagrant.grants` row with `status = 'active' AND expires_at > now()`) is half-made or leftover. Sweep drops that user, its role, and its view. A crash between CREATE USER DISABLED and ENABLE (including a failed receipt) is cleaned up on the next sweep, not left as a login.
 
 **Revoke / sweep of a live grant.** DISABLE the user first (so new logins fail), cancel running queries for that user, drop the view and role, mark state revoked or expired. Access removal must not fail open on a missing receipt (exit 3 after DISABLE, same as Postgres).
 
@@ -168,11 +168,15 @@ If the driver cannot bind `SECRET_STRING`, the equivalent is a **restricted tabl
 - **SECRET / restricted-table residual.** A bind avoids putting the key in the SQL string datagrant sends. Snowflake may still retain statement text or bind values in `ACCOUNT_USAGE` depending on account settings. Operators who can `READ` the SECRET or `SELECT` the master table can recompute hashes. Grant roles must not have those privileges.
 - **Secure views hide the view SQL from the grantee.** They do not hide that every visible row matched the filter. Same limit as Postgres.
 - **Hashes do not match Postgres.** Do not join a Snowflake `hash` column to a Postgres `hash` column.
-- **DDL auto-commit.** A crash can leave a `DISABLED` tagged user. Sweep drops it. An ENABLE user is created only after view, role, and state exist.
-- **Sub-day expiry is sweep.** Missed sweep = extra live window until the next sweep (or until `DAYS_TO_EXPIRY` if that backstop is set). Run sweep every 1 minute.
+- **DDL auto-commit.** A crash can leave a `DISABLED` tagged user. Sweep drops it. ENABLE runs only after view, role, state, and the `issued` receipt exist.
 - **No Snowflake in CI.** A missing `DATAGRANT_TEST_SNOWFLAKE_DSN` skips live tests. Recorded SQL still runs.
 - **`make demo` stays Postgres.** Operators try Snowflake against a throwaway database they already have, after `policy check`.
 - **DSN holders and warehouse admins are trusted.** Same as today.
+
+## Known limits
+
+- **Sub-day expiry is sweep, not `DAYS_TO_EXPIRY`.** Snowflake `DAYS_TO_EXPIRY` is day-granular, so it cannot end a 2h grant at two hours. Run `datagrant sweep --apply` every 1 minute (`* * * * *`). Optional: `DAYS_TO_EXPIRY = 1` and/or a Snowflake task as a calendar-day backstop, not as the primary timer.
+- **Missed-sweep live window.** If a sweep is missed, the grant user stays ENABLE until the next successful sweep. Down for N minutes means about N minutes of extra live access. If sweep stays down past `DAYS_TO_EXPIRY` (1 day for sub-day grants), that backstop disables the user. Worst case with no sweep and no backstop: the grant stays live until someone runs sweep or revoke.
 
 ## Compatibility with v0.5.0
 
@@ -186,7 +190,7 @@ If the driver cannot bind `SECRET_STRING`, the equivalent is a **restricted tabl
 
 - Policy: omit `engine` = postgres; `engine: snowflake` accepted; unknown engine is a parse error; table-level `engine` is an unknown-key error; `policy check` covers a mixed file.
 - Routing: a postgres dataset never opens Snowflake; a snowflake dataset `--apply` without Snowflake config is exit 2; missing extra names `datagrant[snowflake]`.
-- Grant SQL (unit, no network): plan creates a `TYPE=SERVICE` user **DISABLED** first, then view, role, state, **ENABLE last**. `CREATE USER` SQL contains `RSA_PUBLIC_KEY` and no private key, no password, no hash key. View SQL calls `datagrant.hash_hmac` (or equivalent UDF) and does not contain hash-key bytes. Dry run prints the plan and creates nothing. Receipt payload has a fingerprint field and not a private key.
+- Grant SQL (unit, no network): plan creates a `TYPE=SERVICE` user **DISABLED** first, then view, role, state, **receipt, then ENABLE last**. A stub receipt failure must not ENABLE. `CREATE USER` SQL contains `RSA_PUBLIC_KEY` and no private key, no password, no hash key. View SQL calls `datagrant.hash_hmac` (or equivalent UDF) and does not contain hash-key bytes. Dry run prints the plan and creates nothing. Receipt payload has a fingerprint field and not a private key.
 - Fail-safe (unit): a stub failure after CREATE USER still leaves the user DISABLED; reverse-drop is issued; sweep SQL selects `datagrant:`-tagged DISABLED users with no active grants row and drops them.
 - Revoke SQL (unit): DISABLE first, cancel queries, drop view and role. Sweep expires by `expires_at`. Receipt failure after DISABLE is exit 3.
 - Expiry docs/tests: `DAYS_TO_EXPIRY` is not treated as sub-day enforcement; sweep cadence is.
@@ -200,7 +204,7 @@ Same shape as M3: one concern per PR, tests in each, docs last. No BigQuery PR. 
 
 1. **This PR.** Design, ROADMAP, audit pointer. No runtime.
 2. **Policy `engine` and connection routing.** Parse `engine` (`postgres` default, `snowflake` allowed). Snowflake `--apply` requires Snowflake config and the optional extra. No grant SQL yet.
-3. **Snowflake grant engine.** Secure view, role, per-grant `TYPE=SERVICE` user (DISABLED then ENABLE), key pair shown once, hash UDF + SECRET (or restricted table), state row, `issued` receipt with public-key fingerprint. Dry run. Tests on the SQL plan and reverse-drop.
+3. **Snowflake grant engine.** Secure view, role, per-grant `TYPE=SERVICE` user (DISABLED, receipt, then ENABLE), key pair shown once, hash UDF + SECRET (or restricted table), state row, `issued` receipt with public-key fingerprint. Dry run. Tests on the SQL plan and reverse-drop.
 4. **Snowflake revoke and sweep.** DISABLE, cancel queries, drop, fail-safe receipts, garbage-collect tagged DISABLED users. `grant list` / `status` for Snowflake rows.
 5. **Snowflake masks and catalog.** Five mask names, type inspect, row filters re-emitted safely. Hash-scope documented as not joinable with Postgres. Assert view DDL has no key bytes.
 6. **Docs, runbook, CHANGELOG Unreleased, v0.6.0 prep (no tag).** Sweep every 1 minute. `docs/cli.md`, `docs/policy.md`, `docs/security.md`, this design marked implemented.
