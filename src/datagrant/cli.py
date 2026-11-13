@@ -569,8 +569,10 @@ def cmd_policy_check(ctx: Ctx) -> int:
 def _redacted_sql(plan: Any) -> list[str]:
     out = []
     for s in plan.statements:
-        text = s.as_string(None)
-        out.append(re.sub(r"PASSWORD '[^']*'", "PASSWORD '<redacted>'", text))
+        text = s if isinstance(s, str) else s.as_string(None)
+        text = re.sub(r"PASSWORD '[^']*'", "PASSWORD '<redacted>'", text)
+        text = re.sub(r"RSA_PUBLIC_KEY = '[^']*'", "RSA_PUBLIC_KEY = '<redacted>'", text)
+        out.append(text)
     return out
 
 
@@ -824,26 +826,155 @@ def _request_pending_ttl(policy: Any, pending_ttl_flag: str | None) -> timedelta
     return ttl
 
 
-def _snowflake_request(ctx: Ctx, decision: Any) -> int:
-    """Route a Snowflake dataset request. No grant SQL in this construction PR."""
+def _sf_connect(args: argparse.Namespace) -> Any:
+    from datagrant.snowflake_support import (
+        SnowflakeSetupError,
+        connect,
+        require_driver,
+        resolve_dsn,
+    )
+
+    try:
+        require_driver()
+        dsn = resolve_dsn(getattr(args, "snowflake_dsn", None))
+    except SnowflakeSetupError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
+    try:
+        return connect(dsn)
+    except SnowflakeSetupError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
+    except Exception:  # noqa: BLE001 - never echo Snowflake DSN or driver text
+        raise CliError("cannot connect to Snowflake", EXIT_FAILED) from None
+
+
+@contextmanager
+def _sf_session(args: argparse.Namespace) -> Iterator[Any]:
+    conn = _sf_connect(args)
+    try:
+        yield conn
+    finally:
+        close = getattr(conn, "close", None)
+        if callable(close):
+            close()
+
+
+def _deliver_sf_issued(ctx: Ctx, conn: Any, plan: Any, local: Any) -> None:
+    """Flush the outbox. Required sink failure DISABLE/drops the Snowflake grant."""
+    from datagrant.outbox import flush, quick
+    from datagrant.sf.grant import reverse_drop
+
+    remote = _remote(ctx.args)
+    if remote is None:
+        return
+    res = flush(local.log, remote.sink)
+    if res.error is None:
+        return
+    if remote.mode != "required":
+        _warn(ctx, f"receipt not delivered to sink, {res.pending} pending: {res.error}")
+        return
+    reverse_drop(conn, plan, enabled=True)
+    flush(local.log, quick(remote.sink))
+    raise CliError(
+        _hide_token(
+            f"grant {plan.grant_id}: receipt not delivered to sink ({res.error}); "
+            "Snowflake user dropped"
+        ),
+        EXIT_RECEIPT,
+    )
+
+
+def _print_sf_grant(
+    ctx: Ctx,
+    plan: Any,
+    private_key: str | None,
+    user: str,
+    source: str,
+    *,
+    approvals_recorded: int | None = None,
+    approvals_required: int | None = None,
+) -> int:
+    data: dict[str, Any] = {
+        "status": "granted",
+        "engine": "snowflake",
+        "grant_id": plan.grant_id,
+        "view": plan.view,
+        "user": plan.user,
+        "expires_at": plan.expires_at,
+        "requester": user,
+        "identity_source": source,
+        "public_key_fingerprint": plan.fingerprint,
+    }
+    if approvals_recorded is not None and approvals_required is not None:
+        data["approvals_recorded"] = approvals_recorded
+        data["approvals_required"] = approvals_required
+        data["approvals"] = f"{approvals_recorded}/{approvals_required}"
+    text = (
+        f"grant {plan.grant_id} active until {plan.expires_at.isoformat()}\n"
+        f"snowflake user={plan.user} view={plan.view}\n"
+        f"public_key_fingerprint={plan.fingerprint}"
+    )
+    if private_key is not None:
+        data["private_key"] = private_key
+        text += f"\none-time private key (shown once, not stored): {private_key}"
+    ctx.emit(data, text)
+    return EXIT_OK
+
+
+def _snowflake_request(
+    ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any, ttl: timedelta
+) -> int:
+    """Snowflake auto grant or two-person pending (public key only until approve)."""
+    from datagrant.sf.grant import (
+        GrantError,
+        apply_plan,
+        build_plan,
+        create_pending,
+        new_keypair,
+    )
     from datagrant.snowflake_support import (
         EXTRA_HINT,
-        NOT_IMPLEMENTED,
         SnowflakeSetupError,
         require_driver,
         resolve_dsn,
     )
 
     a = ctx.args
+    ds = policy.datasets[req.dataset]
+    two_person = decision.approval == "two-person"
+    user, source = caller.username, caller.source
+    hash_key = (
+        load_hash_key(resolve_key_path("hash", a.hash_key))
+        if _needs_hash(decision, req.columns)
+        else None
+    )
     if not a.apply:
+        plan = build_plan(
+            decision,
+            req,
+            database=ds.database,
+            schema=ds.schema,
+            public_body=REDACTED,
+            fingerprint=REDACTED,
+            hash_key=hash_key,
+            approvers=("<approver>",) if two_person else (),
+            requester_identity=caller.receipt_dict(),
+        )
+        sqls = _redacted_sql(plan)
+        what = (
+            "store a pending request for another person to approve; on approval run"
+            if two_person
+            else "run"
+        )
         ctx.emit(
             {
                 "dry_run": True,
                 "engine": "snowflake",
                 "approval": decision.approval,
+                "sql": sqls,
             },
             "dry run: allowed by policy; engine=snowflake; with --apply datagrant would "
-            f"require {EXTRA_HINT} and ${SNOWFLAKE_DSN_ENV}; grant SQL is not implemented yet",
+            f"require {EXTRA_HINT} and ${SNOWFLAKE_DSN_ENV} and {what}:\n"
+            + "\n".join(x + ";" for x in sqls),
         )
         return EXIT_OK
     try:
@@ -851,7 +982,176 @@ def _snowflake_request(ctx: Ctx, decision: Any) -> int:
         resolve_dsn(getattr(a, "snowflake_dsn", None))
     except SnowflakeSetupError as exc:
         raise CliError(str(exc), EXIT_USAGE) from None
-    raise CliError(NOT_IMPLEMENTED, EXIT_USAGE)
+    sink = _sink(a)
+    _check_outbox(ctx, sink)
+    try:
+        with _sf_session(a) as conn:
+            pair = new_keypair()
+            if two_person:
+                rid = create_pending(
+                    conn,
+                    req,
+                    policy_sha256=policy.sha256,
+                    public_body=pair.public_body,
+                    fingerprint=pair.fingerprint,
+                    ttl=ttl,
+                    requester_identity=caller.request_state_dict(),
+                )
+                n_req = policy.approvals_required
+                ctx.emit(
+                    {
+                        "status": "pending",
+                        "engine": "snowflake",
+                        "request_id": rid,
+                        "requester": user,
+                        "identity_source": source,
+                        "public_key_fingerprint": pair.fingerprint,
+                        "private_key": pair.private_pem,
+                        "approvals_recorded": 0,
+                        "approvals_required": n_req,
+                        "approvals": f"0/{n_req}",
+                    },
+                    f"request {rid} is pending approval by another person"
+                    f" (approvals 0/{n_req}).\n"
+                    f"one-time private key (shown once, works after approval):\n{pair.private_pem}",
+                )
+                return EXIT_OK
+            plan = build_plan(
+                decision,
+                req,
+                database=ds.database,
+                schema=ds.schema,
+                public_body=pair.public_body,
+                fingerprint=pair.fingerprint,
+                private_pem=pair.private_pem,
+                hash_key=hash_key,
+                requester_identity=caller.receipt_dict(),
+                approver_identities=(),
+            )
+            apply_plan(conn, plan, sink)
+            _deliver_sf_issued(ctx, conn, plan, sink)
+    except GrantError as exc:
+        raise CliError(str(exc), EXIT_FAILED) from None
+    return _print_sf_grant(ctx, plan, pair.private_pem, user, source)
+
+
+def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
+    """Final two-person approve: create Snowflake objects from stored public key."""
+    from types import SimpleNamespace
+
+    from datagrant.policy import Request, evaluate
+    from datagrant.sf.grant import GrantError, apply_plan, build_plan, get_pending
+
+    a = ctx.args
+    approver, source = caller.username, caller.source
+    try:
+        with _sf_session(a) as conn:
+            row = get_pending(conn, a.request_id)
+            if row is None:
+                raise CliError(f"unknown request {a.request_id}", EXIT_FAILED)
+            raw_cols = row["columns"]
+            cols = tuple(json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols)
+            req = Request(
+                str(row["requester"]),
+                str(row["dataset"]),
+                str(row["table_name"]),
+                cols,
+                timedelta(seconds=int(row["duration_seconds"])),
+                str(row["purpose"]),
+                row.get("row_filter"),
+            )
+            created = row["created_at"]
+            expires = row["expires_at"]
+            if isinstance(created, str):
+                created = datetime.fromisoformat(created)
+            if isinstance(expires, str):
+                expires = datetime.fromisoformat(expires)
+            ident_raw = row.get("requester_identity")
+            if isinstance(ident_raw, str) and ident_raw:
+                ident_raw = json.loads(ident_raw)
+            pending = SimpleNamespace(
+                id=row["id"],
+                request=req,
+                policy_sha256=row["policy_sha256"],
+                created_at=created,
+                expires_at=expires,
+                requester_identity=ident_raw if isinstance(ident_raw, dict) else None,
+                status=row["status"],
+            )
+            if pending.status != "pending":
+                return _refuse_approve(
+                    ctx,
+                    pending,
+                    policy,
+                    [f"request {pending.id} is {pending.status}, not pending"],
+                    caller,
+                )
+            ds = policy.datasets.get(req.dataset)
+            if ds is None or ds.engine != "snowflake":
+                msg = f"request {pending.id} is not a Snowflake pending request"
+                _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                raise CliError(msg, EXIT_FAILED)
+            reasons = policy.can_approve(
+                approver, req.requester, extra_groups=caller.mapped_groups
+            )
+            decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
+            if not decision.allowed:
+                reasons += [f"request no longer allowed: {r}" for r in decision.reasons]
+            if reasons:
+                return _refuse_approve(ctx, pending, policy, reasons, caller)
+            if policy.approvals_required > 1:
+                raise CliError(
+                    "Snowflake grants with approvals_required > 1 are not implemented yet",
+                    EXIT_USAGE,
+                )
+            hash_key = (
+                load_hash_key(resolve_key_path("hash", a.hash_key))
+                if _needs_hash(decision, cols)
+                else None
+            )
+            plan = build_plan(
+                decision,
+                req,
+                database=ds.database,
+                schema=ds.schema,
+                public_body=str(row["rsa_public_key"]),
+                fingerprint=str(row["public_key_fingerprint"]),
+                hash_key=hash_key,
+                approvers=(approver,),
+                requester_identity=caller.receipt_dict()
+                if not isinstance(ident_raw, dict)
+                else ident_raw,
+                approver_identities=(caller.approver_receipt_dict(),),
+            )
+            if not a.apply:
+                sqls = _redacted_sql(plan)
+                ctx.emit(
+                    {
+                        "dry_run": True,
+                        "engine": "snowflake",
+                        "request_id": pending.id,
+                        "approver": approver,
+                        "sql": sqls,
+                    },
+                    f"dry run: {approver} may approve request {pending.id}; with --apply:\n"
+                    + "\n".join(x + ";" for x in sqls),
+                )
+                return EXIT_OK
+            sink = _sink(a)
+            _check_outbox(ctx, sink)
+            apply_plan(conn, plan, sink)
+            _deliver_sf_issued(ctx, conn, plan, sink)
+    except GrantError as exc:
+        raise CliError(str(exc), EXIT_FAILED) from None
+    return _print_sf_grant(
+        ctx,
+        plan,
+        None,
+        req.requester,
+        source,
+        approvals_recorded=1,
+        approvals_required=1,
+    )
 
 
 def cmd_request(ctx: Ctx) -> int:
@@ -887,7 +1187,7 @@ def cmd_request(ctx: Ctx) -> int:
     if not decision.allowed:
         return _refuse_request(ctx, req, policy, decision.reasons, caller)
     if policy.datasets[req.dataset].engine == "snowflake":
-        return _snowflake_request(ctx, decision)
+        return _snowflake_request(ctx, req, decision, policy, caller, ttl)
     two_person = decision.approval == "two-person"
     hash_key = (
         load_hash_key(resolve_key_path("hash", a.hash_key)) if _needs_hash(decision, cols) else None
@@ -1021,6 +1321,8 @@ def cmd_approve(ctx: Ctx) -> int:
         record_approval,
     )
     from datagrant.policy import evaluate
+    from datagrant.snowflake_support import SnowflakeSetupError
+    from datagrant.snowflake_support import resolve_dsn as resolve_sf_dsn
 
     a = ctx.args
     policy = _policy(a, ctx, apply=bool(a.apply))
@@ -1033,6 +1335,14 @@ def cmd_approve(ctx: Ctx) -> int:
     )
     caller = _resolve_caller(ctx, policy)
     approver, source = caller.username, caller.source
+    have_pg = bool(getattr(a, "dsn", None) or (os.environ.get(DSN_ENV) or "").strip())
+    have_sf = True
+    try:
+        resolve_sf_dsn(getattr(a, "snowflake_dsn", None))
+    except SnowflakeSetupError:
+        have_sf = False
+    if have_sf and not have_pg:
+        return _snowflake_approve(ctx, policy, caller)
     with _pg_session(a, lock=bool(a.apply)) as conn:
         _public_preflight_gate(ctx, conn, policy, apply=bool(a.apply))
         if a.apply:
@@ -1926,6 +2236,10 @@ def build_parser() -> argparse.ArgumentParser:
         "approve", parents=[*only(*_GRANTING), ident, pol, apply], help="approve a pending request"
     )
     ap.add_argument("request_id")
+    ap.add_argument(
+        "--snowflake-dsn",
+        help=f"Snowflake admin settings (default ${SNOWFLAKE_DSN_ENV}); ignored for postgres",
+    )
     ap.set_defaults(fn=cmd_approve)
 
     g = sub.add_parser("grant", help="inspect grants").add_subparsers(
@@ -2010,6 +2324,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
     from datagrant.policy import PolicyError
     from datagrant.receipt import ReceiptError
     from datagrant.rowfilter import RowFilterError
+    from datagrant.sf.grant import GrantError as SnowflakeGrantError
 
     parser = build_parser()
     try:
@@ -2050,6 +2365,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         IdentityError,
         KeyFileError,
         GrantError,
+        SnowflakeGrantError,
         MaskError,
         ReceiptError,
         RowFilterError,

@@ -1,6 +1,6 @@
 # Design: warehouses (v0.6.0 / M4)
 
-Status: approved. Construction started (policy `engine` and connection routing). M4 design and execution plan (warehouses, target v0.6.0) from the v1.0 plan Chris authorized. M2 parked other warehouses at v0.5.0+ so they would not land in v0.4.0. M3 moved them to **v0.6.0+** so ops hardening could finish first. M3 is released. Chris approved the recommended picks and merged the design as PR #47 at `0449a0b`. Roadmap: [ROADMAP.md](../../ROADMAP.md).
+Status: approved. Construction started (policy `engine`, routing, Snowflake grant engine). M4 design and execution plan (warehouses, target v0.6.0) from the v1.0 plan Chris authorized. M2 parked other warehouses at v0.5.0+ so they would not land in v0.4.0. M3 moved them to **v0.6.0+** so ops hardening could finish first. M3 is released. Chris approved the recommended picks and merged the design as PR #47 at `0449a0b`. Roadmap: [ROADMAP.md](../../ROADMAP.md).
 
 Grounded in the v0.5.0 code on `main` (`src/datagrant/cli.py`, `policy.py`, `pg/grant.py`, `pg/revoke.py`, `pg/mask.py`, `receipt.py`, `docs/security.md`, `docs/policy.md`).
 
@@ -213,8 +213,8 @@ Invariant: **key never in view text, never in `CREATE USER` text.**
 Same shape as M3: one concern per PR, tests in each, docs last. No BigQuery PR. No rate-limit PR. No `max_rows` PR. No break-glass PR.
 
 1. **Done (PR #47).** Design, ROADMAP, audit pointer. No runtime.
-2. **This PR.** Policy `engine` and connection routing. Parse `engine` (`postgres` default, `snowflake` allowed). Snowflake `--apply` requires Snowflake config and the optional extra. No grant SQL yet.
-3. **Snowflake grant engine.** Insert `issuing` into `datagrant.grants` before CREATE USER, secure view, role, per-grant `TYPE=SERVICE` user (DISABLED, receipt, ENABLE, then `active` on that same row), key pair shown once, restricted hash table plus SQL secure UDF (`USAGE` only), `issued` receipt with public-key fingerprint. Two-person request stores public key plus fingerprint only; objects are created at final approve. Dry run. Tests on the SQL plan and reverse-drop.
+2. **Done (PR #48).** Policy `engine` and connection routing. Parse `engine` (`postgres` default, `snowflake` allowed). Snowflake `--apply` requires Snowflake config and the optional extra.
+3. **This PR.** Snowflake grant engine. Insert `issuing` into `datagrant.grants` before CREATE USER, secure view, role, per-grant `TYPE=SERVICE` user (DISABLED, receipt, ENABLE, then `active` on that same row), key pair shown once, restricted hash table plus SQL secure UDF (`USAGE` only), `issued` receipt with public-key fingerprint. Two-person request stores public key plus fingerprint only; objects are created at final approve. Dry run. Tests on the SQL plan and reverse-drop. No revoke/sweep.
 4. **Snowflake revoke and sweep.** DISABLE, cancel queries, drop, fail-safe receipts, skip `datagrant.grants` `issuing` rows under the 10-minute grace, garbage-collect tagged DISABLED users and expired `issuing` rows. Pending TTL expiry does not drop Snowflake objects. `grant list` / `status` for Snowflake rows.
 5. **Snowflake masks and catalog.** Five mask names, type inspect, row filters re-emitted safely. Hash-scope documented as not joinable with Postgres. Assert view DDL has no key bytes.
 6. **Docs, runbook, CHANGELOG Unreleased, v0.6.0 prep (no tag).** Sweep every 1 minute. `docs/cli.md`, `docs/policy.md`, `docs/security.md`, this design marked implemented.
