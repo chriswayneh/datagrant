@@ -57,7 +57,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant user, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design: [docs/design/warehouses.md](docs/design/warehouses.md). Construction waits on maintainer approval in [audit.md](aidlc-docs/audit.md). | Design |
+| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design: [docs/design/warehouses.md](docs/design/warehouses.md). Construction waits on maintainer approval in [audit.md](aidlc-docs/audit.md). | Design |
 
 ## Next
 

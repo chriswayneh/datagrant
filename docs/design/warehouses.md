@@ -8,15 +8,15 @@ Grounded in the v0.5.0 code on `main` (`src/datagrant/cli.py`, `policy.py`, `pg/
 
 v0.5.0 can issue, approve, receipt, revoke and doctor **Postgres** grants. The same request, mask, expire and receipt model is still Postgres-only. Teams that store PHI/PII in Snowflake or BigQuery cannot use datagrant there.
 
-M4 adds **one other warehouse** so a developer can ask for columns and rows, get a short masked login, and leave a signed receipt, without turning datagrant into a hosted service or a second product.
+M4 adds **one other warehouse** so a developer can ask for columns and rows, get short masked access, and leave a signed receipt, without turning datagrant into a hosted service or a second product.
 
-Out of scope for M4: a second warehouse in the same milestone (see [Which warehouse](#which-warehouse)), rate limits, `max_rows`, break-glass, a hosted service, ticketing, SSO beyond the existing OIDC CLI boundary, PyPI publish, native Snowflake masking policies as a second grant model, BigQuery IAM service-account-per-grant (if Snowflake is first), and anything only a warehouse admin can bypass without a real enforcement point. Emergency access stays a reviewed policy edit to `approval: auto`.
+Out of scope for M4: a second warehouse in the same milestone (see [Which warehouse](#which-warehouse)), rate limits, `max_rows`, break-glass, a hosted service, ticketing, SSO beyond the existing OIDC CLI boundary, PyPI publish, native Snowflake masking policies as a second grant model, BigQuery IAM service-account-per-grant (if Snowflake is first), Snowflake PERSON users with passwords (MFA rollout; see [Login](#login)), and anything only a warehouse admin can bypass without a real enforcement point. Emergency access stays a reviewed policy edit to `approval: auto`.
 
 ## Which warehouse
 
 Chris asked for Snowflake **and** BigQuery on the roadmap. Each one is a new SQL dialect, catalog, login model, revoke path, and test story.
 
-**Verdict: Snowflake in M4 (v0.6.0). BigQuery later (v0.7.0+).** Snowflake has users, roles, passwords, views, and an expiry-style disable that maps to today's Postgres grant. BigQuery is IAM and authorized views; it does not print a one-time password. Doing both at once would swallow the milestone the same way putting warehouses in M3 would have swallowed ops hardening. Decision 1.
+**Verdict: Snowflake in M4 (v0.6.0). BigQuery later (v0.7.0+).** Snowflake has service users, roles, key-pair auth, and views that map to today's Postgres grant. BigQuery is IAM and authorized views; it does not issue a per-grant login. Doing both at once would swallow the milestone the same way putting warehouses in M3 would have swallowed ops hardening. Decision 1.
 
 ## What is already true (do not rebuild)
 
@@ -24,12 +24,12 @@ Chris asked for Snowflake **and** BigQuery on the roadmap. Each one is a new SQL
 | --- | --- | --- |
 | Deny-by-default YAML policy; unknown keys are errors; `policy.version` is `1` | `policy.py` | New keys optional. Omitting them is v0.5.0 Postgres. |
 | CLI dry run unless `--apply`; exit codes 0-4 | `cli.py` | Same commands. Snowflake `--apply` uses a Snowflake connection. |
-| Local or OIDC identity on `request` / `approve` | `cli.py`, `oidc.py` | CLI identity stays a CLI boundary. The warehouse admin login is a service account, like `DATAGRANT_DSN`. |
-| Receipts version 1, local JSONL, optional sink | `receipt.py` | No new events required. Engine name may be additive on `issued` facts. |
-| Hash key and signing key files (0600, no symlinks) | `keys.py` | Same files. Snowflake HMAC uses the same hash key. |
+| Local or OIDC identity on `request` / `approve` | `cli.py`, `oidc.py` | CLI identity stays a CLI boundary. The warehouse admin login is a service user with key-pair auth, like `DATAGRANT_DSN`. |
+| Receipts version 1, local JSONL, optional sink | `receipt.py` | No new events required. Engine name and public-key fingerprint may be additive on `issued` facts. Never the private key. |
+| Hash key and signing key files (0600, no symlinks) | `keys.py` | Same local files. The hash key is **not** copied into Snowflake view SQL (see [Hash key](#hash-key)). |
 | Postgres grant: masked `security_barrier` view, LOGIN role, SCRAM, `VALID UNTIL` | `pg/grant.py` | Unchanged. M4 does not rewrite Postgres. |
 | Postgres revoke: lock out, terminate sessions, drop | `pg/revoke.py` | Unchanged. |
-| Postgres ops: advisory lock, doctor, `strict_preflight`, `SET LOCAL log_statement` | M3 | Postgres-only. Do not fake them on Snowflake. |
+| Postgres ops: advisory lock, doctor, `strict_preflight`, `SET LOCAL log_statement` | M3 | Postgres-only. Snowflake has no `log_statement` switch. Do not fake them. |
 | `make demo` is local Postgres two-person | `scripts/demo.py` | Stay that way. |
 | No break-glass, no rate limits, no `max_rows` | Chris | Still out. |
 
@@ -37,17 +37,20 @@ Chris asked for Snowflake **and** BigQuery on the roadmap. Each one is a new SQL
 
 | Candidate | Verdict | Why |
 | --- | --- | --- |
-| Snowflake grant path (secure view, per-grant user, one-time password, revoke) | **Keep** (recommended) | Closest match to today's Postgres grant. Decision 1. |
-| BigQuery in M4 | **Cut** (v0.7.0+) | Different identity (IAM, no password user). Decision 1. |
+| Snowflake grant path (secure view, per-grant `TYPE=SERVICE` user, key pair shown once, revoke) | **Keep** (recommended) | Closest match to today's Postgres grant after Snowflake's MFA rollout. Decision 1, 3. |
+| BigQuery in M4 | **Cut** (v0.7.0+) | Different identity (IAM, no per-grant login). Decision 1. |
 | Core CLI path: `request`, `approve`, `revoke`, `sweep`, `grant list/status`, receipts, `policy check` | **Keep** | That is the product. Decision 2. |
-| Port doctor, advisory lock, PUBLIC preflight, `SET log_statement` to Snowflake | **Cut** | Those close Postgres host gaps. Snowflake has different admin mistakes. |
-| Per-grant Snowflake user with a one-time password | **Keep** (recommended) | Same story as Postgres: password shown once, not stored. Decision 3. |
+| Port doctor, advisory lock, PUBLIC preflight, `SET log_statement` to Snowflake | **Cut** | Those close Postgres host gaps. Snowflake has different admin mistakes, and no session `log_statement` switch. |
+| Per-grant `TYPE=SERVICE` user with a key pair generated locally | **Keep** (recommended) | PERSON password sign-in requires MFA; SERVICE users cannot use passwords. Decision 3. |
+| Per-grant PERSON user with a one-time password | **Cut** | Broken by the Aug-Oct 2026 MFA rollout. |
 | Reuse one Snowflake user and swap views | **Cut** | Shared login is standing access. |
 | Grantee logs in with company Snowflake SSO | **Cut** for M4 | Mixes datagrant with the company's IdP in one step. OIDC stays on the CLI. Decision 3. |
 | Optional `engine` on each dataset (`postgres` default) | **Keep** (recommended) | One policy can list Postgres and Snowflake datasets later. Omit = Postgres. Decision 4. |
 | One engine per policy file | **Cut** (recommended) | Breaks mixed estates and is unnecessary if omit means Postgres. |
 | Masked **views** (same five mask names) | **Keep** (recommended) | One receipt and one revoke path. Decision 7. |
 | Native Snowflake masking policies as the grant | **Cut** | Second model, different revoke, different evidence. |
+| Hash key inlined in view SQL (`SHA2_HMAC(..., '<key>', ...)`) | **Cut** | Lands in view DDL and `QUERY_HISTORY`. No `log_statement` switch. See [Hash key](#hash-key). |
+| Hash key in a Snowflake SECRET (or restricted table) plus owner-rights secure UDF | **Keep** (recommended) | View text calls the UDF; grant roles cannot read the secret. |
 | Optional extra `datagrant[snowflake]` | **Keep** | Postgres-only installs do not pull a Snowflake driver. |
 | Live Snowflake in GitHub Actions | **Cut** | Needs an account and secrets. Decision 5. |
 | Recorded-SQL unit tests; live tests behind `DATAGRANT_TEST_SNOWFLAKE_DSN` | **Keep** (recommended) | CI stays green without Snowflake. Decision 5. |
@@ -90,24 +93,45 @@ Validation (`datagrant policy check` enforces this offline):
 - `engine`: `postgres` (default, including omitted) or `snowflake`. Unknown strings are errors. A table-level `engine` is an unknown-key error.
 - Snowflake datasets still use `database` (Snowflake database name). Optional dataset `schema` is a default schema for table names that omit one. Table `name` stays `schema.table`.
 - Omitting `engine` on every dataset is v0.5.0.
-- `DATAGRANT_DSN` stays the Postgres admin URL. Snowflake uses `DATAGRANT_SNOWFLAKE_DSN` (or equivalent documented account/user/role/warehouse settings). A Snowflake `--apply` without that config is exit 2. Postgres `--apply` does not read the Snowflake settings.
-- `hash`, `redact`, `partial`, `null`, `passthrough` keep the same names. Snowflake `hash` is HMAC-SHA256 with the local hash key and `hash_scope`. Hashes are **not** joinable with Postgres hashes of the same value (different SQL, different encoding). Use separate `hash_scope` values.
+- `DATAGRANT_DSN` stays the Postgres admin URL. Snowflake uses `DATAGRANT_SNOWFLAKE_DSN` (or equivalent documented account/user/role/warehouse settings). The operator login must be a **service user with key-pair auth** (PERSON password sign-in needs MFA; do not drive the CLI with a PERSON password). A Snowflake `--apply` without that config is exit 2. Postgres `--apply` does not read the Snowflake settings.
+- `hash`, `redact`, `partial`, `null`, `passthrough` keep the same names. Snowflake `hash` is HMAC-SHA256 via the hash UDF (see [Hash key](#hash-key)). Hashes are **not** joinable with Postgres hashes of the same value. Use separate `hash_scope` values.
 
 No other policy keys in M4. Rate limits and `max_rows` are not added.
 
+## Login
+
+Snowflake's 2026 MFA rollout (documented Aug-Oct 2026): **PERSON** users must use MFA to sign in with a password. **SERVICE** users cannot use passwords. A Postgres-style one-time password therefore does not work for a per-grant login.
+
+M4 uses a **per-grant `TYPE=SERVICE` user** and **key-pair auth**:
+
+1. datagrant generates an RSA key pair locally (never sent as a private key to Snowflake).
+2. `CREATE USER ... TYPE = SERVICE RSA_PUBLIC_KEY = '<public>'` (public key only in SQL).
+3. The **private key** is shown once to the requester (stdout), or written to a caller-chosen `0600` regular file (same bar as `--oidc-token-file`). It is not stored in state, receipts, logs, or Snowflake.
+4. The `issued` receipt records only a **public-key fingerprint** (`sha256` of the DER public key), never the private key and never the public PEM.
+5. Two-person: generate at `request`, show the private key to the requester then, create the user `DISABLED` with the public key; `approve` ENABLE. The pending row stores the fingerprint and public key, not the private key.
+
+Decision 3.
+
 ## CLI and grant model (Snowflake)
 
-**Connect.** `request` / `approve` / `revoke` / `sweep` / `grant list` for a Snowflake dataset open a Snowflake session as the operator's admin (key pair or password, never logged). Dry runs do not connect unless they already do for Postgres catalog checks; Snowflake dry run prints the SQL plan the same way.
+**Connect.** `request` / `approve` / `revoke` / `sweep` / `grant list` for a Snowflake dataset open a Snowflake session as the operator's **service user** (key pair, never logged). Dry runs do not connect unless they already do for Postgres catalog checks; Snowflake dry run prints the SQL plan the same way.
 
-**Issue (`--apply`).** In one warehouse transaction (fail closed):
+**Snowflake DDL auto-commits.** There is no single warehouse transaction that can roll back `CREATE USER` / `CREATE VIEW`. Fail-safe order (each step its own statement):
 
-1. Create a **secure view** in a datagrant-owned schema with the requested columns, mask expressions, and the allow-listed row filter.
-2. Create a **role** that can `SELECT` only that view.
-3. Create a **user** with a one-time password, default role that grant role, and a time bound (disable-at / days-to-expiry as Snowflake allows). Print the password once. Do not store it. Do not send the plaintext in SQL if the driver can bind it.
-4. Write `datagrant.grants` state in Snowflake (same facts as Postgres: id, requester, dataset, table, expires_at, status).
-5. Write the local `issued` receipt. No receipt, no access: disable and drop on a failed write.
+1. Create the `TYPE=SERVICE` user **DISABLED**, `RSA_PUBLIC_KEY` set, comment/tag `datagrant:<grant_id>` (cannot log in).
+2. Create the **secure view** in a datagrant-owned schema (mask expressions call the hash UDF; see [Hash key](#hash-key)).
+3. Create the **role**, `GRANT SELECT` on that view only, `GRANT` the role to the user, `GRANT USAGE` on the hash UDF.
+4. Write `datagrant.grants` state in Snowflake (id, requester, dataset, table, expires_at, status, public-key fingerprint).
+5. **ENABLE the user last.**
+6. Write the local `issued` receipt. No receipt, no access: DISABLE, then drop.
 
-**Revoke / sweep.** Disable the user first (so new logins fail), cancel running queries for that user, drop the view and role, mark state revoked or expired. Access removal must not fail open on a missing receipt (exit 3 after disable, same as Postgres).
+On **any failure** after step 1: drop what was created, **in reverse order** (DISABLE if already ENABLE, delete grants row, drop role, drop view, drop user). Do not leave an ENABLE user without a receipt.
+
+**Sweep garbage.** Any Snowflake user whose comment/tag starts with `datagrant:` and who is `DISABLED` (or has no matching `datagrant.grants` row with `status = 'active' AND expires_at > now()`) is half-made or leftover. Sweep drops that user, its role, and its view. A crash between CREATE USER DISABLED and ENABLE is cleaned up on the next sweep, not left as a login.
+
+**Revoke / sweep of a live grant.** DISABLE the user first (so new logins fail), cancel running queries for that user, drop the view and role, mark state revoked or expired. Access removal must not fail open on a missing receipt (exit 3 after DISABLE, same as Postgres).
+
+**Expiry under a day.** Snowflake `DAYS_TO_EXPIRY` is **day-granular**; it cannot end a 2h grant at two hours. Sub-day expiry is enforced by **sweep cadence**. Optionally also set `DAYS_TO_EXPIRY` to 1 (a calendar-day backstop) and/or a Snowflake task that runs the same disable/drop. **Recommend: run `datagrant sweep --apply` every 1 minute** via cron or systemd, same as Postgres (`* * * * *`). Worst case if a sweep is missed: the grant user stays ENABLE until the next successful sweep. If sweep is down for N minutes, that is N minutes of extra live access. If sweep is down past `DAYS_TO_EXPIRY` (1 day for sub-day grants), Snowflake disables the user as a backstop. Do not advertise `DAYS_TO_EXPIRY` as a substitute for sweep.
 
 **Catalog.** Column types come from the Snowflake information schema at grant time, the same idea as `inspect_table` today.
 
@@ -119,19 +143,33 @@ No other policy keys in M4. Rate limits and `max_rows` are not added.
 | `redact` | The constant `[REDACTED]`. |
 | `null` | NULL, cast to the column type. |
 | `partial` | Asterisks plus the last 4 characters; values shorter than 8 characters fully masked. |
-| `hash` | Hex HMAC-SHA256 under the local hash key and `hash_scope`. |
+| `hash` | Hex HMAC-SHA256 from the hash UDF (key not in the view text). |
 
-**Not in M4.** `datagrant doctor` Snowflake checks, Snowflake locks, Snowflake `log_statement`, network policies, Snowflake masking policies, sharing a warehouse user, BigQuery.
+**Not in M4.** `datagrant doctor` Snowflake checks, Snowflake locks, Snowflake `log_statement`, network policies, Snowflake masking policies, sharing a warehouse user, PERSON password grants, BigQuery.
 
 Exit codes stay 0-4. A missing Snowflake driver (`pip install datagrant[snowflake]`) is exit 2 on a Snowflake `--apply`, with a message that names the extra.
+
+## Hash key
+
+The local hash key file stays as today. It must **not** appear in view SQL. Snowflake has no session `log_statement = none` switch; view DDL and `QUERY_HISTORY` keep statement text.
+
+**Design:** a Snowflake **SECRET** (`GENERIC_STRING`) owned by the datagrant admin role, bound to an **owner-rights secure UDF** (`datagrant.hash_hmac(hash_scope, value)`). Views call the UDF. Grant roles get `USAGE` on the UDF only, not `READ` on the SECRET. The UDF derives the per-scope HMAC key from the master secret and `hash_scope` (same idea as Postgres). Seed or rotate the SECRET with a **bind parameter**, never a SQL literal.
+
+If the driver cannot bind `SECRET_STRING`, the equivalent is a **restricted table** (`datagrant._hash_master`) with no `SELECT` for grant roles, filled with a bind, read only by that owner-rights UDF. Construction may use table or SECRET; the invariant is the same: **key never in view text, never in `CREATE USER` text.**
 
 ## Threat and ops notes
 
 - **Admin credentials still bypass the CLI.** Anyone who can create users and views in the Snowflake account can read the data directly. Run datagrant on a bastion that holds `DATAGRANT_SNOWFLAKE_DSN`, same as Postgres.
 - **OIDC is still a CLI boundary.** It names the requester. It does not log the developer into Snowflake.
-- **A Snowflake user is a login.** Treat it like the Postgres grant role: short, unique, dropped on revoke. Do not reuse it.
+- **A Snowflake service user is a login.** Treat it like the Postgres grant role: short, unique, dropped on revoke. Do not reuse it. PERSON password grants are out (MFA).
+- **Private key is shown once.** Same handling as the Postgres one-time password: stdout or a `0600` file, never receipts, never logs, never Snowflake SQL. Receipts store only the public-key fingerprint.
+- **`CREATE USER` SQL contains the public key only.** No private key, no hash key, no password.
+- **View DDL and `QUERY_HISTORY`.** Anyone who can `GET_DDL` on the view or read `QUERY_HISTORY` / `ACCOUNT_USAGE.QUERY_HISTORY` sees the view text (UDF name, column list, filter). They must not see the HMAC key. Restrict `ACCOUNT_USAGE` to operators. Retention is account-configured (often long); assume history outlives the grant.
+- **SECRET / restricted-table residual.** A bind avoids putting the key in the SQL string datagrant sends. Snowflake may still retain statement text or bind values in `ACCOUNT_USAGE` depending on account settings. Operators who can `READ` the SECRET or `SELECT` the master table can recompute hashes. Grant roles must not have those privileges.
 - **Secure views hide the view SQL from the grantee.** They do not hide that every visible row matched the filter. Same limit as Postgres.
 - **Hashes do not match Postgres.** Do not join a Snowflake `hash` column to a Postgres `hash` column.
+- **DDL auto-commit.** A crash can leave a `DISABLED` tagged user. Sweep drops it. An ENABLE user is created only after view, role, and state exist.
+- **Sub-day expiry is sweep.** Missed sweep = extra live window until the next sweep (or until `DAYS_TO_EXPIRY` if that backstop is set). Run sweep every 1 minute.
 - **No Snowflake in CI.** A missing `DATAGRANT_TEST_SNOWFLAKE_DSN` skips live tests. Recorded SQL still runs.
 - **`make demo` stays Postgres.** Operators try Snowflake against a throwaway database they already have, after `policy check`.
 - **DSN holders and warehouse admins are trusted.** Same as today.
@@ -139,8 +177,8 @@ Exit codes stay 0-4. A missing Snowflake driver (`pip install datagrant[snowflak
 ## Compatibility with v0.5.0
 
 - Policies that omit `engine` parse and evaluate as today. `policy.version` stays `1`.
-- Receipt JSONL from v0.5.0 remains valid input to `receipts verify`.
-- `make demo`, doctor, advisory lock, and `SET LOCAL log_statement` are unchanged.
+- Receipt JSONL from v0.5.0 remains valid input to `receipts verify`. Additive fingerprint fields on new Snowflake `issued` rows must not break verify of old lines.
+- `make demo`, doctor, advisory lock, and `SET LOCAL log_statement` are unchanged (Postgres).
 - Existing keys, Postgres DSNs, and runbooks keep working.
 - Installing without `[snowflake]` keeps today's Postgres CLI. Snowflake `--apply` tells the operator to install the extra.
 
@@ -148,10 +186,12 @@ Exit codes stay 0-4. A missing Snowflake driver (`pip install datagrant[snowflak
 
 - Policy: omit `engine` = postgres; `engine: snowflake` accepted; unknown engine is a parse error; table-level `engine` is an unknown-key error; `policy check` covers a mixed file.
 - Routing: a postgres dataset never opens Snowflake; a snowflake dataset `--apply` without Snowflake config is exit 2; missing extra names `datagrant[snowflake]`.
-- Grant SQL (unit, no network): plan includes a secure view, a role limited to that view, a user with a bound expiry, and no plaintext password in the SQL text if the driver can bind it. Mask SQL for all five names. Dry run prints the plan and creates nothing.
-- Revoke SQL (unit): disable user, cancel queries, drop view and role. Sweep expires by `expires_at`. Receipt failure after disable is exit 3.
+- Grant SQL (unit, no network): plan creates a `TYPE=SERVICE` user **DISABLED** first, then view, role, state, **ENABLE last**. `CREATE USER` SQL contains `RSA_PUBLIC_KEY` and no private key, no password, no hash key. View SQL calls `datagrant.hash_hmac` (or equivalent UDF) and does not contain hash-key bytes. Dry run prints the plan and creates nothing. Receipt payload has a fingerprint field and not a private key.
+- Fail-safe (unit): a stub failure after CREATE USER still leaves the user DISABLED; reverse-drop is issued; sweep SQL selects `datagrant:`-tagged DISABLED users with no active grants row and drops them.
+- Revoke SQL (unit): DISABLE first, cancel queries, drop view and role. Sweep expires by `expires_at`. Receipt failure after DISABLE is exit 3.
+- Expiry docs/tests: `DAYS_TO_EXPIRY` is not treated as sub-day enforcement; sweep cadence is.
 - Compat: existing Postgres unit and integration tests still pass without a Snowflake extra.
-- Live (optional): if `DATAGRANT_TEST_SNOWFLAKE_DSN` is set, issue, SELECT through the grant user, revoke, confirm the user cannot log in. Fictional data only. CI default is unset (skip).
+- Live (optional): if `DATAGRANT_TEST_SNOWFLAKE_DSN` is set, issue, SELECT through the grant service user with the shown key pair, revoke, confirm the user cannot log in. GET_DDL / query-history checks on a throwaway account must not show the hash key. Fictional data only. CI default is unset (skip).
 - No real IdP, no real PHI/PII. Fictional names only.
 
 ## Follow-up PRs (construction, after this design is approved)
@@ -160,10 +200,10 @@ Same shape as M3: one concern per PR, tests in each, docs last. No BigQuery PR. 
 
 1. **This PR.** Design, ROADMAP, audit pointer. No runtime.
 2. **Policy `engine` and connection routing.** Parse `engine` (`postgres` default, `snowflake` allowed). Snowflake `--apply` requires Snowflake config and the optional extra. No grant SQL yet.
-3. **Snowflake grant engine.** Secure view, role, per-grant user, one-time password, state row, `issued` receipt. Dry run. Tests on the SQL plan.
-4. **Snowflake revoke and sweep.** Disable, cancel queries, drop, fail-safe receipts. `grant list` / `status` for Snowflake rows.
-5. **Snowflake masks and catalog.** Five mask names, type inspect, row filters re-emitted safely. Hash-scope documented as not joinable with Postgres.
-6. **Docs, runbook, CHANGELOG Unreleased, v0.6.0 prep (no tag).** `docs/cli.md`, `docs/policy.md`, `docs/security.md`, this design marked implemented.
+3. **Snowflake grant engine.** Secure view, role, per-grant `TYPE=SERVICE` user (DISABLED then ENABLE), key pair shown once, hash UDF + SECRET (or restricted table), state row, `issued` receipt with public-key fingerprint. Dry run. Tests on the SQL plan and reverse-drop.
+4. **Snowflake revoke and sweep.** DISABLE, cancel queries, drop, fail-safe receipts, garbage-collect tagged DISABLED users. `grant list` / `status` for Snowflake rows.
+5. **Snowflake masks and catalog.** Five mask names, type inspect, row filters re-emitted safely. Hash-scope documented as not joinable with Postgres. Assert view DDL has no key bytes.
+6. **Docs, runbook, CHANGELOG Unreleased, v0.6.0 prep (no tag).** Sweep every 1 minute. `docs/cli.md`, `docs/policy.md`, `docs/security.md`, this design marked implemented.
 
 ## Decisions for Chris
 
@@ -177,15 +217,15 @@ Each item needs Chris's call before construction. Recommended picks are the prop
 
 2. **How much of today's Postgres product should Snowflake copy?**
    - A. Everything, including doctor, the writer lock, and statement-logging tricks.
-   - B. The path people use: ask, approve, masked login, expiry, receipt, revoke.
+   - B. The path people use: ask, approve, masked access, expiry, receipt, revoke.
    - C. Masked views only, no receipts.
    - **Recommend B.** That is what datagrant is for; the Postgres host checks do not translate.
 
-3. **How does the developer log in to Snowflake?**
-   - A. A new Snowflake user with a one-time password (like Postgres today).
-   - B. One shared Snowflake user, with views swapped underneath.
-   - C. The developer's existing company Snowflake SSO login.
-   - **Recommend A.** Same habit as today; a shared user is standing access; SSO is a later project.
+3. **How does the developer sign in to Snowflake?**
+   - A. A per-grant service user with a key pair that datagrant shows once (or writes to a private file).
+   - B. A per-grant user with an OAuth / programmatic access token.
+   - C. The developer's existing company Snowflake SSO (later).
+   - **Recommend A.** Snowflake now requires MFA for password logins and forbids passwords on service users; a one-time key pair is the closest thing to today's one-time password.
 
 4. **Can one policy file list both Postgres and Snowflake tables?**
    - A. Yes. Each dataset can say `engine: snowflake`. If it says nothing, it stays Postgres.
