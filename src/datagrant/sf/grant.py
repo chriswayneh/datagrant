@@ -413,22 +413,22 @@ def ensure_state(conn: Any) -> None:
         _exec(conn, stmt)
 
 
-def count_live_grants(conn: Any, requester: str, dataset: str) -> int:
-    """Live grants for this requester and dataset.
+def count_live_grants(conn: Any, requester: str) -> int:
+    """Live grants for this requester across all Snowflake datasets.
 
     Count is ``STATUS IN ('issuing','enabling','active')`` and
     ``EXPIRES_AT > CURRENT_TIMESTAMP()``. In-flight issue rows count because
-    Snowflake has no advisory lock. Qmark-bound; requester and dataset never
-    go in SQL text.
+    Snowflake has no advisory lock. Qmark-bound; requester never goes in SQL
+    text. Postgres grants live in a different store and are not counted here.
     """
     result = _exec(
         conn,
         (
             f"SELECT COUNT(*) FROM {q(STATE_SCHEMA)}.{q('GRANTS')}"  # nosec B608
-            " WHERE REQUESTER = ? AND DATASET = ? AND STATUS IN (?, ?, ?)"
+            " WHERE REQUESTER = ? AND STATUS IN (?, ?, ?)"
             " AND EXPIRES_AT > CURRENT_TIMESTAMP()"
         ),
-        (requester, dataset, "issuing", "enabling", "active"),
+        (requester, "issuing", "enabling", "active"),
     )
     row = _fetchone(result, conn)
     if row is None or row[0] is None:
@@ -517,7 +517,7 @@ def apply_plan(
             if facts is None:
                 reverse_drop(conn, plan, enabled=False)
                 raise GrantError(f"grant {plan.grant_id}: concurrent cap check needs grant facts")
-            n = count_live_grants(conn, facts.requester, facts.dataset)
+            n = count_live_grants(conn, facts.requester)
             if n > max_concurrent:
                 reverse_drop(conn, plan, enabled=False)
                 raise GrantError(

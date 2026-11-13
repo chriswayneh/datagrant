@@ -576,16 +576,22 @@ def test_snowflake_approve_identity_mode_mismatch(
     assert recs and recs[0]["event"] == "not_approved"
 
 
-def _pending_tuple(*, status: str = "pending") -> tuple[Any, ...]:
+def _pending_tuple(
+    *,
+    status: str = "pending",
+    dataset: str = "snow_clinic",
+    table: str = "PUBLIC.PATIENTS",
+    columns: str = '["PATIENT_ID"]',
+) -> tuple[Any, ...]:
     from datetime import UTC, datetime
 
     now = datetime(2026, 11, 13, 3, 0, tzinfo=UTC)
     return (
         "aabbccddeeff",
         "alice",
-        "snow_clinic",
-        "PUBLIC.PATIENTS",
-        '["PATIENT_ID"]',
+        dataset,
+        table,
+        columns,
         None,
         3600,
         "eval",
@@ -666,7 +672,37 @@ def _receipt_events(tmp_path: Path) -> list[dict[str, Any]]:
     return [json.loads(line)["receipt"] for line in log.read_text().splitlines() if line.strip()]
 
 
-def _policy_text(*, two_person: bool = False, top: str = "", table_extra: str = "") -> str:
+SNOW_LAB = """\
+  - name: snow_lab
+    engine: snowflake
+    database: LAB_DB
+    schema: PUBLIC
+    tables:
+      - name: PUBLIC.SAMPLES
+        allowed_groups: [ml]
+        columns: {SAMPLE_ID: passthrough}
+"""
+
+SF_REQ_LAB = [
+    "request",
+    "--dataset",
+    "snow_lab",
+    "--table",
+    "PUBLIC.SAMPLES",
+    "--columns",
+    "SAMPLE_ID",
+    "--duration",
+    "1h",
+    "--purpose",
+    "eval",
+    "--as-user",
+    "alice",
+]
+
+
+def _policy_text(
+    *, two_person: bool = False, top: str = "", table_extra: str = "", extra_dataset: str = ""
+) -> str:
     text = MIXED
     if two_person:
         text = text.replace("approval: auto", "approval: two-person").replace(
@@ -680,6 +716,8 @@ def _policy_text(*, two_person: bool = False, top: str = "", table_extra: str = 
             "columns: {PATIENT_ID: passthrough, SSN: hash}",
             "columns: {PATIENT_ID: passthrough, SSN: hash}\n" + table_extra,
         )
+    if extra_dataset:
+        text = text.rstrip() + "\n" + extra_dataset
     return text
 
 
@@ -706,7 +744,8 @@ def test_snowflake_apply_over_concurrent_cap_denied(
     recs = _receipt_events(tmp_path)
     assert recs and recs[0]["event"] == "denied"
     count = next(s for s, _p in conn.queries if "COUNT(" in s)
-    assert "REQUESTER = ?" in count and "DATASET = ?" in count
+    assert "REQUESTER = ?" in count
+    assert "DATASET" not in count
     assert "STATUS IN (?, ?, ?)" in count
 
 
@@ -723,6 +762,53 @@ def test_snowflake_approve_over_concurrent_cap_not_approved(
     assert denied.get("approved") is False
     assert any("max_concurrent_grants" in r for r in denied["reasons"])
     assert not any(s.startswith("CREATE USER") for s, _p in conn.queries)
+    recs = _receipt_events(tmp_path)
+    assert recs and recs[0]["event"] == "not_approved"
+
+
+def test_snowflake_policy_wide_cap_spans_datasets_on_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(live_count=1)
+    _sf_keys(tmp_path, monkeypatch, conn)
+    path = _write_policy(
+        tmp_path,
+        _policy_text(top="max_concurrent_grants: 1", extra_dataset=SNOW_LAB),
+        "span.yaml",
+    )
+    out: list[str] = []
+    code = cli.main([*SF_REQ_LAB, "--policy", str(path), "--apply", "--json"], out.append)
+    assert code == EXIT_FAILED
+    body = json.loads(out[0])
+    assert body["allowed"] is False
+    assert any("max_concurrent_grants" in r for r in body["reasons"])
+    assert not any(s.startswith("CREATE USER") for s, _p in conn.queries)
+    count_sql, count_params = next(q for q in conn.queries if "COUNT(" in q[0])
+    assert "DATASET" not in count_sql
+    assert count_params[0] == "alice"
+    recs = _receipt_events(tmp_path)
+    assert recs and recs[0]["event"] == "denied"
+
+
+def test_snowflake_policy_wide_cap_spans_datasets_on_approve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = _pending_tuple(dataset="snow_lab", table="PUBLIC.SAMPLES", columns='["SAMPLE_ID"]')
+    conn = _FakeSf(pending_row=pending, live_count=1)
+    path = _write_policy(
+        tmp_path,
+        _policy_text(two_person=True, top="max_concurrent_grants: 1", extra_dataset=SNOW_LAB),
+        "span-two.yaml",
+    )
+    code, body = _approve_apply(tmp_path, monkeypatch, conn, policy=path)
+    assert code == EXIT_FAILED
+    denied = json.loads(body)
+    assert denied.get("approved") is False
+    assert any("max_concurrent_grants" in r for r in denied["reasons"])
+    assert not any(s.startswith("CREATE USER") for s, _p in conn.queries)
+    count_sql, count_params = next(q for q in conn.queries if "COUNT(" in q[0])
+    assert "DATASET" not in count_sql
+    assert count_params[0] == "alice"
     recs = _receipt_events(tmp_path)
     assert recs and recs[0]["event"] == "not_approved"
 

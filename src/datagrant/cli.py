@@ -600,7 +600,7 @@ def _sf_concurrent_reason(conn: Any, policy: Any, requester: str, dataset: str) 
         return None
     from datagrant.sf.grant import count_live_grants
 
-    n = count_live_grants(conn, requester, dataset)
+    n = count_live_grants(conn, requester)
     return _cap_message(requester, n, cap)
 
 

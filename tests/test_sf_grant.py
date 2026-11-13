@@ -569,14 +569,15 @@ def test_issue_approved_marks_failed_on_apply_error() -> None:
 
 def test_count_live_grants_qmark_binds_issuing_enabling_active() -> None:
     conn = FakeConn(live_count=2)
-    assert count_live_grants(conn, "alice", "snow_clinic") == 2
+    assert count_live_grants(conn, "alice") == 2
     sql, params = conn.queries[-1]
     assert "COUNT(*)" in sql
-    assert "REQUESTER = ?" in sql and "DATASET = ?" in sql
+    assert "REQUESTER = ?" in sql
+    assert "DATASET" not in sql
     assert "STATUS IN (?, ?, ?)" in sql
     assert "EXPIRES_AT > CURRENT_TIMESTAMP()" in sql
-    assert "alice" not in sql and "snow_clinic" not in sql
-    assert params == ("alice", "snow_clinic", "issuing", "enabling", "active")
+    assert "alice" not in sql
+    assert params == ("alice", "issuing", "enabling", "active")
 
 
 def test_apply_plan_racing_insert_over_cap_reverse_drops(tmp_path: Path) -> None:
