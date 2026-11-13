@@ -32,6 +32,7 @@ from datagrant.rowfilter import RowFilterError, parse_row_filter
 MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null"})
 APPROVAL_MODES = frozenset({"auto", "two-person"})
 SOD_MODES = frozenset({"none", "distinct-groups"})
+ENGINES = frozenset({"postgres", "snowflake"})
 _DURATION_RE = re.compile(r"^(\d{1,6})([mhd])$")
 _SMALL_DURATION_RE = re.compile(r"^(\d{1,6})([smhd])$")
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
@@ -77,6 +78,8 @@ class Dataset:
     tables: dict[str, TableRule]
     hash_scope: str = ""
     max_concurrent_grants: int | None = None
+    engine: str = "postgres"
+    schema: str | None = None
 
     def __post_init__(self) -> None:
         if not self.hash_scope:
@@ -503,7 +506,17 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         if not isinstance(ds, dict):
             raise PolicyError(f"{where}: expected a mapping")
         _check_keys(
-            ds, {"name", "database", "tables", "hash_scope", "max_concurrent_grants"}, where
+            ds,
+            {
+                "name",
+                "database",
+                "tables",
+                "hash_scope",
+                "max_concurrent_grants",
+                "engine",
+                "schema",
+            },
+            where,
         )
         name = _req(ds, "name", str, where)
         if not _NAME_RE.fullmatch(name) or name in datasets:
@@ -511,6 +524,20 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
         db = _req(ds, "database", str, where)
         if not _IDENT_RE.fullmatch(db):
             raise PolicyError(f"{where}.database: invalid database name {db!r}")
+        raw_engine = ds.get("engine", "postgres")
+        if not isinstance(raw_engine, str) or raw_engine not in ENGINES:
+            raise PolicyError(
+                f"{where}.engine: must be one of {sorted(ENGINES)} (omit for postgres)"
+            )
+        engine = raw_engine
+        schema: str | None = None
+        if "schema" in ds:
+            if engine != "snowflake":
+                raise PolicyError(f"{where}.schema: only valid when engine is snowflake")
+            raw_schema = ds["schema"]
+            if not isinstance(raw_schema, str) or not _IDENT_RE.fullmatch(raw_schema):
+                raise PolicyError(f"{where}.schema: invalid schema name {raw_schema!r}")
+            schema = raw_schema
         scope = ds.get("hash_scope", name)
         if not isinstance(scope, str) or not _NAME_RE.fullmatch(scope):
             raise PolicyError(f"{where}.hash_scope: invalid hash scope {scope!r}")
@@ -527,7 +554,7 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
             if "max_concurrent_grants" in ds
             else None
         )
-        datasets[name] = Dataset(name, db, tables, scope, ds_cap)
+        datasets[name] = Dataset(name, db, tables, scope, ds_cap, engine, schema)
     approvers = frozenset(_str_list(data.get("approvers", []), "policy.approvers"))
     unknown = approvers - set(groups)
     if unknown:

@@ -1498,7 +1498,8 @@ def test_red_team_pr28_m1_l2_l3_regressions(
         ]
     )
     err_env = capsys.readouterr().err
-    assert rc_env_err == 2 and "super-secret-env-token-xyz" not in err_env and "***" in err_env
+    assert rc_env_err == 2 and "super-secret-env-token-xyz" not in err_env
+    assert "***" in err_env or "<redacted>" in err_env
 
     # M1: approve strict checks on stored requester_identity
     class StubConn:

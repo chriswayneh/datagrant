@@ -1,6 +1,6 @@
 # Design: warehouses (v0.6.0 / M4)
 
-Status: proposed. Not implemented. This is the M4 design and execution plan (warehouses, target v0.6.0) from the v1.0 plan Chris authorized. M2 parked other warehouses at v0.5.0+ so they would not land in v0.4.0. M3 moved them to **v0.6.0+** so ops hardening could finish first. M3 is released. This milestone is that warehouse work. Construction must not start until this document is approved in [audit.md](../../aidlc-docs/audit.md). Roadmap: [ROADMAP.md](../../ROADMAP.md).
+Status: approved. Construction started (policy `engine` and connection routing). M4 design and execution plan (warehouses, target v0.6.0) from the v1.0 plan Chris authorized. M2 parked other warehouses at v0.5.0+ so they would not land in v0.4.0. M3 moved them to **v0.6.0+** so ops hardening could finish first. M3 is released. Chris approved the recommended picks and merged the design as PR #47 at `0449a0b`. Roadmap: [ROADMAP.md](../../ROADMAP.md).
 
 Grounded in the v0.5.0 code on `main` (`src/datagrant/cli.py`, `policy.py`, `pg/grant.py`, `pg/revoke.py`, `pg/mask.py`, `receipt.py`, `docs/security.md`, `docs/policy.md`).
 
@@ -204,6 +204,7 @@ Invariant: **key never in view text, never in `CREATE USER` text.**
 - Revoke SQL (unit): DISABLE first, cancel queries, drop view and role. Sweep expires by `expires_at`. Receipt failure after DISABLE is exit 3.
 - Expiry docs/tests: `DAYS_TO_EXPIRY` is not treated as sub-day enforcement; sweep cadence is.
 - Compat: existing Postgres unit and integration tests still pass without a Snowflake extra.
+- Extra pin: `snowflake-connector-python>=4.7.3,<6` (not `>=3.12,<4`, which resolved 3.18.1 / PYSEC-2026-4301). CI job `pip-audit-snowflake` installs `.[snowflake]` and runs `pip-audit`. No live Snowflake calls.
 - Live (optional): if `DATAGRANT_TEST_SNOWFLAKE_DSN` is set, issue, SELECT through the grant service user with the shown key pair, revoke, confirm the user cannot log in. GET_DDL / query-history checks on a throwaway account must not show the hash key. Fictional data only. CI default is unset (skip).
 - No real IdP, no real PHI/PII. Fictional names only.
 
@@ -211,8 +212,8 @@ Invariant: **key never in view text, never in `CREATE USER` text.**
 
 Same shape as M3: one concern per PR, tests in each, docs last. No BigQuery PR. No rate-limit PR. No `max_rows` PR. No break-glass PR.
 
-1. **This PR.** Design, ROADMAP, audit pointer. No runtime.
-2. **Policy `engine` and connection routing.** Parse `engine` (`postgres` default, `snowflake` allowed). Snowflake `--apply` requires Snowflake config and the optional extra. No grant SQL yet.
+1. **Done (PR #47).** Design, ROADMAP, audit pointer. No runtime.
+2. **This PR.** Policy `engine` and connection routing. Parse `engine` (`postgres` default, `snowflake` allowed). Snowflake `--apply` requires Snowflake config and the optional extra. No grant SQL yet.
 3. **Snowflake grant engine.** Insert `issuing` into `datagrant.grants` before CREATE USER, secure view, role, per-grant `TYPE=SERVICE` user (DISABLED, receipt, ENABLE, then `active` on that same row), key pair shown once, restricted hash table plus SQL secure UDF (`USAGE` only), `issued` receipt with public-key fingerprint. Two-person request stores public key plus fingerprint only; objects are created at final approve. Dry run. Tests on the SQL plan and reverse-drop.
 4. **Snowflake revoke and sweep.** DISABLE, cancel queries, drop, fail-safe receipts, skip `datagrant.grants` `issuing` rows under the 10-minute grace, garbage-collect tagged DISABLED users and expired `issuing` rows. Pending TTL expiry does not drop Snowflake objects. `grant list` / `status` for Snowflake rows.
 5. **Snowflake masks and catalog.** Five mask names, type inspect, row filters re-emitted safely. Hash-scope documented as not joinable with Postgres. Assert view DDL has no key bytes.
@@ -220,49 +221,49 @@ Same shape as M3: one concern per PR, tests in each, docs last. No BigQuery PR. 
 
 ## Decisions for Chris
 
-Each item needs Chris's call before construction. Recommended picks are the proposed default if the design is approved as-is. They are not yet approved. Chris is not expected to read the SQL; the one-line why is the whole point.
+Chris approved all recommended picks on 2026-11-12 CT (PR #47 merged at `0449a0b`): **1B, 2B, 3A, 4A, 5B, 6B, 7B**. The one-line why is the whole point.
 
 1. **Which warehouse do we build in this version?**
    - A. Snowflake and BigQuery both.
    - B. Snowflake now; BigQuery in a later version.
    - C. BigQuery now; Snowflake later.
-   - **Recommend B.** Snowflake has logins and views like Postgres; doing both at once would stall the release.
+   - **Recommend B (approved).** Snowflake has logins and views like Postgres; doing both at once would stall the release.
 
 2. **How much of today's Postgres product should Snowflake copy?**
    - A. Everything, including doctor, the writer lock, and statement-logging tricks.
    - B. The path people use: ask, approve, masked access, expiry, receipt, revoke.
    - C. Masked views only, no receipts.
-   - **Recommend B.** That is what datagrant is for; the Postgres host checks do not translate.
+   - **Recommend B (approved).** That is what datagrant is for; the Postgres host checks do not translate.
 
 3. **How does the developer sign in to Snowflake?**
    - A. A per-grant service user with a key pair that datagrant shows once (or writes to a private file).
    - B. A per-grant user with an OAuth / programmatic access token.
    - C. The developer's existing company Snowflake SSO (later).
-   - **Recommend A.** Snowflake now requires MFA for password logins and forbids passwords on service users; a one-time key pair is the closest thing to today's one-time password.
+   - **Recommend A (approved).** Snowflake now requires MFA for password logins and forbids passwords on service users; a one-time key pair is the closest thing to today's one-time password.
 
 4. **Can one policy file list both Postgres and Snowflake tables?**
    - A. Yes. Each dataset can say `engine: snowflake`. If it says nothing, it stays Postgres.
    - B. No. One policy file is one engine.
    - C. A separate Snowflake-only tool and config file.
-   - **Recommend A.** Current files keep working; mixed teams do not need two tools.
+   - **Recommend A (approved).** Current files keep working; mixed teams do not need two tools.
 
 5. **How do we test this without a Snowflake bill in GitHub Actions?**
    - A. Require a real Snowflake account in CI.
    - B. Check the SQL in tests; run live tests only when someone sets a secret.
    - C. No Snowflake tests.
-   - **Recommend B.** CI stays free and green; people with Snowflake can still prove it live.
+   - **Recommend B (approved).** CI stays free and green; people with Snowflake can still prove it live.
 
 6. **Does the one-command demo need Snowflake?**
    - A. Replace today's Postgres demo.
    - B. Keep the Postgres demo; Snowflake is docs and tests.
    - C. Add a second demo that needs a Snowflake account, and run it in CI.
-   - **Recommend B.** The public demo and CI stay as they are.
+   - **Recommend B (approved).** The public demo and CI stay as they are.
 
 7. **Snowflake's own masking policies, or datagrant views like Postgres?**
    - A. Use Snowflake masking policies as the grant.
    - B. Keep datagrant masked views (same five names as Postgres).
    - C. Support both in this version.
-   - **Recommend B.** One way to grant, one way to revoke, one receipt.
+   - **Recommend B (approved).** One way to grant, one way to revoke, one receipt.
 
 ## Decisions already on record (Chris)
 

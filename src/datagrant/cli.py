@@ -43,6 +43,7 @@ from datagrant.keys import (
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_RECEIPT, EXIT_REVOKE_FAILED = 0, 1, 2, 3, 4
 DSN_ENV = "DATAGRANT_DSN"
+SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
 REDACTED = "<redacted>"
 POLICY_ENV = "DATAGRANT_POLICY"
 STRICT_POLICY_PERM_ENV = "DATAGRANT_STRICT_POLICY_PERMISSIONS"
@@ -61,8 +62,17 @@ class CliError(Exception):
 
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-_PW_KV = re.compile(r"(password\s*=\s*)('(?:[^'\\]|\\.)*'|\S+)", re.IGNORECASE)
+_SECRET_KV = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"([A-Za-z_]*(?:pass(?:word|wd|code|phrase)?|pwd|secret|token|private_key)"
+    r"[A-Za-z_]*\s*=\s*)"
+    r"('(?:[^'\\]|\\.)*'|\S+)",
+    re.IGNORECASE,
+)
 _PW_URL = re.compile(r"(\w+://[^:/@\s]*:)[^@\s]*@")
+_SECRET_FLAG_RE = re.compile(r"(--(?:snowflake-)?dsn)(=|\s+)(\S+)", re.IGNORECASE)
+_DSN_TAIL_RE = re.compile(r"(--(?:snowflake-)?dsn)\b.*", re.IGNORECASE | re.DOTALL)
+_UNRECOGNIZED_ARGS = "unrecognized arguments:"
 
 
 def redact(text: str, dsn: str | None = None) -> str:
@@ -79,7 +89,52 @@ def redact(text: str, dsn: str | None = None) -> str:
         # password= forms are still stripped below at every length.
         if isinstance(pw, str) and len(pw) >= 4:
             text = text.replace(pw, "***")
-    return _PW_URL.sub(r"\1***@", _PW_KV.sub(r"\1***", text))
+    return _PW_URL.sub(r"\1***@", _SECRET_KV.sub(r"\1***", text))
+
+
+def _secret_dsn_values(args: argparse.Namespace | None = None) -> tuple[str, ...]:
+    found: list[str] = []
+    seen: set[str] = set()
+    raws: list[object] = [os.environ.get(DSN_ENV), os.environ.get(SNOWFLAKE_DSN_ENV)]
+    if args is not None:
+        raws.extend((getattr(args, "dsn", None), getattr(args, "snowflake_dsn", None)))
+    for raw in raws:
+        if not isinstance(raw, str):
+            continue
+        v = raw.strip()
+        if len(v) >= 4 and v not in seen:
+            seen.add(v)
+            found.append(v)
+    return tuple(found)
+
+
+def _cli_redact(text: str, args: argparse.Namespace | None = None) -> str:
+    """Scrub literal DSN values and secret key=value pairs. Does not rewrite flag names."""
+    text = str(text)
+    dsns = _secret_dsn_values(args)
+    for dsn in dsns:
+        text = text.replace(dsn, "<redacted>")
+    for dsn in dsns:
+        text = redact(text, dsn)
+    return redact(text)
+
+
+def _scrub_unrecognized_arguments(message: str) -> str:
+    """Keep option names only; replace every other unrecognized token with <redacted>."""
+    idx = message.lower().find(_UNRECOGNIZED_ARGS)
+    if idx < 0:
+        return message
+    head = message[: idx + len(_UNRECOGNIZED_ARGS)]
+    tokens: list[str] = []
+    for tok in message[idx + len(_UNRECOGNIZED_ARGS) :].split():
+        if tok.startswith("-"):
+            name, eq, _val = tok.partition("=")
+            tokens.append(name)
+            if eq:
+                tokens.append("<redacted>")
+        else:
+            tokens.append("<redacted>")
+    return head + ((" " + " ".join(tokens)) if tokens else "")
 
 
 @dataclass
@@ -290,7 +345,10 @@ def _hide_token(text: str, extra_oidc_token: str | None = None) -> str:
 
 
 def _warn(ctx: Ctx, msg: str) -> None:
-    print(f"datagrant: warning: {_hide_token(msg, ctx.oidc_token)}", file=sys.stderr)
+    print(
+        f"datagrant: warning: {_hide_token(_cli_redact(msg, ctx.args), ctx.oidc_token)}",
+        file=sys.stderr,
+    )
 
 
 def _policy_path(args: argparse.Namespace) -> Path | None:
@@ -766,6 +824,36 @@ def _request_pending_ttl(policy: Any, pending_ttl_flag: str | None) -> timedelta
     return ttl
 
 
+def _snowflake_request(ctx: Ctx, decision: Any) -> int:
+    """Route a Snowflake dataset request. No grant SQL in this construction PR."""
+    from datagrant.snowflake_support import (
+        EXTRA_HINT,
+        NOT_IMPLEMENTED,
+        SnowflakeSetupError,
+        require_driver,
+        resolve_dsn,
+    )
+
+    a = ctx.args
+    if not a.apply:
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "snowflake",
+                "approval": decision.approval,
+            },
+            "dry run: allowed by policy; engine=snowflake; with --apply datagrant would "
+            f"require {EXTRA_HINT} and ${SNOWFLAKE_DSN_ENV}; grant SQL is not implemented yet",
+        )
+        return EXIT_OK
+    try:
+        require_driver()
+        resolve_dsn(getattr(a, "snowflake_dsn", None))
+    except SnowflakeSetupError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
+    raise CliError(NOT_IMPLEMENTED, EXIT_USAGE)
+
+
 def cmd_request(ctx: Ctx) -> int:
     from datagrant.pg.grant import build_plan, ensure_state, new_password
     from datagrant.pg.mask import inspect_table
@@ -798,6 +886,8 @@ def cmd_request(ctx: Ctx) -> int:
     decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
     if not decision.allowed:
         return _refuse_request(ctx, req, policy, decision.reasons, caller)
+    if policy.datasets[req.dataset].engine == "snowflake":
+        return _snowflake_request(ctx, decision)
     two_person = decision.approval == "two-person"
     hash_key = (
         load_hash_key(resolve_key_path("hash", a.hash_key)) if _needs_hash(decision, cols) else None
@@ -957,6 +1047,14 @@ def cmd_approve(ctx: Ctx) -> int:
                 [f"request {pending.id} is {pending.status}, not pending"],
                 caller,
             )
+        ds = policy.datasets.get(pending.request.dataset)
+        if ds is not None and ds.engine != "postgres":
+            msg = (
+                f"request {pending.id} targets dataset {pending.request.dataset!r} "
+                f"with engine {ds.engine!r}; approve only issues Postgres grants"
+            )
+            _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+            raise CliError(msg, EXIT_FAILED)
         req_meta = pending.requester_identity
         req_mode = req_meta.get("mode", "local") if isinstance(req_meta, dict) else "local"
         if req_mode != policy.identity.mode:
@@ -1598,7 +1696,7 @@ def cmd_doctor(ctx: Ctx) -> int:
     log = _log_path(a)
 
     def scrub(msg: str) -> str:
-        return _hide_token(redact(msg, dsn), ctx.oidc_token)
+        return _hide_token(_cli_redact(msg, ctx.args), ctx.oidc_token)
 
     checks = run_doctor(
         signing_path=resolve_key_path("signing", a.signing_key),
@@ -1670,7 +1768,10 @@ class _SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         from datagrant.oidc import _JWS_LIKE_RE
 
-        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(message))
+        clean = _scrub_unrecognized_arguments(message)
+        clean = _SECRET_FLAG_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", clean)
+        clean = _DSN_TAIL_RE.sub(r"\1 <redacted>", clean)
+        clean = _JWS_LIKE_RE.sub("<redacted>", _hide_token(_cli_redact(clean)))
         self.print_usage(sys.stderr)
         print(f"{self.prog}: error: {clean}", file=sys.stderr)
         raise SystemExit(EXIT_USAGE)
@@ -1810,6 +1911,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--duration", required=True, help="e.g. 30m, 2h")
     r.add_argument("--purpose", required=True)
     r.add_argument(
+        "--snowflake-dsn",
+        help=f"Snowflake admin settings (default ${SNOWFLAKE_DSN_ENV}); ignored for postgres",
+    )
+    r.add_argument(
         "--pending-ttl",
         default=None,
         metavar="TTL",
@@ -1938,7 +2043,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
     try:
         return int(args.fn(ctx))
     except CliError as exc:
-        _err(ctx, redact(str(exc), dsn), exc.code)
+        _err(ctx, str(exc), exc.code)
         return exc.code
     except (
         PolicyError,
@@ -1959,7 +2064,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
 
 
 def _err(ctx: Ctx, msg: str, code: int) -> None:
-    msg = _hide_token(msg, ctx.oidc_token)
+    msg = _hide_token(_cli_redact(msg, ctx.args), ctx.oidc_token)
     if ctx.json:
         ctx.out(json.dumps({"error": msg, "exit_code": code}))
     else:

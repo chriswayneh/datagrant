@@ -124,6 +124,24 @@ REQ = (
 )
 
 
+def test_postgres_request_does_not_open_snowflake(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", "snowflake://canary-secret@xy12345/CLINIC_DB")
+
+    def boom() -> bool:
+        raise AssertionError("Snowflake driver probed on a postgres dataset")
+
+    monkeypatch.setattr("datagrant.snowflake_support.driver_present", boom)
+    pol = str(setup["tmp"] / "auto.yaml")
+    code, d = run("request", "--policy", pol, *REQ)
+    assert code == 0 and d["dry_run"]
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
+    assert code == 0 and d["status"] == "granted"
+    blob = json.dumps(d)
+    assert "canary-secret" not in blob
+
+
 def test_request_auto_dry_run_and_text(setup: dict[str, Any]) -> None:
     pol = str(setup["tmp"] / "auto.yaml")
     code, d = run("request", "--policy", pol, *REQ)
@@ -190,6 +208,50 @@ def test_request_two_person_and_approve(
     )
     code, d = run("approve", "--apply", "aaaaaaaaaaaa", "--policy", pol, "--as-user", "carol")
     assert code == 1 and any("no longer allowed" in r for r in d["reasons"])
+
+
+def test_approve_refuses_when_dataset_engine_flips_to_snowflake(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pol = str(setup["tmp"] / "two-person.yaml")
+    stored: dict[str, Any] = {}
+
+    def create(conn: Any, req: Request, **kw: Any) -> PendingRequest:
+        stored["p"] = PendingRequest(
+            "aaaaaaaaaaaa",
+            req,
+            kw["policy_sha256"],
+            kw["verifier"],
+            T,
+            T + kw["ttl"],
+            "pending",
+            None,
+            None,
+            kw.get("requester_identity"),
+        )
+        return stored["p"]
+
+    monkeypatch.setattr(rq, "create_request", create)
+    monkeypatch.setattr(rq, "get_request", lambda c, rid: stored["p"])
+    assert run("request", "--apply", "--policy", pol, *REQ)[0] == 0
+    snow = setup["tmp"] / "snow-clinic.yaml"
+    snow.write_text(
+        POLICY.format(approval="two-person").replace(
+            "  - name: clinic\n    database: clinicdb\n",
+            "  - name: clinic\n    engine: snowflake\n    database: clinicdb\n",
+        )
+    )
+    snow.chmod(0o600)
+    code, d = run(
+        "approve", "--apply", "aaaaaaaaaaaa", "--policy", str(snow), "--as-user", "carol"
+    )
+    assert code == 1
+    assert "engine" in d.get("error", "") and "snowflake" in d.get("error", "")
+    assert not setup["applied"]
+    bodies = [b for b in _receipts(setup) if b["event"] == "not_approved"]
+    assert len(bodies) == 1
+    assert bodies[0]["details"]["phase"] == "approve"
+    assert any("snowflake" in r for r in bodies[0]["details"]["reasons"])
 
 
 def test_grant_list_status_revoke_sweep_preflight(
