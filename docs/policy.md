@@ -22,14 +22,16 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `strict_preflight` | no | Policy-wide only. Boolean. Omit it, or `false`, to keep PUBLIC preflight warnings and still grant. `true` means `--apply` on `request`, `approve`, and `preflight` exits 1 when `_PREFLIGHT` returns any row. `preflight --apply` still creates datagrant state before refusing. `revoke` and `sweep` never refuse for this reason. A dataset- or table-level key is an unknown-key error. |
 | `strict_policy_permissions` | no | Policy-wide only. Boolean. Omit it, or `false`, to **warn** on `--apply` if the policy file is group/other-accessible (a 0644 git checkout keeps working). `true` means access-creating `--apply` (`request`, `approve`, `preflight --apply`) refuses (exit 1) if the policy file is group/other-accessible; group/other-writable is the stronger finding. `revoke` and `sweep` still only warn. A dataset- or table-level key is an unknown-key error. This key lives in the policy file it protects: anyone who can write the file can set it to `false` or omit it, so write access defeats it. To force the same check from outside the file, set `$DATAGRANT_STRICT_POLICY_PERMISSIONS` to `1`/`true`/`yes`/`on` (case-insensitive, trimmed) or pass `--strict-policy-permissions`. Unset, empty, or `0`/`false`/`no`/`off` leaves the override off. Any other non-empty value is a usage error (exit 2) on access-creating `--apply` and `doctor`; `revoke` and `sweep` do not parse this variable. The override refuses on access-creating `--apply` after a hostfs mode/owner inspect and **before** the YAML is parsed. Defaults are unchanged: without the key and without the override, a 0644 checkout still warns and applies. |
 
-v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_concurrent_grants`, per-table `max_columns`) are optional. Omitting them keeps v0.3.0 behavior. v0.5.0 keys (`strict_preflight`, `strict_policy_permissions`) are optional and default off. There is no break-glass key; emergency access is a reviewed policy edit to `approval: auto`.
+v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_concurrent_grants`, per-table `max_columns`) are optional. Omitting them keeps v0.3.0 behavior. v0.5.0 keys (`strict_preflight`, `strict_policy_permissions`) are optional and default off. Optional dataset `engine` (`postgres` default, or `snowflake`) and Snowflake-only `schema` are Unreleased (v0.6.0). There is no break-glass key; emergency access is a reviewed policy edit to `approval: auto`.
 
 ## Datasets
 
 | Key | Meaning |
 | --- | --- |
 | `name` | Dataset name used with `request --dataset`. |
-| `database` | Postgres database name. A grant is refused if the DSN connects to a different database. |
+| `database` | Database name. For Postgres, a grant is refused if the DSN connects to a different database. For `engine: snowflake`, this is the Snowflake database. |
+| `engine` | Optional. `postgres` (default, including omitted) or `snowflake`. Unknown strings are errors. A table-level `engine` is an unknown-key error. Omitting it on every dataset is v0.5.0. |
+| `schema` | Optional Snowflake default schema. Only valid when `engine` is `snowflake`. Table `name` stays `schema.table`. |
 | `tables` | List of tables. |
 | `hash_scope` | Optional. Name of the hash scope (`[A-Za-z0-9_.-]`, up to 64 characters). Defaults to the dataset name, so each dataset hashes differently. Give two datasets the same `hash_scope` only when their hashes should be joinable. |
 | `max_concurrent_grants` | Optional positive integer. Tighter of this and the policy-wide cap, if either is set. Count is the requester's live grants (`status = 'active' AND expires_at > now()`, all datasets). |

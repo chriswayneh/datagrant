@@ -4,6 +4,10 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+- Optional dataset `engine` (`postgres` default, or `snowflake`) and Snowflake-only `schema`. Unknown engines and a table-level `engine` are policy errors. Omitting `engine` is v0.5.0. Mixed Postgres and Snowflake files parse (`datagrant policy check`).
+- Snowflake `--apply` routing (no grant SQL yet): requires the optional extra `datagrant[snowflake]` (`pip install 'datagrant[snowflake]'`) and `--snowflake-dsn` / `$DATAGRANT_SNOWFLAKE_DSN` (service user, key-pair auth; never logged). Postgres `--apply` does not read Snowflake settings or import the extra. CI does not install the extra and does not call Snowflake. ([design](docs/design/warehouses.md))
+
 ## [0.5.0] - 2026-11-11
 
 Ops hardening.

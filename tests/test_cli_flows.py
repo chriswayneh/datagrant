@@ -124,6 +124,24 @@ REQ = (
 )
 
 
+def test_postgres_request_does_not_open_snowflake(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", "snowflake://canary-secret@xy12345/CLINIC_DB")
+
+    def boom() -> bool:
+        raise AssertionError("Snowflake driver probed on a postgres dataset")
+
+    monkeypatch.setattr("datagrant.snowflake_support.driver_present", boom)
+    pol = str(setup["tmp"] / "auto.yaml")
+    code, d = run("request", "--policy", pol, *REQ)
+    assert code == 0 and d["dry_run"]
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
+    assert code == 0 and d["status"] == "granted"
+    blob = json.dumps(d)
+    assert "canary-secret" not in blob
+
+
 def test_request_auto_dry_run_and_text(setup: dict[str, Any]) -> None:
     pol = str(setup["tmp"] / "auto.yaml")
     code, d = run("request", "--policy", pol, *REQ)

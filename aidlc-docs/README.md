@@ -12,7 +12,7 @@ datagrant follows the [AWS AI-Driven Development Life Cycle](https://github.com/
 - [audit.md](audit.md) is the append-only log of decisions and approvals.
 - M2 / v0.4.0 (approvals and policy limits): released 2026-11-10. Design: [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md).
 - M3 / v0.5.0 (ops hardening): released 2026-11-11. Design: [docs/design/ops-hardening.md](../docs/design/ops-hardening.md).
-- M4 / v0.6.0 (warehouses): design proposed. [docs/design/warehouses.md](../docs/design/warehouses.md). Construction waits on maintainer approval in [audit.md](audit.md). Snowflake first (recommended); BigQuery is v0.7.0+.
+- M4 / v0.6.0 (warehouses): design approved (PR #47 at `0449a0b`). Construction started. [docs/design/warehouses.md](../docs/design/warehouses.md). Snowflake first; BigQuery is v0.7.0+.
 
 Working rules: see [AGENTS.md](../AGENTS.md).
 

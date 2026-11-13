@@ -48,4 +48,4 @@ Implemented (PRs #40 to #45). Design: [docs/design/ops-hardening.md](../../docs/
 
 Chris authorized a v1.0 plan that parked **warehouses (Snowflake/BigQuery)** after ops hardening. M3 released as v0.5.0. M4 is that warehouse work, target v0.6.0. This design recommends **Snowflake first**; BigQuery is **v0.7.0+**. Rate limits and `max_rows` stay out. No break-glass.
 
-Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Construction PRs wait on design approval in [audit.md](../audit.md).
+Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Design approved (PR #47 at `0449a0b`). Construction started (policy `engine` and Snowflake `--apply` routing).

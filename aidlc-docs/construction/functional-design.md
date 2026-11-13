@@ -122,4 +122,4 @@ Implemented (PRs #41 to #45). v0.5.0 released 2026-11-11. Session `pg_advisory_l
 
 ## M4 / v0.6.0: warehouses (design)
 
-Proposed. Construction waits on maintainer approval in [audit.md](../audit.md). Snowflake first (secure view, per-grant `TYPE=SERVICE` user, key pair shown once, local receipts). BigQuery later (v0.7.0+). Postgres CLI unchanged. Rate limits, `max_rows`, and break-glass stay out. Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).
+Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PR 1: optional dataset `engine` (`postgres` default, `snowflake` allowed) and Snowflake `--apply` routing (extra `datagrant[snowflake]`, `$DATAGRANT_SNOWFLAKE_DSN`; no grant SQL; no live Snowflake in CI). BigQuery later (v0.7.0+). Postgres CLI unchanged. Rate limits, `max_rows`, and break-glass stay out. Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). ROADMAP: [ROADMAP.md](../../ROADMAP.md).

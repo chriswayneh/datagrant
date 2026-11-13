@@ -43,6 +43,7 @@ from datagrant.keys import (
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_RECEIPT, EXIT_REVOKE_FAILED = 0, 1, 2, 3, 4
 DSN_ENV = "DATAGRANT_DSN"
+SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
 REDACTED = "<redacted>"
 POLICY_ENV = "DATAGRANT_POLICY"
 STRICT_POLICY_PERM_ENV = "DATAGRANT_STRICT_POLICY_PERMISSIONS"
@@ -766,6 +767,36 @@ def _request_pending_ttl(policy: Any, pending_ttl_flag: str | None) -> timedelta
     return ttl
 
 
+def _snowflake_request(ctx: Ctx, decision: Any) -> int:
+    """Route a Snowflake dataset request. No grant SQL in this construction PR."""
+    from datagrant.snowflake_support import (
+        EXTRA_HINT,
+        NOT_IMPLEMENTED,
+        SnowflakeSetupError,
+        require_driver,
+        resolve_dsn,
+    )
+
+    a = ctx.args
+    if not a.apply:
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "snowflake",
+                "approval": decision.approval,
+            },
+            "dry run: allowed by policy; engine=snowflake; with --apply datagrant would "
+            f"require {EXTRA_HINT} and ${SNOWFLAKE_DSN_ENV}; grant SQL is not implemented yet",
+        )
+        return EXIT_OK
+    try:
+        require_driver()
+        resolve_dsn(getattr(a, "snowflake_dsn", None))
+    except SnowflakeSetupError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
+    raise CliError(NOT_IMPLEMENTED, EXIT_USAGE)
+
+
 def cmd_request(ctx: Ctx) -> int:
     from datagrant.pg.grant import build_plan, ensure_state, new_password
     from datagrant.pg.mask import inspect_table
@@ -798,6 +829,8 @@ def cmd_request(ctx: Ctx) -> int:
     decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
     if not decision.allowed:
         return _refuse_request(ctx, req, policy, decision.reasons, caller)
+    if policy.datasets[req.dataset].engine == "snowflake":
+        return _snowflake_request(ctx, decision)
     two_person = decision.approval == "two-person"
     hash_key = (
         load_hash_key(resolve_key_path("hash", a.hash_key)) if _needs_hash(decision, cols) else None
@@ -1809,6 +1842,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--row-filter")
     r.add_argument("--duration", required=True, help="e.g. 30m, 2h")
     r.add_argument("--purpose", required=True)
+    r.add_argument(
+        "--snowflake-dsn",
+        help=f"Snowflake admin settings (default ${SNOWFLAKE_DSN_ENV}); ignored for postgres",
+    )
     r.add_argument(
         "--pending-ttl",
         default=None,
