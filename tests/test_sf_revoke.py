@@ -13,13 +13,19 @@ from datagrant import cli
 from datagrant.cli import EXIT_OK, EXIT_USAGE
 from datagrant.keys import init_keys, load_signing_key
 from datagrant.pg.grant import ReceiptSink
+from datagrant.receipt import ReceiptError
 from datagrant.sf.grant import GrantError
 from datagrant.sf.revoke import (
     ISSUING_GRACE_MINUTES,
     _claim,
+    _facts,
+    _fetchall,
+    _fetchone,
+    _parse_dt,
     due_grant_ids,
     expire_stale_requests,
     get_grant,
+    list_grants,
     pending_expired_ids,
     revoke,
     sweep,
@@ -125,11 +131,17 @@ class StoreConn:
         requests: dict[str, dict[str, Any]] | None = None,
         running_queries: dict[str, list[str]] | None = None,
         fail_on: str | None = None,
+        refuse_claim: bool = False,
+        hide_status: str | None = None,
+        history_rows: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self.grants = grants if grants is not None else {}
         self.requests = requests if requests is not None else {}
         self.running_queries = running_queries or {}
         self.fail_on = fail_on
+        self.refuse_claim = refuse_claim
+        self.hide_status = hide_status
+        self.history_rows = history_rows
         self.queries: list[tuple[str, Any]] = []
         self.rowcount = 0
         self._one: tuple[Any, ...] | None = None
@@ -166,8 +178,11 @@ class StoreConn:
         args: tuple[Any, ...] = () if params is None else tuple(params)
 
         if "QUERY_HISTORY" in su:
-            user = str(args[0]) if args else ""
-            self._rows = [(qid,) for qid in self.running_queries.get(user, [])]
+            if self.history_rows is not None:
+                self._rows = list(self.history_rows)
+            else:
+                user = str(args[0]) if args else ""
+                self._rows = [(qid,) for qid in self.running_queries.get(user, [])]
             return self
         if "SYSTEM$CANCEL_QUERY" in su:
             self.rowcount = 1
@@ -206,6 +221,9 @@ class StoreConn:
             extra_ok = True
             if "EXPIRES_AT <=" in su:
                 extra_ok = bool(row and row.get("expired", True))
+            if self.refuse_claim:
+                self.rowcount = 0
+                return
             if row is not None and row["status"] == from_status and extra_ok:
                 row["status"] = str(to_status)
                 self.rowcount = 1
@@ -221,6 +239,10 @@ class StoreConn:
     def _select_grants(self, su: str, args: tuple[Any, ...]) -> None:
         if "WHERE ID = ?" in su:
             row = self.grants.get(str(args[0]))
+            if row is not None and self.hide_status and row["status"] == self.hide_status:
+                self._one = None
+                self._rows = []
+                return
             self._one = _tuple(row, _GRANT_KEYS) if row is not None else None
             self._rows = [self._one] if self._one is not None else []
             return
@@ -473,3 +495,211 @@ def test_cli_sweep_apply_and_request_apply_still_refused(
     )
     assert code == EXIT_USAGE
     assert APPLY_UNAVAILABLE in out[0]
+
+
+class _ConnFetch:
+    def __init__(
+        self,
+        one: tuple[Any, ...] | None = None,
+        rows: list[tuple[Any, ...]] | None = None,
+    ) -> None:
+        self._one = one
+        self._rows = rows or []
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._one
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+
+def test_fetchone_and_fetchall_fall_back_to_conn() -> None:
+    conn = _ConnFetch(one=("gid", "active"), rows=[("a",), ("b",)])
+    assert _fetchone(None, conn) == ("gid", "active")
+    assert _fetchall(None, conn) == [("a",), ("b",)]
+
+    class EmptyResult:
+        def fetchone(self) -> None:
+            return None
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            return []
+
+    again = _ConnFetch(one=("from-conn",), rows=[("c",)])
+    assert _fetchone(EmptyResult(), again) == ("from-conn",)
+    assert _fetchall(EmptyResult(), again) == [("c",)]
+    assert _fetchone(object(), _ConnFetch(one=("no-attr",))) == ("no-attr",)
+    assert _fetchall(object(), _ConnFetch(rows=[("d",)])) == [("d",)]
+    assert _fetchone(None, object()) is None
+    assert _fetchall(None, object()) == []
+
+
+def test_parse_dt_accepts_isoformat_and_facts_column_shapes() -> None:
+    assert _parse_dt(NOW) is NOW
+    parsed = _parse_dt("2026-11-13T03:00:00+00:00")
+    assert parsed.year == 2026 and parsed.hour == 3
+    iso = "2026-11-13T03:00:00+00:00"
+    json_facts = _facts(grant_row(created_at=iso, expires_at=iso))
+    assert json_facts.columns == ("PATIENT_ID",)
+    bad = _facts(grant_row(columns="not-json"))
+    assert bad.columns == ()
+    listed = _facts(grant_row(columns=["PATIENT_ID", "SSN"]))
+    assert listed.columns == ("PATIENT_ID", "SSN")
+    empty = _facts(grant_row(columns=None))
+    assert empty.columns == ()
+
+
+def test_revoke_skips_null_query_ids_and_survives_cancel_errors(tmp_path: Path) -> None:
+    row = grant_row(columns=["PATIENT_ID"], created_at=NOW.isoformat(), expires_at=NOW.isoformat())
+    conn = StoreConn(
+        {GID: row},
+        history_rows=[(), (None,), ("qid-ok",)],
+        fail_on="SYSTEM$CANCEL_QUERY",
+    )
+    r = revoke(conn, GID, "manual", _sink(tmp_path))
+    assert r.outcome == "revoked"
+    assert r.sessions_terminated == 0
+    assert any("SYSTEM$CANCEL_QUERY" in s for s in _sqls(conn))
+    assert any(s.startswith("DROP USER") for s in _sqls(conn))
+    assert conn.grants[GID]["status"] == "revoked"
+
+
+def test_revoke_query_history_error_still_drops(tmp_path: Path) -> None:
+    conn = StoreConn({GID: grant_row()}, fail_on="QUERY_HISTORY")
+    r = revoke(conn, GID, "manual", _sink(tmp_path))
+    assert r.outcome == "revoked"
+    assert r.sessions_terminated == 0
+    assert any(s.startswith("DROP VIEW") for s in _sqls(conn))
+    assert conn.grants[GID]["status"] == "revoked"
+
+
+def test_revoke_unqualified_view_and_drop_failure_marks_failed(tmp_path: Path) -> None:
+    row = grant_row(view_name=f"G_{GID}")
+    conn = StoreConn({GID: row}, fail_on="DROP VIEW")
+    r = revoke(conn, GID, "manual", _sink(tmp_path))
+    assert r.outcome == "failed"
+    assert r.error is not None and "DROP VIEW" in r.error
+    assert conn.grants[GID]["status"] == "revoking"
+    assert conn.grants[GID]["last_error"]
+    assert "revoke_failed" in _events(tmp_path)
+
+
+def test_revoke_receipt_write_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sink = _sink(tmp_path)
+
+    def receipt_boom(*_a: Any, **_k: Any) -> None:
+        raise ReceiptError("receipt broke")
+
+    monkeypatch.setattr("datagrant.receipt.append", receipt_boom)
+    r = revoke(StoreConn({GID: grant_row()}), GID, "manual", sink)
+    assert r.outcome == "revoked"
+    assert r.receipt_error == "receipt broke"
+
+    def other_boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("datagrant.receipt.append", other_boom)
+    other = "bbbbbbbbbbbb"
+    r2 = revoke(StoreConn({other: grant_row(id=other)}), other, "manual", sink)
+    assert r2.outcome == "revoked"
+    assert r2.receipt_error == "disk full"
+
+
+def test_revoke_active_not_yet_due_is_noop() -> None:
+    conn = StoreConn({GID: grant_row(status="active", expired=False)})
+    r = revoke(conn, GID, "expired")
+    assert r.outcome == "noop"
+    assert conn.grants[GID]["status"] == "active"
+    assert not any(s.startswith("DROP USER") for s in _sqls(conn))
+
+
+def test_revoke_issuing_claim_miss_and_hidden_row(tmp_path: Path) -> None:
+    missed = StoreConn({GID: grant_row(status="issuing")}, refuse_claim=True)
+    r = revoke(missed, GID, "stale_issuing")
+    assert r.outcome == "noop"
+    assert missed.grants[GID]["status"] == "issuing"
+    hidden = StoreConn(
+        {GID: grant_row(status="issuing")},
+        hide_status="sweeping",
+    )
+    r2 = revoke(hidden, GID, "stale_issuing", _sink(tmp_path))
+    assert r2.outcome == "revoked"
+    assert hidden.grants[GID]["status"] == "failed"
+    mystery = StoreConn({GID: grant_row(status="mystery")})
+    r3 = revoke(mystery, GID, "manual")
+    assert r3.outcome == "noop"
+    assert mystery.grants[GID]["status"] == "mystery"
+
+
+def test_revoke_issuing_manual_and_stale_cleanup(tmp_path: Path) -> None:
+    sink = _sink(tmp_path)
+    conn = StoreConn({GID: grant_row(status="issuing")})
+    r = revoke(conn, GID, "manual", sink)
+    assert r.outcome == "revoked"
+    assert conn.grants[GID]["status"] == "revoked"
+    assert "revoked" in _events(tmp_path)
+    other = "cccccccccccc"
+    stale = StoreConn({other: grant_row(id=other, status="issuing")})
+    r2 = revoke(stale, other, "stale_issuing", sink)
+    assert r2.outcome == "revoked"
+    assert stale.grants[other]["status"] == "failed"
+
+
+def test_sweep_skips_duplicate_ids_and_retries_inflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    due_id = "aaaaaaaaaaaa"
+    stale_id = "bbbbbbbbbbbb"
+    inflight_id = "cccccccccccc"
+    store = {
+        due_id: grant_row(id=due_id, status="active", expired=True),
+        stale_id: grant_row(id=stale_id, status="issuing", stale=True, expired=False),
+        inflight_id: grant_row(id=inflight_id, status="revoking", expired=False),
+    }
+    conn = StoreConn(store)
+    import datagrant.sf.revoke as rv
+
+    real = rv._list_ids
+
+    def overlapping(c: Any, sql: str, params: tuple[Any, ...]) -> list[str]:
+        ids = real(c, sql, params)
+        su = sql.upper()
+        if "STATUS IN" in su:
+            return [due_id, inflight_id]
+        if params and params[0] == "active":
+            return [due_id, due_id]
+        if params and params[0] == "issuing":
+            return [due_id, stale_id]
+        return ids
+
+    monkeypatch.setattr(rv, "_list_ids", overlapping)
+    results = sweep(conn, _sink(tmp_path))
+    by_id = {r.grant_id: r.outcome for r in results}
+    assert list(by_id) == [due_id, stale_id, inflight_id]
+    assert by_id[due_id] == "revoked"
+    assert by_id[stale_id] == "revoked"
+    assert by_id[inflight_id] == "revoked"
+    assert store[due_id]["status"] == "expired"
+    assert store[stale_id]["status"] == "failed"
+    assert store[inflight_id]["status"] == "revoked"
+
+
+def test_list_grants_all_and_cli_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    active = grant_row()
+    done = grant_row(id="dddddddddddd", status="revoked", expired=False)
+    conn = StoreConn({GID: active, "dddddddddddd": done})
+    only_active = list_grants(conn, active_only=True)
+    assert [r["id"] for r in only_active] == [GID]
+    every = list_grants(conn, active_only=False)
+    assert {r["id"] for r in every} == {GID, "dddddddddddd"}
+    _cli_env(tmp_path, monkeypatch, conn)
+    out: list[str] = []
+    assert cli.main(["grant", "status", GID, "--json"], out.append) == EXIT_OK
+    body = json.loads(out[0])
+    assert body["id"] == GID
+    assert body["status"] == "active"
+    out = []
+    assert cli.main(["grant", "list", "--all", "--json"], out.append) == EXIT_OK
+    listed = json.loads(out[0])
+    assert listed["engine"] == "snowflake"
+    assert {g["id"] for g in listed["grants"]} == {GID, "dddddddddddd"}
