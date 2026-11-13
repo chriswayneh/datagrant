@@ -591,12 +591,36 @@ def _concurrent_reason(conn: Any, policy: Any, requester: str, dataset: str) -> 
         n = count_active_grants(conn, requester)
     except UndefinedTable:
         n = 0
+    return _cap_message(requester, n, cap)
+
+
+def _sf_concurrent_reason(conn: Any, policy: Any, requester: str, dataset: str) -> str | None:
+    cap = policy.concurrent_grant_cap(dataset)
+    if cap is None:
+        return None
+    from datagrant.sf.grant import count_live_grants
+
+    n = count_live_grants(conn, requester, dataset)
+    return _cap_message(requester, n, cap)
+
+
+def _cap_message(requester: str, n: int, cap: int) -> str | None:
     if n >= cap:
         return (
             f"requester {requester!r} already has {n} active grant(s) "
             f"(max_concurrent_grants is {cap})"
         )
     return None
+
+
+def _sf_warehouse(args: argparse.Namespace) -> str | None:
+    from datagrant.snowflake_support import SnowflakeSetupError, _dsn_kwargs, resolve_dsn
+
+    try:
+        warehouse = _dsn_kwargs(resolve_dsn(getattr(args, "snowflake_dsn", None))).get("warehouse")
+    except SnowflakeSetupError:
+        return None
+    return warehouse if isinstance(warehouse, str) else None
 
 
 def _redact_text(ctx: Ctx, text: str) -> str:
@@ -943,12 +967,12 @@ def _snowflake_request(
         apply_plan,
         build_plan,
         create_pending,
+        ensure_state,
         new_keypair,
     )
     from datagrant.snowflake_support import (
         EXTRA_HINT,
         SnowflakeSetupError,
-        _dsn_kwargs,
         require_driver,
         resolve_dsn,
     )
@@ -958,16 +982,17 @@ def _snowflake_request(
     if req.row_filter is not None:
         return _refuse_request(ctx, req, policy, [ROW_FILTER_UNAVAILABLE], caller)
     two_person = decision.approval == "two-person"
+    if two_person and policy.approvals_required > 1:
+        raise CliError(
+            "Snowflake grants with approvals_required > 1 are not implemented yet",
+            EXIT_USAGE,
+        )
     hash_key = (
         load_hash_key(resolve_key_path("hash", a.hash_key))
         if _needs_hash(decision, req.columns)
         else None
     )
-    warehouse = None
-    try:
-        warehouse = _dsn_kwargs(resolve_dsn(getattr(a, "snowflake_dsn", None))).get("warehouse")
-    except SnowflakeSetupError:
-        warehouse = None
+    warehouse = _sf_warehouse(a)
     if not a.apply:
         plan = build_plan(
             decision,
@@ -1006,6 +1031,10 @@ def _snowflake_request(
         raise CliError(str(exc), EXIT_USAGE) from None
     try:
         with _sf_session(a) as conn:
+            ensure_state(conn)
+            cap_reason = _sf_concurrent_reason(conn, policy, req.requester, req.dataset)
+            if cap_reason:
+                return _refuse_request(ctx, req, policy, [cap_reason], caller)
             pair = new_keypair()
             sink = _sink(a)
             _check_outbox(ctx, sink)
@@ -1052,7 +1081,12 @@ def _snowflake_request(
                 requester_identity=caller.receipt_dict(),
                 private_pem=pair.private_pem,
             )
-            apply_plan(conn, plan, sink)
+            apply_plan(
+                conn,
+                plan,
+                sink,
+                max_concurrent=policy.concurrent_grant_cap(req.dataset),
+            )
             _deliver_sf_issued(ctx, conn, plan, sink)
             return _print_sf_grant(ctx, plan, pair.private_pem, req.requester, caller.source)
     except GrantError as exc:
@@ -1068,6 +1102,7 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
         ROW_FILTER_UNAVAILABLE,
         GrantError,
         build_plan,
+        ensure_state,
         get_pending,
         issue_approved,
     )
@@ -1163,11 +1198,55 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                     _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
                     raise CliError(msg, EXIT_FAILED)
             reasons = policy.can_approve(approver, req.requester, extra_groups=caller.mapped_groups)
-            decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
+            if (
+                policy.identity.mode == "oidc"
+                and isinstance(req_meta, dict)
+                and (caller.iss, caller.sub) == (req_meta.get("iss"), req_meta.get("sub"))
+                and "approver must be a different person than the requester" not in reasons
+            ):
+                reasons.insert(0, "approver must be a different person than the requester")
+            req_extra: frozenset[str] = frozenset()
+            if policy.identity.mode == "oidc" and isinstance(req_meta, dict):
+                same_gclaim = (
+                    "groups_claim" in req_meta
+                    and req_meta.get("groups_claim") == policy.identity.groups_claim
+                )
+                raw_idp_g = req_meta.get("idp_groups", ()) if same_gclaim else ()
+                idp_gs = (
+                    [g for g in raw_idp_g if isinstance(g, str)]
+                    if isinstance(raw_idp_g, list)
+                    else []
+                )
+                if policy.identity.allowed_groups and not (
+                    set(idp_gs) & policy.identity.allowed_groups
+                ):
+                    reasons.append(
+                        "request no longer allowed: requester is not in "
+                        "policy.identity.allowed_groups"
+                    )
+                req_extra = frozenset(
+                    policy.identity.group_map[g] for g in idp_gs if g in policy.identity.group_map
+                )
+            decision = evaluate(policy, req, extra_groups=req_extra)
             if not decision.allowed:
                 reasons += [f"request no longer allowed: {r}" for r in decision.reasons]
+            rule = ds.tables.get(req.table) if ds is not None else None
+            if rule is not None:
+                reasons.extend(
+                    policy.sod_reasons(
+                        req.requester,
+                        approver,
+                        rule.allowed_groups,
+                        requester_extra=req_extra,
+                        approver_extra=caller.mapped_groups,
+                    )
+                )
             if reasons:
                 return _refuse_approve(ctx, pending, policy, reasons, caller)
+            ensure_state(conn)
+            cap_reason = _sf_concurrent_reason(conn, policy, req.requester, req.dataset)
+            if cap_reason:
+                return _refuse_approve(ctx, pending, policy, [cap_reason], caller)
             if policy.approvals_required > 1:
                 raise CliError(
                     "Snowflake grants with approvals_required > 1 are not implemented yet",
@@ -1183,6 +1262,7 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                 req,
                 database=ds.database,
                 schema=ds.schema,
+                warehouse=_sf_warehouse(a),
                 public_body=str(row["rsa_public_key"]),
                 fingerprint=str(row["public_key_fingerprint"]),
                 hash_key=hash_key,
@@ -1208,7 +1288,14 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                 return EXIT_OK
             sink = _sink(a)
             _check_outbox(ctx, sink)
-            issue_approved(conn, plan, pending.id, approver=approver, receipts=sink)
+            issue_approved(
+                conn,
+                plan,
+                pending.id,
+                approver=approver,
+                receipts=sink,
+                max_concurrent=policy.concurrent_grant_cap(req.dataset),
+            )
             try:
                 _deliver_sf_issued(ctx, conn, plan, sink)
             except BaseException:

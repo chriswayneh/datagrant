@@ -127,11 +127,18 @@ def test_snowflake_apply_missing_dsn(
 
 
 class _FakeSf:
-    def __init__(self, pending_row: tuple[Any, ...] | None = None, rowcount: int = 1) -> None:
+    def __init__(
+        self,
+        pending_row: tuple[Any, ...] | None = None,
+        rowcount: int = 1,
+        live_count: int = 0,
+    ) -> None:
         self.queries: list[tuple[str, Any]] = []
         self.pending_row = pending_row
         self.rowcount = rowcount
+        self.live_count = live_count
         self.fail_on: str | None = None
+        self._one: tuple[Any, ...] | None = pending_row
 
     def cursor(self) -> _FakeSf:
         return self
@@ -140,10 +147,21 @@ class _FakeSf:
         self.queries.append((sql, params))
         if self.fail_on and self.fail_on.upper() in sql.upper():
             raise RuntimeError(f"stub:{self.fail_on}")
+        su = sql.upper()
+        if "COUNT(" in su and "GRANTS" in su:
+            n = self.live_count
+            if any(
+                q[0].upper().startswith("INSERT") and "GRANTS" in q[0].upper()
+                for q in self.queries[:-1]
+            ):
+                n += 1
+            self._one = (n,)
+        else:
+            self._one = self.pending_row
         return self
 
     def fetchone(self) -> tuple[Any, ...] | None:
-        return self.pending_row
+        return self._one
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return []
@@ -185,6 +203,7 @@ def test_snowflake_apply_issues_grant(
     sqls = [s for s, _p in conn.queries]
     assert any(s.startswith("CREATE USER") for s in sqls)
     assert any("DISABLED = FALSE" in s for s in sqls)
+    assert any('GRANT USAGE ON WAREHOUSE "WH"' in s for s in sqls)
     assert all("BEGIN PRIVATE KEY" not in s for s in sqls)
     recs = [
         json.loads(line)["receipt"]
@@ -581,10 +600,15 @@ def _pending_tuple(*, status: str = "pending") -> tuple[Any, ...]:
 
 
 def _approve_apply(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conn: _FakeSf
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    conn: _FakeSf,
+    *,
+    policy: Path | None = None,
+    as_user: str = "carol",
 ) -> tuple[int, str]:
     _sf_keys(tmp_path, monkeypatch, conn)
-    path = _two_person_policy(tmp_path)
+    path = policy or _two_person_policy(tmp_path)
     out: list[str] = []
     code = cli.main(
         [
@@ -594,7 +618,7 @@ def _approve_apply(
             "--policy",
             str(path),
             "--as-user",
-            "carol",
+            as_user,
             "--json",
         ],
         out.append,
@@ -633,3 +657,219 @@ def test_snowflake_approve_apply_failure_marks_request_failed(
     code, _body = _approve_apply(tmp_path, monkeypatch, conn)
     assert code == EXIT_FAILED
     assert any(p == ("failed", "aabbccddeeff") for _s, p in conn.queries)
+
+
+def _receipt_events(tmp_path: Path) -> list[dict[str, Any]]:
+    log = tmp_path / "r.jsonl"
+    if not log.exists():
+        return []
+    return [json.loads(line)["receipt"] for line in log.read_text().splitlines() if line.strip()]
+
+
+def _policy_text(*, two_person: bool = False, top: str = "", table_extra: str = "") -> str:
+    text = MIXED
+    if two_person:
+        text = text.replace("approval: auto", "approval: two-person").replace(
+            "groups:\n  ml: [alice]\n",
+            "approvers: [sec]\ngroups:\n  ml: [alice]\n  sec: [carol]\n",
+        )
+    if top:
+        text = text.replace("version: 1\n", f"version: 1\n{top}\n")
+    if table_extra:
+        text = text.replace(
+            "columns: {PATIENT_ID: passthrough, SSN: hash}",
+            "columns: {PATIENT_ID: passthrough, SSN: hash}\n" + table_extra,
+        )
+    return text
+
+
+def _write_policy(tmp_path: Path, text: str, name: str = "p.yaml") -> Path:
+    path = tmp_path / name
+    path.write_text(text)
+    path.chmod(0o600)
+    return path
+
+
+def test_snowflake_apply_over_concurrent_cap_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(live_count=1)
+    _sf_keys(tmp_path, monkeypatch, conn)
+    path = _write_policy(tmp_path, _policy_text(top="max_concurrent_grants: 1"))
+    out: list[str] = []
+    code = cli.main([*SF_REQ, "--policy", str(path), "--apply", "--json"], out.append)
+    assert code == EXIT_FAILED
+    body = json.loads(out[0])
+    assert body["allowed"] is False
+    assert any("max_concurrent_grants" in r for r in body["reasons"])
+    assert not any(s.startswith("CREATE USER") for s, _p in conn.queries)
+    recs = _receipt_events(tmp_path)
+    assert recs and recs[0]["event"] == "denied"
+    count = next(s for s, _p in conn.queries if "COUNT(" in s)
+    assert "REQUESTER = ?" in count and "DATASET = ?" in count
+    assert "STATUS IN (?, ?, ?)" in count
+
+
+def test_snowflake_approve_over_concurrent_cap_not_approved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(pending_row=_pending_tuple(), live_count=1)
+    path = _write_policy(
+        tmp_path, _policy_text(two_person=True, top="max_concurrent_grants: 1"), "two.yaml"
+    )
+    code, body = _approve_apply(tmp_path, monkeypatch, conn, policy=path)
+    assert code == EXIT_FAILED
+    denied = json.loads(body)
+    assert denied.get("approved") is False
+    assert any("max_concurrent_grants" in r for r in denied["reasons"])
+    assert not any(s.startswith("CREATE USER") for s, _p in conn.queries)
+    recs = _receipt_events(tmp_path)
+    assert recs and recs[0]["event"] == "not_approved"
+
+
+def test_snowflake_approve_passes_dsn_warehouse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(pending_row=_pending_tuple())
+    _sf_keys(tmp_path, monkeypatch, conn)
+    monkeypatch.setenv(SNOWFLAKE_DSN_ENV, "snowflake://svc@xy12345/CLINIC_DB?warehouse=WH")
+    path = _two_person_policy(tmp_path)
+    out: list[str] = []
+    code = cli.main(
+        [
+            "approve",
+            "aabbccddeeff",
+            "--apply",
+            "--policy",
+            str(path),
+            "--as-user",
+            "carol",
+            "--json",
+        ],
+        out.append,
+    )
+    assert code == EXIT_OK
+    assert any('GRANT USAGE ON WAREHOUSE "WH"' in s for s, _p in conn.queries)
+
+
+def test_snowflake_request_duration_and_max_columns_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf()
+    _sf_keys(tmp_path, monkeypatch, conn)
+    path = _write_policy(
+        tmp_path,
+        _policy_text(table_extra="        max_columns: 1"),
+    )
+    out: list[str] = []
+    long_req = [
+        *SF_REQ[: SF_REQ.index("--duration") + 1],
+        "24h",
+        *SF_REQ[SF_REQ.index("--duration") + 2 :],
+        "--policy",
+        str(path),
+        "--apply",
+        "--json",
+    ]
+    assert cli.main(long_req, out.append) == EXIT_FAILED
+    body = json.loads(out[0])
+    assert body["allowed"] is False
+    assert any("exceeds max" in r for r in body["reasons"])
+    out = []
+    wide = [
+        *SF_REQ[: SF_REQ.index("--columns") + 1],
+        "PATIENT_ID,SSN",
+        *SF_REQ[SF_REQ.index("--columns") + 2 :],
+        "--policy",
+        str(path),
+        "--apply",
+        "--json",
+    ]
+    assert cli.main(wide, out.append) == EXIT_FAILED
+    wide_body = json.loads(out[0])
+    assert any("max_columns" in r for r in wide_body["reasons"])
+    recs = _receipt_events(tmp_path)
+    assert recs and recs[0]["event"] == "denied"
+
+
+def test_snowflake_approve_self_and_distinct_groups_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf(pending_row=_pending_tuple())
+    code, body = _approve_apply(tmp_path, monkeypatch, conn, as_user="alice")
+    assert code == EXIT_FAILED
+    denied = json.loads(body)
+    assert denied.get("approved") is False
+    assert any("different person" in r for r in denied["reasons"])
+    sod = _policy_text(two_person=True, top="separation_of_duties: distinct-groups")
+    sod = sod.replace("ml: [alice]", "ml: [alice, carol]")
+    conn2 = _FakeSf(pending_row=_pending_tuple())
+    monkeypatch.setattr("datagrant.snowflake_support.connect", lambda dsn: conn2)
+    path = _write_policy(tmp_path, sod, "sod.yaml")
+    out: list[str] = []
+    code = cli.main(
+        [
+            "approve",
+            "aabbccddeeff",
+            "--apply",
+            "--policy",
+            str(path),
+            "--as-user",
+            "carol",
+            "--json",
+        ],
+        out.append,
+    )
+    assert code == EXIT_FAILED
+    sod_body = json.loads(out[0])
+    assert any("distinct-groups" in r for r in sod_body["reasons"])
+    recs = _receipt_events(tmp_path)
+    assert recs and recs[-1]["event"] == "not_approved"
+
+
+def test_snowflake_quorum_not_implemented(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _FakeSf(pending_row=_pending_tuple())
+    _sf_keys(tmp_path, monkeypatch, conn)
+    path = _write_policy(
+        tmp_path,
+        _policy_text(two_person=True, top="approvals_required: 2"),
+        "q.yaml",
+    )
+    out: list[str] = []
+    code = cli.main([*SF_REQ, "--policy", str(path), "--apply", "--json"], out.append)
+    assert code == EXIT_USAGE
+    assert "approvals_required > 1" in out[0]
+    assert not any(s.startswith('INSERT INTO "DATAGRANT"."REQUESTS"') for s, _p in conn.queries)
+    out = []
+    code = cli.main(
+        [
+            "approve",
+            "aabbccddeeff",
+            "--apply",
+            "--policy",
+            str(path),
+            "--as-user",
+            "carol",
+            "--json",
+        ],
+        out.append,
+    )
+    assert code == EXIT_USAGE
+    assert "approvals_required > 1" in out[0]
+    assert not any(s.startswith("CREATE USER") for s, _p in conn.queries)
+
+
+def test_snowflake_pending_ttl_over_cap_is_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _FakeSf()
+    _sf_keys(tmp_path, monkeypatch, conn)
+    path = _write_policy(tmp_path, _policy_text(two_person=True, top="pending_ttl: 1h"), "ttl.yaml")
+    out: list[str] = []
+    code = cli.main(
+        [*SF_REQ, "--policy", str(path), "--pending-ttl", "2h", "--apply", "--json"],
+        out.append,
+    )
+    assert code == EXIT_USAGE
+    assert "pending_ttl" in out[0]
+    assert conn.queries == []
