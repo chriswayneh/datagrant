@@ -94,15 +94,22 @@ class FakeConn:
         args: tuple[Any, ...] = () if params is None else tuple(params)
         if "GRANTS" in su and su.startswith("INSERT") and args:
             self.status[str(args[0])] = str(args[15]) if len(args) > 15 else "issuing"
-        elif "GRANTS" in su and su.startswith("UPDATE") and "AND STATUS" in su and len(args) >= 3:
-            to_status, gid, from_status = str(args[0]), str(args[1]), str(args[2])
-            if (self.flip_before, to_status) in {("enable", "enabling"), ("active", "active")}:
-                self.status[gid] = "revoked"
-            if self.status.get(gid, from_status) == from_status:
-                self.status[gid] = to_status
-                self.rowcount = 1
+        elif "GRANTS" in su and su.startswith("UPDATE") and "AND STATUS" in su and args:
+            from_status = str(args[-1])
+            gid = str(args[-2])
+            if "SET STATUS" in su:
+                to_status = str(args[0])
+                if (self.flip_before, to_status) in {("enable", "enabling"), ("active", "active")}:
+                    self.status[gid] = "revoked"
+                if self.status.get(gid, from_status) == from_status:
+                    self.status[gid] = to_status
+                    self.rowcount = 1
+                else:
+                    self.rowcount = 0
             else:
-                self.rowcount = 0
+                if self.flip_before == "update":
+                    self.status[gid] = "revoked"
+                self.rowcount = 1 if self.status.get(gid, from_status) == from_status else 0
         elif "GRANTS" in su and su.startswith("UPDATE") and "SET STATUS" in su and len(args) >= 2:
             gid = str(args[1])
             self.status[gid] = str(args[0])
@@ -175,6 +182,10 @@ def test_plan_sql_order_and_invariants() -> None:
     assert any(s.startswith('GRANT USAGE ON SCHEMA "DATAGRANT_VIEWS" TO ROLE') for s in text)
     assert not any("GRANT USAGE ON WAREHOUSE" in s for s in text)
     assert f'GRANT SELECT ON "DATAGRANT"."{HASH_TABLE}"' not in blob
+    names = plan.statements[-4]
+    assert isinstance(names, Bound)
+    assert names.params[-2:] == ("abcdef012345", "issuing")
+    assert "AND STATUS = ?" in names.sql
     enabling = plan.statements[-3]
     assert isinstance(enabling, Bound)
     assert enabling.params == ("enabling", "abcdef012345", "issuing")
@@ -204,6 +215,11 @@ def test_apply_enable_last_then_active(tmp_path: Path) -> None:
     sqls = _sqls(conn)
     insert_i = next(i for i, s in enumerate(sqls) if 'INSERT INTO "DATAGRANT"."GRANTS"' in s)
     user_i = next(i for i, s in enumerate(sqls) if s.startswith("CREATE USER"))
+    names_i = next(
+        i
+        for i, (_s, p) in enumerate(conn.queries)
+        if p and p[-2:] == ("abcdef012345", "issuing") and "ROLE_NAME" in str(_s)
+    )
     enabling_i = next(
         i for i, (_s, p) in enumerate(conn.queries) if p == ("enabling", "abcdef012345", "issuing")
     )
@@ -211,7 +227,7 @@ def test_apply_enable_last_then_active(tmp_path: Path) -> None:
     active_i = next(
         i for i, (_s, p) in enumerate(conn.queries) if p == ("active", "abcdef012345", "enabling")
     )
-    assert insert_i < user_i < enabling_i < enable_i < active_i
+    assert insert_i < user_i < names_i < enabling_i < enable_i < active_i
     assert conn.status["abcdef012345"] == "active"
     lines = (tmp_path / "r.jsonl").read_text().strip().splitlines()
     body = json.loads(lines[0])["receipt"]
@@ -547,6 +563,18 @@ def _receipt_events(tmp_path: Path) -> list[str]:
         for line in log.read_text().splitlines()
         if line.strip()
     ]
+
+
+def test_revoked_row_before_names_update_reverse_drops(tmp_path: Path) -> None:
+    conn = FakeConn(flip_before="update")
+    with pytest.raises(GrantError, match="not issuing at row update"):
+        apply_plan(conn, _plan(), _sink(tmp_path))
+    sqls = _sqls(conn)
+    assert any("ROLE_NAME" in s and "AND STATUS = ?" in s for s in sqls)
+    assert not any("DISABLED = FALSE" in s for s in sqls)
+    assert any("DROP USER" in s for s in sqls)
+    assert conn.status["abcdef012345"] == "failed"
+    assert _receipt_events(tmp_path) == []
 
 
 def test_revoked_row_before_enable_does_not_enable(tmp_path: Path) -> None:

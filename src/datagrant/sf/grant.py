@@ -292,9 +292,9 @@ def build_plan(
     update_row = Bound(
         (
             f"UPDATE {q(STATE_SCHEMA)}.{q('GRANTS')} SET ROLE_NAME = ?, VIEW_NAME = ?,"  # nosec B608
-            " USER_NAME = ?, PUBLIC_KEY_FINGERPRINT = ? WHERE ID = ?"
+            " USER_NAME = ?, PUBLIC_KEY_FINGERPRINT = ? WHERE ID = ? AND STATUS = ?"
         ),
-        (role, view_name, user, fingerprint, gid),
+        (role, view_name, user, fingerprint, gid, "issuing"),
     )
     enabling = Bound(
         (
@@ -465,7 +465,9 @@ def apply_plan(
             _exec(conn, stmt)
         if plan.hash_key is not None:
             _bind_hash_key(conn, plan.hash_key)
-        insert_sql, create_user, *middle, enabling_sql, enable_sql, active_sql = plan.statements
+        insert_sql, create_user, *middle, update_sql, enabling_sql, enable_sql, active_sql = (
+            plan.statements
+        )
         _run(conn, insert_sql)
         created = True
         _run(conn, create_user)
@@ -474,6 +476,10 @@ def apply_plan(
             raise GrantError("private key must not appear in CREATE USER SQL")
         for item in middle:
             _run(conn, item)
+        updated = _run(conn, update_sql)
+        if _rowcount(updated, conn) != 1:
+            reverse_drop(conn, plan, enabled=False)
+            raise GrantError(f"grant {plan.grant_id}: not issuing at row update; objects dropped")
         if receipts is None:
             raise GrantError(f"grant {plan.grant_id}: issued receipt is required before ENABLE")
         if plan.facts is None:

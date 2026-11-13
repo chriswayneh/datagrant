@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from datagrant import cli
-from datagrant.cli import EXIT_OK, EXIT_USAGE
+from datagrant.cli import EXIT_OK, EXIT_REVOKE_FAILED, EXIT_USAGE
 from datagrant.keys import init_keys, load_signing_key
 from datagrant.pg.grant import ReceiptSink
 from datagrant.receipt import ReceiptError
@@ -286,27 +286,21 @@ def _sqls(conn: StoreConn) -> list[str]:
     return [s for s, _p in conn.queries]
 
 
-def test_revoke_disable_cancel_drop_order_and_receipt(tmp_path: Path) -> None:
+def test_revoke_disable_then_drop_order_and_receipt(tmp_path: Path) -> None:
     row = grant_row()
-    conn = StoreConn({GID: row}, running_queries={f"DG_{GID}": ["qid-1"]})
+    conn = StoreConn({GID: row})
     r = revoke(conn, GID, "manual", _sink(tmp_path))
     assert r.outcome == "revoked"
-    assert r.sessions_terminated == 1
+    assert r.sessions_terminated == 0
     assert conn.grants[GID]["status"] == "revoked"
     sqls = _sqls(conn)
     dis = next(i for i, s in enumerate(sqls) if "DISABLED = TRUE" in s)
-    hist = next(i for i, s in enumerate(sqls) if "QUERY_HISTORY" in s)
-    cancel = next(i for i, s in enumerate(sqls) if "SYSTEM$CANCEL_QUERY" in s)
+    assert "IF EXISTS" in sqls[dis]
     view = next(i for i, s in enumerate(sqls) if s.startswith("DROP VIEW"))
     role = next(i for i, s in enumerate(sqls) if s.startswith("DROP ROLE"))
     user = next(i for i, s in enumerate(sqls) if s.startswith("DROP USER"))
-    assert dis < hist < cancel < view < role < user
-    hist_sql, hist_params = conn.queries[hist]
-    assert "?" in hist_sql and "DG_" not in hist_sql
-    assert hist_params == (f"DG_{GID}", "RUNNING")
-    cancel_sql, cancel_params = conn.queries[cancel]
-    assert cancel_sql == "SELECT SYSTEM$CANCEL_QUERY(?)"
-    assert cancel_params == ("qid-1",)
+    assert dis < view < role < user
+    assert not any("QUERY_HISTORY" in s or "CANCEL_QUERY" in s for s in sqls)
     assert _events(tmp_path) == ["revoked"]
     body = json.loads((tmp_path / "r.jsonl").read_text().splitlines()[0])["receipt"]
     assert body["details"]["engine"] == "snowflake"
@@ -325,9 +319,10 @@ def test_revoke_idempotent_and_unknown() -> None:
 
 def test_revoke_partial_grant_missing_user(tmp_path: Path) -> None:
     row = grant_row(user_name=None, role_name=None, view_name=None)
-    conn = StoreConn({GID: row}, fail_on="ALTER USER")
+    conn = StoreConn({GID: row})
     r = revoke(conn, GID, "manual", _sink(tmp_path))
     assert r.outcome == "revoked"
+    assert any("ALTER USER IF EXISTS" in s for s in _sqls(conn))
     blob = "\n".join(_sqls(conn))
     assert f'DROP VIEW IF EXISTS "DATAGRANT_VIEWS"."G_{GID}"' in blob
     assert f'DROP ROLE IF EXISTS "DG_R_{GID}"' in blob
@@ -447,6 +442,20 @@ def test_cli_revoke_sweep_list_with_snowflake_dsn(
     assert "revoked" in _events(tmp_path)
 
 
+def test_cli_revoke_disable_failure_is_exit_4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = StoreConn({GID: grant_row()}, fail_on="ALTER USER")
+    _cli_env(tmp_path, monkeypatch, conn)
+    out: list[str] = []
+    code = cli.main(["revoke", GID, "--apply", "--json"], out.append)
+    assert code == EXIT_REVOKE_FAILED
+    body = json.loads(out[0])
+    assert body["outcome"] == "failed"
+    assert "revoke_failed" in _events(tmp_path)
+    assert not any(s.startswith("DROP USER") for s in _sqls(conn))
+
+
 def test_cli_sweep_apply_and_request_apply_still_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,28 +562,15 @@ def test_parse_dt_accepts_isoformat_and_facts_column_shapes() -> None:
     assert empty.columns == ()
 
 
-def test_revoke_skips_null_query_ids_and_survives_cancel_errors(tmp_path: Path) -> None:
-    row = grant_row(columns=["PATIENT_ID"], created_at=NOW.isoformat(), expires_at=NOW.isoformat())
-    conn = StoreConn(
-        {GID: row},
-        history_rows=[(), (None,), ("qid-ok",)],
-        fail_on="SYSTEM$CANCEL_QUERY",
-    )
+def test_revoke_disable_failure_writes_revoke_failed(tmp_path: Path) -> None:
+    conn = StoreConn({GID: grant_row()}, fail_on="ALTER USER")
     r = revoke(conn, GID, "manual", _sink(tmp_path))
-    assert r.outcome == "revoked"
-    assert r.sessions_terminated == 0
-    assert any("SYSTEM$CANCEL_QUERY" in s for s in _sqls(conn))
-    assert any(s.startswith("DROP USER") for s in _sqls(conn))
-    assert conn.grants[GID]["status"] == "revoked"
-
-
-def test_revoke_query_history_error_still_drops(tmp_path: Path) -> None:
-    conn = StoreConn({GID: grant_row()}, fail_on="QUERY_HISTORY")
-    r = revoke(conn, GID, "manual", _sink(tmp_path))
-    assert r.outcome == "revoked"
-    assert r.sessions_terminated == 0
-    assert any(s.startswith("DROP VIEW") for s in _sqls(conn))
-    assert conn.grants[GID]["status"] == "revoked"
+    assert r.outcome == "failed"
+    assert r.error is not None and "ALTER USER" in r.error
+    assert conn.grants[GID]["status"] == "revoking"
+    assert conn.grants[GID]["last_error"]
+    assert not any(s.startswith("DROP USER") for s in _sqls(conn))
+    assert "revoke_failed" in _events(tmp_path)
 
 
 def test_revoke_unqualified_view_and_drop_failure_marks_failed(tmp_path: Path) -> None:

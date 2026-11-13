@@ -1,11 +1,12 @@
 """Snowflake revoke and sweep (M4 construction PR 3).
 
-DISABLE the grant user first, cancel its queries, then DROP VIEW / ROLE / USER
-(IF EXISTS) so a partial issuing or enabling row is safe. Claim the grants row
-with qmark binds and a rowcount check so two sweeps cannot double-revoke.
-Issuing and enabling rows younger than 10 minutes are skipped; older ones are
-dropped and marked failed. Pending request TTL expiry does not drop Snowflake
-objects.
+DISABLE the grant user first (`ALTER USER IF EXISTS ... SET DISABLED = TRUE`;
+that aborts the user's queries), then DROP VIEW / ROLE / USER IF EXISTS so a
+partial issuing or enabling row is safe. A DISABLE error fails closed
+(`revoke_failed`, exit 4). Claim the grants row with qmark binds and a rowcount
+check so two sweeps cannot double-revoke. Issuing and enabling rows younger
+than 10 minutes are skipped; older ones are dropped and marked failed. Pending
+request TTL expiry does not drop Snowflake objects.
 """
 
 from __future__ import annotations
@@ -216,38 +217,14 @@ def _set_status(
 
 
 def drop_grant_objects(conn: Any, row: dict[str, Any]) -> int:
-    """DISABLE, cancel queries, then DROP VIEW / ROLE / USER IF EXISTS."""
+    """DISABLE IF EXISTS (aborts queries), then DROP VIEW / ROLE / USER IF EXISTS."""
     user, role, view = _names(row)
     schema, view_name = (view.split(".", 1) + [view])[:2] if "." in view else (VIEW_SCHEMA, view)
-    try:
-        _exec(conn, f"ALTER USER {q(user)} SET DISABLED = TRUE")
-    except Exception:  # noqa: BLE001, S110  # nosec B110
-        pass
-    cancelled = 0
-    try:
-        result = _exec(
-            conn,
-            (
-                "SELECT QUERY_ID FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY())"
-                " WHERE USER_NAME = ? AND EXECUTION_STATUS = ?"
-            ),
-            (user, "RUNNING"),
-        )
-        for qrow in _fetchall(result, conn):
-            qid = qrow[0] if qrow else None
-            if qid is None:
-                continue
-            try:
-                _exec(conn, "SELECT SYSTEM$CANCEL_QUERY(?)", (str(qid),))
-                cancelled += 1
-            except Exception:  # noqa: BLE001, S110  # nosec B110
-                pass
-    except Exception:  # noqa: BLE001, S110  # nosec B110
-        pass
+    _exec(conn, f"ALTER USER IF EXISTS {q(user)} SET DISABLED = TRUE")
     _exec(conn, f"DROP VIEW IF EXISTS {q(schema)}.{q(view_name)}")
     _exec(conn, f"DROP ROLE IF EXISTS {q(role)}")
     _exec(conn, f"DROP USER IF EXISTS {q(user)}")
-    return cancelled
+    return 0
 
 
 def _write_receipt(

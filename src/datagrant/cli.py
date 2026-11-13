@@ -1791,7 +1791,7 @@ def _snowflake_revoke(ctx: Ctx) -> int:
             },
             f"dry run: grant {ctx.args.grant_id} is {row['status']}; "
             + (
-                "--apply would DISABLE the user, cancel queries, and drop view/role/user"
+                "--apply would DISABLE the user and drop view/role/user"
                 if active
                 else "nothing to do"
             ),
