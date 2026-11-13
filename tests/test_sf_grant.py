@@ -19,10 +19,12 @@ from datagrant.sf.grant import (
     GrantError,
     apply_plan,
     build_plan,
+    claim_pending,
     create_pending,
     days_to_expiry,
     get_pending,
     lit,
+    mark_request_failed,
     new_keypair,
     q,
     reverse_drop,
@@ -62,16 +64,26 @@ def dec(masks: dict[str, str] | None = None, **kw: object) -> Decision:
 
 
 class FakeConn:
-    def __init__(self, fail_on: str | None = None, pending_row: tuple[Any, ...] | None = None):
+    def __init__(
+        self,
+        fail_on: str | None = None,
+        pending_row: tuple[Any, ...] | None = None,
+        rowcount: int = 1,
+        fail_params: Any = None,
+    ):
         self.queries: list[tuple[str, Any]] = []
         self.fail_on = fail_on
         self.pending_row = pending_row
+        self.rowcount = rowcount
+        self.fail_params = fail_params
 
     def cursor(self) -> FakeConn:
         return self
 
     def execute(self, sql: str, params: Any = None) -> FakeConn:
         self.queries.append((sql, params))
+        if self.fail_params is not None and params == self.fail_params:
+            raise RuntimeError("stub:params")
         if self.fail_on and self.fail_on.upper() in sql.upper():
             raise RuntimeError(f"stub:{self.fail_on}")
         return self
@@ -137,11 +149,11 @@ def test_plan_sql_order_and_invariants() -> None:
     assert KEY.derived.hex() not in blob
     assert "HASH_HMAC" in blob
     assert 'CREATE SECURE VIEW "DATAGRANT_VIEWS"."G_abcdef012345"' in blob
-    usage = (
-        'GRANT USAGE ON FUNCTION "DATAGRANT"."HASH_HMAC"(VARCHAR, VARCHAR)'
-        ' TO ROLE "DG_R_abcdef012345"'
-    )
-    assert usage in blob
+    role_grants = [s for s in text if "TO ROLE" in s]
+    assert all("HASH_HMAC" not in s for s in role_grants)
+    assert any(s.startswith('GRANT USAGE ON DATABASE "CLINIC_DB" TO ROLE') for s in text)
+    assert any(s.startswith('GRANT USAGE ON SCHEMA "DATAGRANT_VIEWS" TO ROLE') for s in text)
+    assert not any("GRANT USAGE ON WAREHOUSE" in s for s in text)
     assert f'GRANT SELECT ON "DATAGRANT"."{HASH_TABLE}"' not in blob
     assert text[-2] == 'ALTER USER "DG_abcdef012345" SET DISABLED = FALSE'
     active = plan.statements[-1]
@@ -168,9 +180,7 @@ def test_apply_enable_last_then_active(tmp_path: Path) -> None:
     insert_i = next(i for i, s in enumerate(sqls) if 'INSERT INTO "DATAGRANT"."GRANTS"' in s)
     user_i = next(i for i, s in enumerate(sqls) if s.startswith("CREATE USER"))
     enable_i = next(i for i, s in enumerate(sqls) if "DISABLED = FALSE" in s)
-    active_i = next(
-        i for i, (_s, p) in enumerate(conn.queries) if p == ("active", "abcdef012345")
-    )
+    active_i = next(i for i, (_s, p) in enumerate(conn.queries) if p == ("active", "abcdef012345"))
     assert insert_i < user_i < enable_i < active_i
     lines = (tmp_path / "r.jsonl").read_text().strip().splitlines()
     body = json.loads(lines[0])["receipt"]
@@ -245,7 +255,9 @@ def test_two_person_pending_stores_public_key_not_private() -> None:
         now=NOW,
     )
     blob = "\n".join(_sqls(conn))
-    pending = next((s, p) for s, p in conn.queries if s.startswith('INSERT INTO "DATAGRANT"."REQUESTS"'))
+    pending = next(
+        (s, p) for s, p in conn.queries if s.startswith('INSERT INTO "DATAGRANT"."REQUESTS"')
+    )
     assert pair.public_body in pending[1]
     assert pair.fingerprint in pending[1]
     assert pair.public_body not in pending[0]
@@ -365,6 +377,152 @@ def test_days_to_expiry_ceils_duration() -> None:
     create = stmt_sql(plan.statements[1])
     assert "DAYS_TO_EXPIRY = 3" in create
     assert plan.days_to_expiry == 3
+
+
+def test_grant_role_usage_includes_warehouse_when_set() -> None:
+    plan = _plan(warehouse="COMPUTE_WH")
+    text = [stmt_sql(s) for s in plan.statements]
+    assert any('GRANT USAGE ON WAREHOUSE "COMPUTE_WH" TO ROLE' in s for s in text)
+    assert all("HASH_HMAC" not in s for s in text if "TO ROLE" in s)
+
+
+def test_purpose_rejects_nul_and_controls() -> None:
+    pair = new_keypair()
+    for purpose in ("\x00eval", "eval\n", "eval\x7f"):
+        with pytest.raises(GrantError, match="control characters"):
+            build_plan(
+                dec(),
+                req(purpose=purpose),
+                database="CLINIC_DB",
+                public_body=pair.public_body,
+                fingerprint=pair.fingerprint,
+                hash_key=KEY,
+            )
+        with pytest.raises(GrantError, match="control characters"):
+            create_pending(
+                FakeConn(),
+                req(purpose=purpose),
+                policy_sha256="a" * 64,
+                public_body=pair.public_body,
+                fingerprint=pair.fingerprint,
+                ttl=timedelta(hours=1),
+            )
+
+
+@pytest.mark.parametrize("payload", ["\\'", "$$", "x\\'$$"])
+def test_requester_and_purpose_payloads_are_bound(payload: str) -> None:
+    plan = build_plan(
+        dec(),
+        req(requester=payload, purpose=payload),
+        database="CLINIC_DB",
+        public_body="PUB",
+        fingerprint="a" * 64,
+        grant_id="abcdef012345",
+        now=NOW,
+        hash_key=KEY,
+    )
+    insert = plan.statements[0]
+    assert isinstance(insert, Bound)
+    assert payload not in insert.sql
+    assert payload in insert.params
+    pending = FakeConn()
+    create_pending(
+        pending,
+        req(requester=payload, purpose=payload),
+        policy_sha256="a" * 64,
+        public_body="PUB",
+        fingerprint="a" * 64,
+        ttl=timedelta(hours=1),
+        now=NOW,
+    )
+    req_insert = next(
+        p for s, p in pending.queries if s.startswith('INSERT INTO "DATAGRANT"."REQUESTS"')
+    )
+    assert payload in req_insert
+    assert payload not in next(
+        s for s, _p in pending.queries if s.startswith('INSERT INTO "DATAGRANT"."REQUESTS"')
+    )
+
+
+def test_claim_pending_double_approve_and_expired() -> None:
+    conn = FakeConn()
+    claim_pending(conn, "aabbccddeeff", approver="carol")
+    sql, params = conn.queries[-1]
+    assert "STATUS = ?" in sql
+    assert "ID = ?" in sql
+    assert "STATUS = ?" in sql and "EXPIRES_AT > CURRENT_TIMESTAMP()" in sql
+    assert params == ("approved", "carol", "aabbccddeeff", "pending")
+    conn.rowcount = 0
+    with pytest.raises(GrantError, match="not pending or expired"):
+        claim_pending(conn, "aabbccddeeff", approver="carol")
+    expired = FakeConn(rowcount=0)
+    with pytest.raises(GrantError, match="not pending or expired"):
+        claim_pending(expired, "aabbccddeeff", approver="carol")
+    failed = FakeConn()
+    mark_request_failed(failed, "aabbccddeeff")
+    assert failed.queries[-1][1] == ("failed", "aabbccddeeff")
+
+
+def test_active_failure_after_issued_writes_revoked(tmp_path: Path) -> None:
+    conn = FakeConn(fail_params=("active", "abcdef012345"))
+    with pytest.raises(GrantError, match="failed"):
+        apply_plan(conn, _plan(), _sink(tmp_path))
+    events = [
+        json.loads(line)["receipt"]["event"]
+        for line in (tmp_path / "r.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert events[0] == "issued"
+    assert "revoked" in events
+    assert any("DROP USER" in s for s in _sqls(conn))
+
+
+def test_deliver_sf_issued_writes_revoked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import argparse
+    from types import SimpleNamespace
+
+    from datagrant import cli
+    from datagrant.sink import SinkConfig
+
+    plan = _plan()
+    sink = _sink(tmp_path)
+    from datagrant import receipt as rec
+
+    assert plan.facts is not None
+    rec.append(
+        sink.log,
+        "issued",
+        plan.facts,
+        sink.key,
+        host=sink.host,
+        details={"engine": "snowflake", "public_key_fingerprint": plan.fingerprint},
+    )
+
+    class _Sink:
+        name = "stub"
+
+        def deliver(self, line: bytes) -> None:
+            raise RuntimeError("unused")
+
+        def head(self) -> None:
+            return None
+
+    args = argparse.Namespace(json=True, _remote=SinkConfig(_Sink(), "required"))
+    ctx = cli.Ctx(args, print)
+    monkeypatch.setattr(
+        "datagrant.outbox.flush",
+        lambda *_a, **_k: SimpleNamespace(error="sink down", pending=1),
+    )
+    with pytest.raises(cli.CliError) as ei:
+        cli._deliver_sf_issued(ctx, FakeConn(), plan, sink)
+    assert ei.value.code == cli.EXIT_RECEIPT
+    events = [
+        json.loads(line)["receipt"]["event"]
+        for line in (tmp_path / "r.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert "issued" in events
+    assert "revoked" in events
 
 
 def test_build_plan_and_pending_refuse_row_filter() -> None:

@@ -39,6 +39,7 @@ RSA_BITS = 2048
 REDACTED = "<redacted>"
 ROW_FILTER_UNAVAILABLE = "Snowflake row filters are not implemented yet"
 SECONDS_PER_DAY = 86400.0
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class GrantError(RuntimeError):
@@ -165,6 +166,11 @@ def _reject_row_filter(req: Request) -> None:
         raise GrantError(ROW_FILTER_UNAVAILABLE)
 
 
+def _reject_controls(label: str, value: str) -> None:
+    if _CTRL.search(value):
+        raise GrantError(f"{label} contains NUL or control characters")
+
+
 def _hash_udf_sql() -> str:
     """SQL secure UDF: reads the master table; no key literal in the body."""
     table = f"{q(STATE_SCHEMA)}.{q(HASH_TABLE)}"
@@ -195,10 +201,7 @@ def ensure_state_sql() -> tuple[str, ...]:
             " CREATED_AT TIMESTAMP_TZ, EXPIRES_AT TIMESTAMP_TZ, STARTED_AT TIMESTAMP_TZ,"
             " STATUS VARCHAR, PUBLIC_KEY_FINGERPRINT VARCHAR, LAST_ERROR VARCHAR)"
         ),
-        (
-            f"CREATE TABLE IF NOT EXISTS {master} ("
-            "ID VARCHAR PRIMARY KEY, KEY BINARY)"
-        ),
+        (f"CREATE TABLE IF NOT EXISTS {master} (ID VARCHAR PRIMARY KEY, KEY BINARY)"),
         (
             f"CREATE TABLE IF NOT EXISTS {reqs} ("
             "ID VARCHAR PRIMARY KEY, REQUESTER VARCHAR, DATASET VARCHAR, TABLE_NAME VARCHAR,"
@@ -219,6 +222,7 @@ def build_plan(
     public_body: str,
     fingerprint: str,
     schema: str | None = None,
+    warehouse: str | None = None,
     grant_id: str | None = None,
     now: datetime | None = None,
     approvers: Sequence[str] = (),
@@ -233,6 +237,7 @@ def build_plan(
     if decision.approval == "two-person" and not approvers:
         raise GrantError("two-person approval: the grant needs an approver")
     _reject_row_filter(req)
+    _reject_controls("purpose", req.purpose)
     gid = grant_id or secrets.token_hex(6)
     if not _GRANT_ID_RE.fullmatch(gid):
         raise GrantError("grant id must be 12 lowercase hex characters")
@@ -304,10 +309,9 @@ def build_plan(
         f"CREATE ROLE {q(role)}",
         f"GRANT SELECT ON {view_id} TO ROLE {q(role)}",
         f"GRANT ROLE {q(role)} TO USER {q(user)}",
-        (
-            f"GRANT USAGE ON FUNCTION {q(STATE_SCHEMA)}.{q(HASH_UDF)}(VARCHAR, VARCHAR)"
-            f" TO ROLE {q(role)}"
-        ),
+        f"GRANT USAGE ON DATABASE {q(database)} TO ROLE {q(role)}",
+        f"GRANT USAGE ON SCHEMA {q(VIEW_SCHEMA)} TO ROLE {q(role)}",
+        *((f"GRANT USAGE ON WAREHOUSE {q(warehouse)} TO ROLE {q(role)}",) if warehouse else ()),
         update_row,
         f"ALTER USER {q(user)} SET DISABLED = FALSE",
         active,
@@ -371,6 +375,40 @@ def _sql_blob(conn: Any) -> str:
     return "\n".join(parts)
 
 
+def _rowcount(result: Any, conn: Any) -> int:
+    for obj in (result, conn):
+        n = getattr(obj, "rowcount", None)
+        if isinstance(n, int) and n >= 0:
+            return n
+    return 0
+
+
+def append_revoked(
+    plan: GrantPlan,
+    receipts: ReceiptSink | None,
+    *,
+    reason: str,
+) -> None:
+    """Best-effort revoked receipt after a post-issued reverse-drop."""
+    if receipts is None or plan.facts is None:
+        return
+    try:
+        receipt.append(
+            receipts.log,
+            "revoked",
+            plan.facts,
+            receipts.key,
+            host=receipts.host,
+            details={
+                "engine": "snowflake",
+                "reason": reason,
+                "public_key_fingerprint": plan.fingerprint,
+            },
+        )
+    except Exception:  # noqa: BLE001, S110  # nosec B110
+        pass
+
+
 def reverse_drop(conn: Any, plan: GrantPlan, *, enabled: bool) -> None:
     """Drop created objects in reverse order. DISABLE first if ENABLE ran."""
     view_id = f"{q(VIEW_SCHEMA)}.{q('G_' + plan.grant_id)}"
@@ -409,6 +447,7 @@ def apply_plan(
     """Run the fail-safe sequence. No ENABLE without an issued receipt."""
     enabled = False
     created = False
+    issued = False
     try:
         for stmt in ensure_state_sql():
             _exec(conn, stmt)
@@ -439,6 +478,7 @@ def apply_plan(
                     "public_key_fingerprint": plan.fingerprint,
                 },
             )
+            issued = True
         except BaseException as exc:
             reverse_drop(conn, plan, enabled=False)
             if not isinstance(exc, Exception):
@@ -451,21 +491,7 @@ def apply_plan(
             enabled = True
         except BaseException as exc:
             reverse_drop(conn, plan, enabled=True)
-            try:
-                receipt.append(
-                    receipts.log,
-                    "revoked",
-                    plan.facts,
-                    receipts.key,
-                    host=receipts.host,
-                    details={
-                        "engine": "snowflake",
-                        "reason": "enable_failed",
-                        "public_key_fingerprint": plan.fingerprint,
-                    },
-                )
-            except Exception:  # noqa: BLE001, S110  # nosec B110
-                pass
+            append_revoked(plan, receipts, reason="enable_failed")
             if not isinstance(exc, Exception):
                 raise
             raise GrantError(
@@ -477,6 +503,8 @@ def apply_plan(
     except Exception as exc:
         if created:
             reverse_drop(conn, plan, enabled=enabled)
+            if issued:
+                append_revoked(plan, receipts, reason="apply_failed")
         raise GrantError(f"grant {plan.grant_id} failed: {exc}") from exc
 
 
@@ -493,6 +521,7 @@ def create_pending(
 ) -> str:
     """Store a two-person pending request. Public key plus fingerprint only."""
     _reject_row_filter(req)
+    _reject_controls("purpose", req.purpose)
     now = now or datetime.now(UTC)
     rid = secrets.token_hex(6)
     ident = json.dumps(dict(requester_identity), sort_keys=True) if requester_identity else None
@@ -567,3 +596,25 @@ def get_pending(conn: Any, request_id: str) -> dict[str, Any] | None:
         "requester_identity",
     )
     return dict(zip(keys, row, strict=False))
+
+
+def claim_pending(conn: Any, request_id: str, *, approver: str) -> None:
+    """Atomically claim a pending, unexpired request. Fail closed on 0 rows."""
+    result = _exec(
+        conn,
+        (
+            f"UPDATE {q(STATE_SCHEMA)}.{q('REQUESTS')} SET STATUS = ?, APPROVER = ?"  # nosec B608
+            " WHERE ID = ? AND STATUS = ? AND EXPIRES_AT > CURRENT_TIMESTAMP()"
+        ),
+        ("approved", approver, request_id, "pending"),
+    )
+    if _rowcount(result, conn) != 1:
+        raise GrantError(f"cannot claim request {request_id}: not pending or expired")
+
+
+def mark_request_failed(conn: Any, request_id: str) -> None:
+    _exec(
+        conn,
+        f"UPDATE {q(STATE_SCHEMA)}.{q('REQUESTS')} SET STATUS = ? WHERE ID = ?",  # nosec B608
+        ("failed", request_id),
+    )

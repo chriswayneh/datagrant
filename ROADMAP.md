@@ -57,7 +57,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PR 1 (merged #48): policy `engine` and Snowflake `--apply` routing. Construction PR 2: Snowflake grant engine (SERVICE user, key pair, issuing-row fail-safe, hash UDF; no revoke/sweep). Design: [docs/design/warehouses.md](docs/design/warehouses.md). | Construction |
+| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PR 1 (merged #48): policy `engine` and Snowflake `--apply` routing. Construction PR 2: Snowflake grant engine (SERVICE user, key pair, issuing-row fail-safe, hash UDF; no revoke/sweep; Snowflake `--apply` refused until revoke/sweep land). Design: [docs/design/warehouses.md](docs/design/warehouses.md). | Construction |
 
 ## Next
 

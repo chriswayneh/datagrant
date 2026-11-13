@@ -50,8 +50,7 @@ STRICT_POLICY_PERM_ENV = "DATAGRANT_STRICT_POLICY_PERMISSIONS"
 _STRICT_PERM_ON = frozenset({"1", "true", "yes", "on"})
 _STRICT_PERM_OFF = frozenset({"0", "false", "no", "off"})
 _STRICT_PERM_USAGE = (
-    f"${STRICT_POLICY_PERM_ENV} must be 1/true/yes/on or 0/false/no/off"
-    " (unset or empty means off)"
+    f"${STRICT_POLICY_PERM_ENV} must be 1/true/yes/on or 0/false/no/off (unset or empty means off)"
 )
 
 
@@ -249,9 +248,8 @@ def _pg_session(
             return
         with session_lock(conn, wait=False) as acquired:
             if not acquired:
-                msg = (
-                    "proceeding without the datagrant lock; held by pid "
-                    + _pid_list(holder_pids(conn))
+                msg = "proceeding without the datagrant lock; held by pid " + _pid_list(
+                    holder_pids(conn)
                 )
                 if ctx is not None:
                     _warn(ctx, msg)
@@ -395,11 +393,7 @@ def _host_file_gate(
 
     if policy_path is not None:
         in_file = bool(policy is not None and policy.strict_policy_permissions)
-        forced = (
-            _forced_strict_policy_permissions(ctx.args)
-            if apply and access_creating
-            else False
-        )
+        forced = _forced_strict_policy_permissions(ctx.args) if apply and access_creating else False
         _report(
             inspect_existing(policy_path, "policy file"),
             refuse=apply and access_creating and (in_file or forced),
@@ -866,7 +860,7 @@ def _sf_session(args: argparse.Namespace) -> Iterator[Any]:
 def _deliver_sf_issued(ctx: Ctx, conn: Any, plan: Any, local: Any) -> None:
     """Flush the outbox. Required sink failure DISABLE/drops the Snowflake grant."""
     from datagrant.outbox import flush, quick
-    from datagrant.sf.grant import reverse_drop
+    from datagrant.sf.grant import append_revoked, reverse_drop
 
     remote = _remote(ctx.args)
     if remote is None:
@@ -878,6 +872,7 @@ def _deliver_sf_issued(ctx: Ctx, conn: Any, plan: Any, local: Any) -> None:
         _warn(ctx, f"receipt not delivered to sink, {res.pending} pending: {res.error}")
         return
     reverse_drop(conn, plan, enabled=True)
+    append_revoked(plan, local, reason="sink_failed")
     flush(local.log, quick(remote.sink))
     raise CliError(
         _hide_token(
@@ -929,17 +924,12 @@ def _snowflake_request(
     ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any, ttl: timedelta
 ) -> int:
     """Snowflake auto grant or two-person pending (public key only until approve)."""
-    from datagrant.sf.grant import (
-        ROW_FILTER_UNAVAILABLE,
-        GrantError,
-        apply_plan,
-        build_plan,
-        create_pending,
-        new_keypair,
-    )
+    from datagrant.sf.grant import ROW_FILTER_UNAVAILABLE, build_plan
     from datagrant.snowflake_support import (
+        APPLY_UNAVAILABLE,
         EXTRA_HINT,
         SnowflakeSetupError,
+        _dsn_kwargs,
         require_driver,
         resolve_dsn,
     )
@@ -949,18 +939,23 @@ def _snowflake_request(
     if req.row_filter is not None:
         return _refuse_request(ctx, req, policy, [ROW_FILTER_UNAVAILABLE], caller)
     two_person = decision.approval == "two-person"
-    user, source = caller.username, caller.source
     hash_key = (
         load_hash_key(resolve_key_path("hash", a.hash_key))
         if _needs_hash(decision, req.columns)
         else None
     )
+    warehouse = None
+    try:
+        warehouse = _dsn_kwargs(resolve_dsn(getattr(a, "snowflake_dsn", None))).get("warehouse")
+    except SnowflakeSetupError:
+        warehouse = None
     if not a.apply:
         plan = build_plan(
             decision,
             req,
             database=ds.database,
             schema=ds.schema,
+            warehouse=warehouse if isinstance(warehouse, str) else None,
             public_body=REDACTED,
             fingerprint=REDACTED,
             hash_key=hash_key,
@@ -982,7 +977,8 @@ def _snowflake_request(
             },
             "dry run: allowed by policy; engine=snowflake; with --apply datagrant would "
             f"require {EXTRA_HINT} and ${SNOWFLAKE_DSN_ENV} and {what}:\n"
-            + "\n".join(x + ";" for x in sqls),
+            + "\n".join(x + ";" for x in sqls)
+            + f"\n{APPLY_UNAVAILABLE}",
         )
         return EXIT_OK
     try:
@@ -990,57 +986,7 @@ def _snowflake_request(
         resolve_dsn(getattr(a, "snowflake_dsn", None))
     except SnowflakeSetupError as exc:
         raise CliError(str(exc), EXIT_USAGE) from None
-    sink = _sink(a)
-    _check_outbox(ctx, sink)
-    try:
-        with _sf_session(a) as conn:
-            pair = new_keypair()
-            if two_person:
-                rid = create_pending(
-                    conn,
-                    req,
-                    policy_sha256=policy.sha256,
-                    public_body=pair.public_body,
-                    fingerprint=pair.fingerprint,
-                    ttl=ttl,
-                    requester_identity=caller.request_state_dict(),
-                )
-                n_req = policy.approvals_required
-                ctx.emit(
-                    {
-                        "status": "pending",
-                        "engine": "snowflake",
-                        "request_id": rid,
-                        "requester": user,
-                        "identity_source": source,
-                        "public_key_fingerprint": pair.fingerprint,
-                        "private_key": pair.private_pem,
-                        "approvals_recorded": 0,
-                        "approvals_required": n_req,
-                        "approvals": f"0/{n_req}",
-                    },
-                    f"request {rid} is pending approval by another person"
-                    f" (approvals 0/{n_req}).\n"
-                    f"one-time private key (shown once, works after approval):\n{pair.private_pem}",
-                )
-                return EXIT_OK
-            plan = build_plan(
-                decision,
-                req,
-                database=ds.database,
-                schema=ds.schema,
-                public_body=pair.public_body,
-                fingerprint=pair.fingerprint,
-                private_pem=pair.private_pem,
-                hash_key=hash_key,
-                requester_identity=caller.receipt_dict(),
-                approver_identities=(),
-            )
-            apply_plan(conn, plan, sink)
-            _deliver_sf_issued(ctx, conn, plan, sink)
-    except GrantError as exc:
-        raise CliError(str(exc), EXIT_FAILED) from None
-    return _print_sf_grant(ctx, plan, pair.private_pem, user, source)
+    raise CliError(APPLY_UNAVAILABLE, EXIT_USAGE)
 
 
 def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
@@ -1048,16 +994,11 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
     from types import SimpleNamespace
 
     from datagrant.policy import Request, evaluate
-    from datagrant.sf.grant import (
-        ROW_FILTER_UNAVAILABLE,
-        GrantError,
-        apply_plan,
-        build_plan,
-        get_pending,
-    )
+    from datagrant.sf.grant import ROW_FILTER_UNAVAILABLE, GrantError, build_plan, get_pending
+    from datagrant.snowflake_support import APPLY_UNAVAILABLE
 
     a = ctx.args
-    approver, source = caller.username, caller.source
+    approver = caller.username
     try:
         with _sf_session(a) as conn:
             row = get_pending(conn, a.request_id)
@@ -1101,17 +1042,52 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                     caller,
                 )
             if req.row_filter is not None:
-                return _refuse_approve(
-                    ctx, pending, policy, [ROW_FILTER_UNAVAILABLE], caller
-                )
+                return _refuse_approve(ctx, pending, policy, [ROW_FILTER_UNAVAILABLE], caller)
             ds = policy.datasets.get(req.dataset)
             if ds is None or ds.engine != "snowflake":
                 msg = f"request {pending.id} is not a Snowflake pending request"
                 _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
                 raise CliError(msg, EXIT_FAILED)
-            reasons = policy.can_approve(
-                approver, req.requester, extra_groups=caller.mapped_groups
-            )
+            req_meta = pending.requester_identity
+            req_mode = req_meta.get("mode", "local") if isinstance(req_meta, dict) else "local"
+            if req_mode != policy.identity.mode:
+                msg = (
+                    f"request {pending.id} was created with identity mode {req_mode!r},"
+                    f" but current policy uses {policy.identity.mode!r}"
+                )
+                _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                raise CliError(msg, EXIT_FAILED)
+            if policy.identity.mode == "oidc":
+                if (
+                    not isinstance(req_meta, dict)
+                    or req_meta.get("source") != "oidc"
+                    or not isinstance(req_meta.get("iss"), str)
+                    or not req_meta["iss"]
+                    or not isinstance(req_meta.get("sub"), str)
+                    or not req_meta["sub"]
+                    or not isinstance(req_meta.get("token_sha256"), str)
+                    or not _HEX64_RE.fullmatch(req_meta["token_sha256"])
+                ):
+                    msg = f"request {pending.id} is missing valid verified OIDC metadata"
+                    _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                    raise CliError(msg, EXIT_FAILED)
+                if req_meta["iss"] != policy.identity.issuer:
+                    msg = (
+                        f"request {pending.id} was issued by {req_meta['iss']!r},"
+                        f" which does not match policy.identity.issuer {policy.identity.issuer!r}"
+                    )
+                    _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                    raise CliError(msg, EXIT_FAILED)
+                if req_meta.get("username_claim") != policy.identity.username_claim:
+                    msg = (
+                        f"request {pending.id} used username_claim="
+                        f"{req_meta.get('username_claim')!r},"
+                        f" which does not match policy.identity.username_claim"
+                        f" {policy.identity.username_claim!r}"
+                    )
+                    _write_not_approved(ctx, pending, policy, _redacted_reasons(ctx, [msg]), caller)
+                    raise CliError(msg, EXIT_FAILED)
+            reasons = policy.can_approve(approver, req.requester, extra_groups=caller.mapped_groups)
             decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
             if not decision.allowed:
                 reasons += [f"request no longer allowed: {r}" for r in decision.reasons]
@@ -1152,24 +1128,13 @@ def _snowflake_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                         "sql": sqls,
                     },
                     f"dry run: {approver} may approve request {pending.id}; with --apply:\n"
-                    + "\n".join(x + ";" for x in sqls),
+                    + "\n".join(x + ";" for x in sqls)
+                    + f"\n{APPLY_UNAVAILABLE}",
                 )
                 return EXIT_OK
-            sink = _sink(a)
-            _check_outbox(ctx, sink)
-            apply_plan(conn, plan, sink)
-            _deliver_sf_issued(ctx, conn, plan, sink)
+            raise CliError(APPLY_UNAVAILABLE, EXIT_USAGE)
     except GrantError as exc:
         raise CliError(str(exc), EXIT_FAILED) from None
-    return _print_sf_grant(
-        ctx,
-        plan,
-        None,
-        req.requester,
-        source,
-        approvals_recorded=1,
-        approvals_required=1,
-    )
 
 
 def cmd_request(ctx: Ctx) -> int:
@@ -1488,9 +1453,7 @@ def cmd_approve(ctx: Ctx) -> int:
             if not isinstance(name, str):
                 return False
             extra = mapped_groups_of(vote)
-            return not policy.can_approve(
-                name, pending.request.requester, extra_groups=extra
-            )
+            return not policy.can_approve(name, pending.request.requester, extra_groups=extra)
 
         counted, _ignored = eligible_votes(
             pending.approvals,
@@ -1621,9 +1584,7 @@ def cmd_approve(ctx: Ctx) -> int:
             incoming: tuple[dict[str, Any], ...] = ()
             if result.added:
                 incoming = tuple(
-                    dict(v)
-                    for v in result.pending.approvals
-                    if already_voted([v], approver, ident)
+                    dict(v) for v in result.pending.approvals if already_voted([v], approver, ident)
                 )
             apply_plan(
                 conn,
@@ -1647,9 +1608,7 @@ def cmd_approve(ctx: Ctx) -> int:
                 approvals_recorded=len(issued.facts.approvers) if issued.facts else required,
                 approvals_required=required,
             )
-        extra_ignored = (
-            {"ignored_approvals": list(result.ignored)} if result.ignored else {}
-        )
+        extra_ignored = {"ignored_approvals": list(result.ignored)} if result.ignored else {}
         if result.already:
             ctx.emit(
                 {
@@ -1678,9 +1637,7 @@ def cmd_approve(ctx: Ctx) -> int:
                 policy,
                 identity=_identity_from_pending(pending),
                 approvers=tuple(str(v.get("approver")) for v in counted_partial),
-                approver_identities=tuple(
-                    _vote_receipt_ident(v) for v in counted_partial
-                ),
+                approver_identities=tuple(_vote_receipt_ident(v) for v in counted_partial),
                 starts_at=pending.created_at,
                 expires_at=pending.expires_at,
             )
@@ -1699,9 +1656,7 @@ def cmd_approve(ctx: Ctx) -> int:
         except CliError:
             drop_approval(conn, pending.id, approver=approver, identity=ident)
             raise
-        ignored_note = (
-            f"; not counted: {', '.join(result.ignored)}" if result.ignored else ""
-        )
+        ignored_note = f"; not counted: {', '.join(result.ignored)}" if result.ignored else ""
         ctx.emit(
             {
                 "status": "pending",
@@ -2038,9 +1993,7 @@ def cmd_doctor(ctx: Ctx) -> int:
     )
     ok = not any(c.status == STATUS_FAIL for c in checks)
     payload = {"ok": ok, "checks": [c.as_dict() for c in checks]}
-    lines = [
-        f"{c.name}: {c.status}" + (f": {c.detail}" if c.detail else "") for c in checks
-    ]
+    lines = [f"{c.name}: {c.status}" + (f": {c.detail}" if c.detail else "") for c in checks]
     ctx.emit(payload, "\n".join(lines))
     return EXIT_OK if ok else EXIT_FAILED
 

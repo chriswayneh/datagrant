@@ -17,6 +17,23 @@ SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
 EXTRA_HINT = "pip install 'datagrant[snowflake]'"
 MAX_DSN_BYTES = 8192
 PARAMSTYLE = "qmark"
+APPLY_UNAVAILABLE = "Snowflake --apply is not available until revoke and sweep land"
+_DSN_ALLOWED = frozenset(
+    {
+        "account",
+        "user",
+        "role",
+        "warehouse",
+        "database",
+        "authenticator",
+        "private_key_file",
+        "host",
+        "port",
+    }
+)
+_DSN_REFUSED = frozenset({"insecure_mode", "ocsp_fail_open"})
+_BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE = frozenset({"0", "false", "no", "off"})
 
 
 class SnowflakeSetupError(ValueError):
@@ -37,16 +54,12 @@ def require_driver() -> None:
         raise SnowflakeSetupError(f"Snowflake extra is not installed: {EXTRA_HINT}")
 
 
-def resolve_dsn(
-    flag: str | None, environ: Mapping[str, str] | None = None
-) -> str:
+def resolve_dsn(flag: str | None, environ: Mapping[str, str] | None = None) -> str:
     """Return the Snowflake admin DSN. Never log or return it from CLI errors."""
     env = os.environ if environ is None else environ
     raw = flag if flag is not None else env.get(SNOWFLAKE_DSN_ENV)
     if raw is None or not str(raw).strip():
-        raise SnowflakeSetupError(
-            f"no Snowflake: pass --snowflake-dsn or set ${SNOWFLAKE_DSN_ENV}"
-        )
+        raise SnowflakeSetupError(f"no Snowflake: pass --snowflake-dsn or set ${SNOWFLAKE_DSN_ENV}")
     dsn = str(raw).strip()
     if len(dsn.encode("utf-8")) > MAX_DSN_BYTES:
         raise SnowflakeSetupError("Snowflake DSN is too long")
@@ -60,11 +73,23 @@ def load_connector() -> Any:
         raise SnowflakeSetupError(f"Snowflake extra is not installed: {EXTRA_HINT}") from exc
 
 
-def _dsn_kwargs(dsn: str) -> dict[str, Any]:
-    """Parse a Snowflake DSN. Never log the result."""
+def _parse_bool(raw: str, key: str) -> bool:
+    v = str(raw).strip().lower()
+    if v in _BOOL_TRUE:
+        return True
+    if v in _BOOL_FALSE:
+        return False
+    raise SnowflakeSetupError(f"Snowflake DSN {key} must be true or false")
+
+
+def _raw_dsn_fields(dsn: str) -> dict[str, str]:
+    """Parse a Snowflake DSN into string fields. Never log the result."""
     if "://" in dsn:
         u = urlparse(dsn)
-        kwargs: dict[str, Any] = {}
+        scheme = (u.scheme or "").lower()
+        if scheme in {"http", "https"} and scheme != "https":
+            raise SnowflakeSetupError("Snowflake DSN protocol must be https")
+        kwargs: dict[str, str] = {}
         if u.hostname:
             kwargs["account"] = u.hostname
         if u.username:
@@ -86,6 +111,59 @@ def _dsn_kwargs(dsn: str) -> dict[str, Any]:
     return kwargs
 
 
+def _dsn_kwargs(dsn: str) -> dict[str, Any]:
+    """Allowlisted Snowflake connect kwargs. Never log the result."""
+    raw = _raw_dsn_fields(dsn)
+    proto = raw.pop("protocol", None)
+    if proto is not None and str(proto).strip().lower() != "https":
+        raise SnowflakeSetupError("Snowflake DSN protocol must be https")
+    for bad in _DSN_REFUSED:
+        if bad in raw:
+            _parse_bool(raw[bad], bad)
+            raise SnowflakeSetupError(f"Snowflake DSN must not set {bad}")
+    extra = set(raw) - _DSN_ALLOWED
+    if extra:
+        raise SnowflakeSetupError(
+            "unsupported Snowflake DSN setting(s): " + ", ".join(sorted(extra))
+        )
+    out: dict[str, Any] = dict(raw)
+    if "port" in out:
+        try:
+            out["port"] = int(str(out["port"]))
+        except (TypeError, ValueError):
+            raise SnowflakeSetupError("Snowflake DSN port must be an integer") from None
+    return out
+
+
+def _load_private_key(path: str) -> Any:
+    from cryptography.hazmat.primitives import serialization
+
+    from datagrant.hostfs import inspect_existing, open_existing_fd, posix_mode_problem
+
+    p = Path(path)
+    problem = posix_mode_problem(p, "Snowflake private key")
+    if problem:
+        raise SnowflakeSetupError(problem)
+    inspected = inspect_existing(p, "Snowflake private key")
+    if inspected is None:
+        raise SnowflakeSetupError("Snowflake private key file is missing")
+    if isinstance(inspected, str):
+        raise SnowflakeSetupError("cannot load Snowflake private key")
+    if inspected.owner_mismatch:
+        raise SnowflakeSetupError("Snowflake private key file is not owned by the current user")
+    try:
+        fd = open_existing_fd(p)
+        try:
+            raw = os.read(fd, 16 * 1024)
+        finally:
+            os.close(fd)
+        return serialization.load_pem_private_key(raw, password=None)
+    except SnowflakeSetupError:
+        raise
+    except Exception as exc:
+        raise SnowflakeSetupError("cannot load Snowflake private key") from exc
+
+
 def connect(dsn: str) -> Any:
     """Open a Snowflake session with qmark (server-side) binds. Never log ``dsn``."""
     mod = load_connector()
@@ -93,23 +171,14 @@ def connect(dsn: str) -> Any:
     kwargs = _dsn_kwargs(dsn)
     path = kwargs.pop("private_key_file", None)
     if path:
-        from cryptography.hazmat.primitives import serialization
-
-        from datagrant.hostfs import open_existing_fd
-
-        try:
-            fd = open_existing_fd(Path(path))
-            try:
-                raw = os.read(fd, 16 * 1024)
-            finally:
-                os.close(fd)
-            kwargs["private_key"] = serialization.load_pem_private_key(raw, password=None)
-        except Exception as exc:
-            raise SnowflakeSetupError("cannot load Snowflake private key") from exc
+        kwargs["private_key"] = _load_private_key(str(path))
     kwargs["paramstyle"] = PARAMSTYLE
     conn = mod.connect(**kwargs)
     try:
         conn.paramstyle = PARAMSTYLE
     except (AttributeError, TypeError):
         pass
+    style = str(getattr(conn, "paramstyle", None) or getattr(mod, "paramstyle", "")).lower()
+    if style in {"pyformat", "format"}:
+        raise SnowflakeSetupError("Snowflake connector paramstyle must be qmark, not pyformat")
     return conn
