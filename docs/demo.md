@@ -61,6 +61,18 @@ CI runs the demo on every push twice: `demo` against the CI Postgres service, an
 
 ## OIDC identity (v0.3.0)
 
-`make demo` still uses local identity (`--as-user alice` / `--as-user carol`) and one approver. That is the v0.2.0 GIF above. Quorum N>1, `distinct-groups`, the v0.4.0 limit keys, `strict_preflight`, `strict_policy_permissions`, and `datagrant doctor` are covered in the [policy](policy.md), [CLI](cli.md), and [operations](operations.md#ops-hardening-v050) references, not in this walkthrough.
+`make demo` still uses local identity (`--as-user alice` / `--as-user carol`) and one approver. That is the v0.6.0 GIF in the [README](../README.md). Quorum N>1, `distinct-groups`, the v0.4.0 limit keys, `strict_preflight`, `strict_policy_permissions`, and `datagrant doctor` are covered in the [policy](policy.md), [CLI](cli.md), and [operations](operations.md#ops-hardening-v050) references, not in this walkthrough.
+
+## Snowflake dry-run (v0.6.0)
+
+No Snowflake account. `python3 scripts/demo_snowflake.py` checks a fictional `engine: snowflake` policy and prints `request` dry-run SQL: `TYPE=SERVICE` user, `RSA_PUBLIC_KEY = '<redacted>'`, secure view `FROM "CLINIC_DB"."PUBLIC"."PATIENTS" AS "SRC"`, and an `IS NULL` filter on a `null`-masked column as `"SRC"."BIRTH_DATE" IS NULL`. It never calls `--apply` and never reads `$DATAGRANT_SNOWFLAKE_DSN`.
+
+Refresh both GIFs (Postgres needs `DATAGRANT_DEMO_DSN`):
+
+```bash
+./scripts/record-gifs.sh
+```
+
+Tapes: [docs/assets/demo.tape](assets/demo.tape) and [docs/assets/demo-snowflake.tape](assets/demo-snowflake.tape). Each GIF should stay under 3 MB.
 
 To walk `request` and `approve` with synthetic short-lived ID tokens, no real IdP and no real secrets, see [demo-oidc.md](demo-oidc.md). That write-up is documentation plus copy-paste fixtures; it is not a second `make demo` target.

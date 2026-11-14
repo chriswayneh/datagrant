@@ -37,7 +37,11 @@ No Docker? Point it at a scratch database (the demo drops and recreates the `dg_
 DATAGRANT_DEMO_DSN=postgresql://admin:PASSWORD@localhost:5432/scratch ./scripts/demo.sh
 ```
 
-See [docs/demo.md](docs/demo.md) for every step. The GIF above replays real output from the project's CI demo run.
+See [docs/demo.md](docs/demo.md) for every step. The GIF above replays real v0.6.0 output from `scripts/demo.py`. Re-record with `./scripts/record-gifs.sh`.
+
+<p align="center"><img src="docs/assets/demo-snowflake.gif" alt="datagrant Snowflake dry-run: policy check, request SQL for a TYPE=SERVICE user and a secure view FROM table AS SRC, and an IS NULL filter on a null-masked column using SRC.BIRTH_DATE, ending in DEMO OK" width="100%"></p>
+
+Snowflake without an account: `python3 scripts/demo_snowflake.py` prints the dry-run SQL only. No `--apply`, DSN, keys, or account names. The GIF is that output.
 
 ## Features
 
