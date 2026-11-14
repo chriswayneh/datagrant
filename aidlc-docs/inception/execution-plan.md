@@ -49,3 +49,9 @@ Implemented (PRs #40 to #45). Design: [docs/design/ops-hardening.md](../../docs/
 Chris authorized a v1.0 plan that parked **warehouses (Snowflake/BigQuery)** after ops hardening. M3 released as v0.5.0. M4 is that warehouse work, target v0.6.0. **Snowflake first**; BigQuery is **v0.7.0+**. Rate limits and `max_rows` stay out. No break-glass.
 
 Implemented (PRs #47 to #53). Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Design approved (PR #47 at `0449a0b`). v0.6.0 released 2026-11-14.
+
+## Post-v0.6.0: M5 / BigQuery (Inception in progress)
+
+Chris authorized a v1.0 plan that parked **BigQuery** after Snowflake. M4 released as v0.6.0. M5 is that warehouse work, target **v0.7.0+**. Same request, mask, expire, revoke, sweep and receipt model. IAM / authorized views, not a password user. Rate limits and `max_rows` stay out. No break-glass.
+
+**Status:** design pending approval. Artifact: [docs/design/bigquery.md](../../docs/design/bigquery.md). Recommended picks 1B/2B/3B/4B/5B/6B/7B/8B/9B/10B/11B (1B refined after QE: table `resource.name` on the shared view dataset; 11B new: authorize `datagrant_views` once on each source). No runtime until Chris records the approval in [audit.md](../audit.md). Construction PRs (policy routing, grant engine, revoke/sweep, `--apply`, masks, docs) wait on that gate.
