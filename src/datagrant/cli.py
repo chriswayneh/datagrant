@@ -1405,7 +1405,13 @@ def cmd_request(ctx: Ctx) -> int:
     from datagrant.pg.mask import inspect_table
     from datagrant.pg.requests import create_request
     from datagrant.pg.scram import scram_verifier
-    from datagrant.policy import Request, evaluate, parse_duration
+    from datagrant.policy import (
+        PolicyError,
+        Request,
+        _parse_bq_table_name,
+        evaluate,
+        parse_duration,
+    )
 
     a = ctx.args
     policy = _policy(a, ctx, apply=bool(a.apply))
@@ -1420,10 +1426,17 @@ def cmd_request(ctx: Ctx) -> int:
     caller = _resolve_caller(ctx, policy)
     user, source = caller.username, caller.source
     cols = tuple(c.strip() for c in a.columns.split(",") if c.strip())
+    table = a.table
+    ds = policy.datasets.get(a.dataset)
+    if ds is not None and ds.engine == "bigquery":
+        try:
+            table = _parse_bq_table_name(a.table, "--table", ds.database, ds.schema)
+        except PolicyError as exc:
+            raise CliError(str(exc), EXIT_USAGE) from None
     req = Request(
         user,
         a.dataset,
-        a.table,
+        table,
         cols,
         parse_duration(a.duration, "--duration"),
         a.purpose,
@@ -2796,6 +2809,16 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         print("datagrant: error: --apply and --dry-run conflict", file=sys.stderr)
         return EXIT_USAGE
     ctx = Ctx(args, out)
+    creds_flag = getattr(args, "credentials_path", None)
+    bq_dsn_flag = getattr(args, "bigquery_dsn", None)
+    if (isinstance(creds_flag, str) and creds_flag.strip()) or (
+        isinstance(bq_dsn_flag, str) and bq_dsn_flag.strip()
+    ):
+        try:
+            _bq_refuse_locator(args)
+        except CliError as exc:
+            _err(ctx, str(exc), exc.code)
+            return exc.code
     if "receipt_sink" in _accepts(args):
         from datagrant.sink import SinkConfigError, sink_from_config
 

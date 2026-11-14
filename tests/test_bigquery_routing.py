@@ -328,6 +328,151 @@ def test_bigquery_apply_prints_adc_checking(
     assert "not implemented" in err
 
 
+def test_bigquery_request_canonicalizes_three_part_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    monkeypatch.delenv(BIGQUERY_PROJECT_ENV, raising=False)
+    path = _policy(tmp_path)
+    out: list[str] = []
+    code = cli.main(
+        [
+            "request",
+            "--dataset",
+            "bq_clinic",
+            "--table",
+            "clinic-proj.clinic_ds.patients",
+            "--columns",
+            "patient_id",
+            "--duration",
+            "1h",
+            "--purpose",
+            "eval",
+            "--as-user",
+            "alice",
+            "--policy",
+            str(path),
+            "--json",
+        ],
+        out.append,
+    )
+    assert code == EXIT_OK
+    body = json.loads(out[0])
+    assert body["dry_run"] is True
+    assert body["table"] == "clinic_ds.patients"
+
+
+def test_bigquery_request_rejects_three_part_wrong_project(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _policy(tmp_path)
+    code = cli.main(
+        [
+            "request",
+            "--dataset",
+            "bq_clinic",
+            "--table",
+            "other-proj.clinic_ds.patients",
+            "--columns",
+            "patient_id",
+            "--duration",
+            "1h",
+            "--purpose",
+            "eval",
+            "--as-user",
+            "alice",
+            "--policy",
+            str(path),
+        ]
+    )
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "must match dataset.database" in err
+    assert "other-proj" in err
+
+
+def test_revoke_credentials_path_refused(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["revoke", "g1", "--credentials-path", "x"])
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "credentials_path" in err or "JSON key" in err
+    assert "'x'" not in err
+    assert '"x"' not in err
+
+
+def test_revoke_bigquery_dsn_refused(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["revoke", "g1", "--bigquery-dsn", "x"])
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "DSN" in err or "JSON key" in err
+    assert "'x'" not in err
+    assert '"x"' not in err
+
+
+def test_postgres_request_credentials_path_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _policy(tmp_path)
+    code = cli.main(
+        [
+            "request",
+            "--dataset",
+            "clinic",
+            "--table",
+            "public.patients",
+            "--columns",
+            "id",
+            "--duration",
+            "1h",
+            "--purpose",
+            "eval",
+            "--as-user",
+            "alice",
+            "--policy",
+            str(path),
+            "--credentials-path",
+            "x",
+        ]
+    )
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "credentials_path" in err or "JSON key" in err
+    assert "'x'" not in err
+    assert '"x"' not in err
+
+
+def test_snowflake_request_credentials_path_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _policy(tmp_path)
+    code = cli.main(
+        [
+            "request",
+            "--dataset",
+            "snow_clinic",
+            "--table",
+            "PUBLIC.PATIENTS",
+            "--columns",
+            "PATIENT_ID",
+            "--duration",
+            "1h",
+            "--purpose",
+            "eval",
+            "--as-user",
+            "alice",
+            "--policy",
+            str(path),
+            "--credentials-path",
+            "x",
+        ]
+    )
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "credentials_path" in err or "JSON key" in err
+    assert "'x'" not in err
+    assert '"x"' not in err
+
+
 def test_snowflake_request_does_not_open_bigquery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

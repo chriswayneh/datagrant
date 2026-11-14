@@ -12,6 +12,7 @@ import pytest
 
 from datagrant.bigquery_support import (
     ADC_CHECKING_MSG,
+    ADC_SCOPES,
     BIGQUERY_CREDENTIALS_ENV,
     BIGQUERY_DSN_ENV,
     BIGQUERY_PROJECT_ENV,
@@ -175,10 +176,11 @@ class _AuthMod:
         self._creds = creds
         self._boom = boom
 
-    def default(self, request: Any = None) -> tuple[Any, str]:
+    def default(self, request: Any = None, scopes: Any = None) -> tuple[Any, str]:
         if self._boom is not None:
             raise self._boom
         assert os.environ.get("GCE_METADATA_TIMEOUT") == "1"
+        assert scopes == ADC_SCOPES
         return self._creds, "clinic-proj"
 
 

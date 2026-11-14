@@ -30,6 +30,7 @@ JSON_KEY_ADC_MSG = (
 _GCE_METADATA_TIMEOUT_ENV = "GCE_METADATA_TIMEOUT"
 _ADC_METADATA_TIMEOUT_SEC = "1"
 _SERVICE_ACCOUNT_TYPE = "service_account"
+ADC_SCOPES = ["https://www.googleapis.com/auth/bigquery"]
 _REFUSED_KEYS = (
     "credentials_path",
     "credentials-path",
@@ -131,12 +132,17 @@ def _metadata_request() -> Any:
 
 def _call_google_auth_default(google_auth: Any, request: Any) -> Any:
     default = google_auth.default
-    if request is None:
-        return default()
     try:
-        return default(request=request)
+        if request is None:
+            return default(scopes=ADC_SCOPES)
+        return default(scopes=ADC_SCOPES, request=request)
     except TypeError:
-        return default()
+        if request is None:
+            return default()
+        try:
+            return default(request=request)
+        except TypeError:
+            return default()
 
 
 def adc_available() -> bool:
