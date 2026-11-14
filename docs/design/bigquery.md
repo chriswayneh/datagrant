@@ -1,6 +1,6 @@
 # Design: BigQuery (v0.7.0+ / M5)
 
-Status: M5 Inception. Design pending approval. No runtime. Do not start construction until Chris records an approval in [audit.md](../../aidlc-docs/audit.md).
+Status: M5 Inception. Design approved 2026-11-14 4:51 PM CT (Chris: "Approve all 11 revised BigQuery picks"; picks 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B). Recorded in [audit.md](../../aidlc-docs/audit.md). No runtime. Construction does not start until Chris says go.
 
 M4 (v0.6.0) shipped Snowflake. ROADMAP next item is **the same request, mask, expire, revoke, sweep and receipt model on BigQuery** (IAM / authorized views, not a password user). Target **v0.7.0+**. Rate limits, `max_rows`, and break-glass stay out.
 
@@ -293,11 +293,11 @@ Quotas that can bite (not policy keys): IAM bindings per resource, authorized re
 - Live (optional): if `DATAGRANT_TEST_BIGQUERY` is set (project + ADC), issue, SELECT as a throwaway principal, revoke, confirm the view is gone. Fictional data only. CI default is unset (skip). That live test **asserts both**: (a) the grantee can query the view **without** `bigquery.tables.get`; (b) the grantee can `SELECT` a view that calls `datagrant.hash_hmac` **without** IAM on the UDF dataset. After bind/unbind, wait: IAM changes typically take 2 minutes and can take 7 minutes or longer; do not treat a still-denied or still-allowed query as a product bug until that window has passed.
 - No real IdP, no real PHI/PII. Fictional names only.
 
-## Follow-up PRs (construction, after this design is approved)
+## Follow-up PRs (construction, after Chris says go)
 
 Same shape as M4: one concern per PR, tests in each, docs last. No rate-limit PR. No `max_rows` PR. No break-glass PR. No policy-tag PR.
 
-1. **This PR.** Design, ROADMAP pointer, audit pointer. No runtime. Wait for Chris.
+1. **This PR.** Design, ROADMAP pointer, audit pointer. No runtime. Design approved. Construction waits until Chris says go.
 2. Policy `engine: bigquery` and ADC routing. Parse `bigquery`, `schema` as dataset, optional `location`. `--apply` requires extra + ADC + project. Refuse JSON keys. Dry run without GCP.
 3. BigQuery grant engine (mocked client). `issuing` row, authorized view in shared `datagrant_views`, one-time authorized dataset on the source, receipt, IAM bind last with `resource.name` of exactly `G_<id>` and one grant-project `jobUser` binding whose condition title is `G_<id>`, `accessPolicyVersion=3`, etag RMW with 409 retry, `active`. Two-person stores principal only. Custom grantee role without `tables.get`. Restricted hash table plus authorized SQL UDF. Reverse-drop the view, not the standing authorized dataset. Unit test: IAM JSON names exactly one view; `jobUser` title is `G_<id>`; etag conflict retries.
 4. BigQuery revoke and sweep. Drop view first; remove this grant's dataset bind and this grant's `jobUser` bind (title `G_<id>`) only; never decide from other grants; `jobs.cancel` best-effort (`jobs.listAll` + `jobs.update`); 10-minute issuing/enabling grace; pending TTL does not drop objects; `grant list` / `status`; rowcount claims so a revoked grant cannot return to `active`. Unit test: two grants for one principal, revoke one, the other `jobUser` binding stays. Include `accessPolicyVersion=3` on dataset IAM get/update if PR 3 did not already.
@@ -307,73 +307,73 @@ Same shape as M4: one concern per PR, tests in each, docs last. No rate-limit PR
 
 ## Decisions for Chris
 
-The one-line why is the whole point. Recommended picks: **1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B**.
+The one-line why is the whole point. Chris approved all 11 revised picks on 2026-11-14 4:51 PM CT: **1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B**. Quote: "Approve all 11 revised BigQuery picks".
 
 1. **How does the developer get access to BigQuery?**
    - A. Per-grant service account, JSON key or token shown once (closest to Snowflake's key pair).
    - B. Per-grant authorized view plus an IAM binding on the requester's existing Google principal, with an expiry condition **and** a `resource.name` condition that names exactly that view in shared `datagrant_views`.
    - C. Per-grant service account with impersonation only (no keys), still a new SA per grant.
-   - **Recommend B.** ROADMAP already said IAM / authorized views, not a password user. JSON keys are long-lived secrets and many orgs forbid creating them. SA quota is a real ceiling. B uses the Google identity the developer already has. **Refined after QE:** B now requires the table `resource.name` condition; an unconditional dataset bind would inherit every other grant's view.
+   - **Recommend B (approved).** ROADMAP already said IAM / authorized views, not a password user. JSON keys are long-lived secrets and many orgs forbid creating them. SA quota is a real ceiling. B uses the Google identity the developer already has. **Refined after QE:** B now requires the table `resource.name` condition; an unconditional dataset bind would inherit every other grant's view.
 
 2. **How much of today's product should BigQuery copy?**
    - A. Everything, including doctor, the writer lock, and statement-logging tricks.
    - B. The path people use: ask, approve, masked access, expiry, receipt, revoke, sweep.
    - C. Masked views only, no receipts.
-   - **Recommend B.** Same as Snowflake 2B. Postgres host checks do not translate.
+   - **Recommend B (approved).** Same as Snowflake 2B. Postgres host checks do not translate.
 
 3. **BigQuery policy tags / data masking, or datagrant views like Postgres?**
    - A. Use policy tags and column data masking as the grant.
    - B. Keep datagrant authorized views (same five mask names).
    - C. Support both in this version.
-   - **Recommend B.** Policy tags are project-wide, not a time-boxed grant. One way to grant, one way to revoke, one receipt.
+   - **Recommend B (approved).** Policy tags are project-wide, not a time-boxed grant. One way to grant, one way to revoke, one receipt.
 
 4. **How do row filters work?**
    - A. Row access policies on the source table.
    - B. Re-emit the filter in the authorized view `WHERE`, with quoted identifiers and `` `SRC`.`COL` ``.
    - C. Support both in this version.
-   - **Recommend B.** A RAP on the base table would apply to every reader. View `WHERE` matches Postgres and Snowflake.
+   - **Recommend B (approved).** A RAP on the base table would apply to every reader. View `WHERE` matches Postgres and Snowflake.
 
 5. **How does the operator authenticate to GCP?**
    - A. A service-account JSON key in a DSN or `--credentials` file.
    - B. Application Default Credentials / workload identity, optional impersonation of an operator SA, secret-free project locator. JSON keys refused.
    - C. Store a user OAuth refresh token in datagrant config.
-   - **Recommend B.** Same bar as Snowflake key-pair-only DSN: no long-lived secret in argv or a datagrant-owned file. ADC and workload identity are how GCP expects bastions and CI to run.
+   - **Recommend B (approved).** Same bar as Snowflake key-pair-only DSN: no long-lived secret in argv or a datagrant-owned file. ADC and workload identity are how GCP expects bastions and CI to run.
 
 6. **How do we test this without a BigQuery bill in GitHub Actions?**
    - A. Require a real GCP project in CI.
    - B. Check recorded RPC / SQL in tests; run live tests only when someone sets `DATAGRANT_TEST_BIGQUERY`.
    - C. No BigQuery tests.
-   - **Recommend B.** Same as Snowflake 5B.
+   - **Recommend B (approved).** Same as Snowflake 5B.
 
 7. **Does the one-command demo need BigQuery?**
    - A. Replace today's Postgres demo.
    - B. Keep the Postgres demo; BigQuery is docs and tests.
    - C. Add a second demo that needs a GCP project, and run it in CI.
-   - **Recommend B.** Same as Snowflake 6B.
+   - **Recommend B (approved).** Same as Snowflake 6B.
 
 8. **What ends a grant that is only two hours long?**
    - A. IAM condition only. No sweep of BigQuery objects.
    - B. Sweep drops the view every 1 minute; IAM condition is a backstop for new queries after `expires_at`.
    - C. Sweep only. No IAM condition.
-   - **Recommend B.** Conditions do not drop views or write receipts. Sweep is how Postgres and Snowflake end sub-day grants. The condition covers a missed sweep for *new* queries.
+   - **Recommend B (approved).** Conditions do not drop views or write receipts. Sweep is how Postgres and Snowflake end sub-day grants. The condition covers a missed sweep for *new* queries.
 
 9. **What makes revoke fail closed given IAM lag?**
    - A. Remove the IAM bind first, then drop the view.
    - B. Drop the view first, then remove IAM, then `jobs.cancel` best-effort. Exit 4 if the view still exists.
    - C. Cancel jobs in a loop until QUERY_HISTORY is quiet, then drop.
-   - **Recommend B.** A deleted view does not serve rows even if IAM has not propagated. Cancel loops are slow, billed, and still miss jobs. Same spirit as Snowflake DISABLE-then-DROP.
+   - **Recommend B (approved).** A deleted view does not serve rows even if IAM has not propagated. Cancel loops are slow, billed, and still miss jobs. Same spirit as Snowflake DISABLE-then-DROP.
 
 10. **How do we keep a grant from scanning a petabyte?**
     - A. New policy keys (`max_bytes_billed`, slot caps) in M5.
     - B. Dedicated grant project plus GCP budgets/alerts. No new YAML keys.
     - C. Per-grant bytes cap required on every BigQuery dataset.
-    - **Recommend B.** `max_rows` is already out. A bytes cap is a new product surface. Billing controls already exist in GCP.
+    - **Recommend B (approved).** `max_rows` is already out. A bytes cap is a new product surface. Billing controls already exist in GCP.
 
 11. **How are grants isolated, and how is the source authorized?**
     - A. One BigQuery dataset per grant; authorize each view (or dataset) on the source.
     - B. One shared `datagrant_views` dataset. Authorize that dataset **once** on each source. Isolate grantees with an IAM condition `resource.type == "bigquery.googleapis.com/Table" && resource.name == "projects/P/datasets/datagrant_views/tables/G_<id>" && request.time < ...`.
     - C. Shared `datagrant_views` with unconditional `dataViewer` (no resource condition).
-    - **Recommend B.** C inherits every other grant's view (QE High). A isolates without a condition but multiplies datasets and per-grant source ACL edits. B matches Google's authorized-dataset grouping and keeps source edits one-time. Authorized dataset/view/routine entries cannot carry IAM Conditions, so isolation lives on the IAM bind, not the source ACL. **New pick after QE.**
+    - **Recommend B (approved).** C inherits every other grant's view (QE High). A isolates without a condition but multiplies datasets and per-grant source ACL edits. B matches Google's authorized-dataset grouping and keeps source edits one-time. Authorized dataset/view/routine entries cannot carry IAM Conditions, so isolation lives on the IAM bind, not the source ACL. **New pick after QE.**
 
 ## Citations
 
@@ -397,3 +397,4 @@ Checked against Google docs (not inferred from SDK types):
 3. **`max_rows` stays out.**
 4. **No break-glass.** Emergency path is a reviewed policy edit to `approval: auto`.
 5. **M4 shipped in v0.6.0** (PRs #47 to #53, tag `v0.6.0` at `6581ab8`).
+6. **M5 design approved 2026-11-14 4:51 PM CT.** Chris: "Approve all 11 revised BigQuery picks". Picks: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Construction does not start until Chris says go.

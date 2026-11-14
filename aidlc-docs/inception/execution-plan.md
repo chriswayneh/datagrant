@@ -50,8 +50,8 @@ Chris authorized a v1.0 plan that parked **warehouses (Snowflake/BigQuery)** aft
 
 Implemented (PRs #47 to #53). Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Design approved (PR #47 at `0449a0b`). v0.6.0 released 2026-11-14.
 
-## Post-v0.6.0: M5 / BigQuery (Inception in progress)
+## Post-v0.6.0: M5 / BigQuery (design approved)
 
 Chris authorized a v1.0 plan that parked **BigQuery** after Snowflake. M4 released as v0.6.0. M5 is that warehouse work, target **v0.7.0+**. Same request, mask, expire, revoke, sweep and receipt model. IAM / authorized views, not a password user. Rate limits and `max_rows` stay out. No break-glass.
 
-**Status:** design pending approval. Artifact: [docs/design/bigquery.md](../../docs/design/bigquery.md). Recommended picks 1B/2B/3B/4B/5B/6B/7B/8B/9B/10B/11B (1B refined after QE: table `resource.name` on the shared view dataset; 11B new: authorize `datagrant_views` once on each source). No runtime until Chris records the approval in [audit.md](../audit.md). Construction PRs (policy routing, grant engine, revoke/sweep, `--apply`, masks, docs) wait on that gate.
+**Status:** design approved. Artifact: [docs/design/bigquery.md](../../docs/design/bigquery.md). Chris approved all 11 revised picks on 2026-11-14 4:51 PM CT: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Quote: "Approve all 11 revised BigQuery picks". Recorded in [audit.md](../audit.md). No runtime. Construction PRs (policy routing, grant engine, revoke/sweep, `--apply`, masks, docs) wait until Chris says go.
