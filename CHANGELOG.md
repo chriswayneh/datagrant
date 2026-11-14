@@ -4,7 +4,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-11-13
+## [0.6.0] - 2026-11-14
 
 Snowflake warehouse support.
 

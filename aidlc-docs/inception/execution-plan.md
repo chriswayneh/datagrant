@@ -48,4 +48,4 @@ Implemented (PRs #40 to #45). Design: [docs/design/ops-hardening.md](../../docs/
 
 Chris authorized a v1.0 plan that parked **warehouses (Snowflake/BigQuery)** after ops hardening. M3 released as v0.5.0. M4 is that warehouse work, target v0.6.0. **Snowflake first**; BigQuery is **v0.7.0+**. Rate limits and `max_rows` stay out. No break-glass.
 
-Implemented (PRs #47 to #52). Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Design approved (PR #47 at `0449a0b`). v0.6.0 ready, release pending (not tagged).
+Implemented (PRs #47 to #53). Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Design approved (PR #47 at `0449a0b`). v0.6.0 released 2026-11-14.
