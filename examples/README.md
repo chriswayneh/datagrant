@@ -24,6 +24,7 @@ Add a dataset with `engine: snowflake`. Install `pip install '.[snowflake]'` fro
         columns:
           PATIENT_ID: passthrough
           SSN: hash
+        filter_columns: [REGION]
         row_filters:
           - "REGION = 'west'"
 ```
