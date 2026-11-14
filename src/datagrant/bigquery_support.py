@@ -28,6 +28,7 @@ JSON_KEY_ADC_MSG = (
     "service-account JSON key is not supported; use ADC user login, "
     "workload identity, or impersonation"
 )
+ADC_FILE_SHAPE_MSG = "ADC credentials file must be a regular file of at most 64 KiB"
 _GCE_METADATA_TIMEOUT_ENV = "GCE_METADATA_TIMEOUT"
 _ADC_METADATA_TIMEOUT_SEC = "1"
 _SERVICE_ACCOUNT_TYPE = "service_account"
@@ -106,6 +107,11 @@ def _adc_body_is_json_key(body: object, *, depth: int = 0) -> bool:
     return False
 
 
+def _adc_file_shape_error(path: Path) -> BigQuerySetupError:
+    """Exit-2 error for a FIFO, device, or oversized ADC file. Path only, never contents."""
+    return BigQuerySetupError(f"{ADC_FILE_SHAPE_MSG}: {path}")
+
+
 def _load_adc_json(path: Path) -> dict[str, Any] | None:
     """Load ADC JSON. Refuse a FIFO, device, or oversized file. Never log contents."""
     try:
@@ -113,14 +119,14 @@ def _load_adc_json(path: Path) -> dict[str, Any] | None:
     except OSError:
         return None
     if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_ADC_FILE_BYTES:
-        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+        raise _adc_file_shape_error(path)
     try:
         with path.open("rb") as fh:
             data = fh.read(MAX_ADC_FILE_BYTES + 1)
     except OSError:
         return None
     if len(data) > MAX_ADC_FILE_BYTES:
-        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+        raise _adc_file_shape_error(path)
     try:
         body = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -128,18 +134,6 @@ def _load_adc_json(path: Path) -> dict[str, Any] | None:
     if not isinstance(body, dict):
         return None
     return body
-
-
-def _read_adc_type(path: Path) -> str | None:
-    """Return the JSON ``type`` field only. Never log the file.
-
-    A FIFO, device node, or file larger than MAX_ADC_FILE_BYTES is refused
-    (exit 2) instead of being read without a bound.
-    """
-    body = _load_adc_json(path)
-    if body is None:
-        return None
-    return _json_type(body)
 
 
 def _adc_file_is_json_key(path: Path) -> bool:

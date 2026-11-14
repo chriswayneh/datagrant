@@ -12,11 +12,13 @@ import pytest
 
 from datagrant.bigquery_support import (
     ADC_CHECKING_MSG,
+    ADC_FILE_SHAPE_MSG,
     ADC_SCOPES,
     BIGQUERY_CREDENTIALS_ENV,
     BIGQUERY_DSN_ENV,
     BIGQUERY_PROJECT_ENV,
     JSON_KEY_ADC_MSG,
+    MAX_ADC_FILE_BYTES,
     BigQuerySetupError,
     adc_available,
     driver_present,
@@ -612,8 +614,44 @@ def test_adc_refuses_fifo_credentials_file(monkeypatch: pytest.MonkeyPatch, tmp_
         raise ImportError(name)
 
     monkeypatch.setattr("datagrant.bigquery_support.importlib.import_module", load)
-    with pytest.raises(BigQuerySetupError, match=re.escape(JSON_KEY_ADC_MSG)):
+    with pytest.raises(BigQuerySetupError, match=re.escape(ADC_FILE_SHAPE_MSG)) as excinfo:
         adc_available()
+    msg = str(excinfo.value)
+    assert str(fifo) in msg
+    assert JSON_KEY_ADC_MSG not in msg
+
+
+def test_adc_refuses_oversized_credentials_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    key = tmp_path / "adc.json"
+    canary = "CANARY-OVERSIZE-BODY"
+    key.write_bytes((canary + "a" * MAX_ADC_FILE_BYTES).encode("ascii"))
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key))
+    monkeypatch.setattr(
+        "datagrant.bigquery_support._well_known_adc_path",
+        lambda: tmp_path / "missing-adc.json",
+    )
+
+    class _Auth:
+        @staticmethod
+        def default(request: Any = None, scopes: Any = None) -> tuple[Any, str]:
+            raise AssertionError("google.auth.default() must not run on an oversized ADC file")
+
+    def load(name: str) -> Any:
+        if name == "google.auth":
+            return _Auth
+        if name == "google.auth.exceptions":
+            return _AuthExc
+        raise ImportError(name)
+
+    monkeypatch.setattr("datagrant.bigquery_support.importlib.import_module", load)
+    with pytest.raises(BigQuerySetupError, match=re.escape(ADC_FILE_SHAPE_MSG)) as excinfo:
+        adc_available()
+    msg = str(excinfo.value)
+    assert str(key) in msg
+    assert canary not in msg
+    assert JSON_KEY_ADC_MSG not in msg
 
 
 def test_adc_metadata_request_init_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
