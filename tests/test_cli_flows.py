@@ -124,6 +124,21 @@ REQ = (
 )
 
 
+def test_postgres_request_does_not_open_bigquery(
+    setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom() -> bool:
+        raise AssertionError("BigQuery driver probed on a postgres dataset")
+
+    monkeypatch.setattr("datagrant.bigquery_support.driver_present", boom)
+    monkeypatch.setattr("datagrant.bigquery_support.adc_available", boom)
+    pol = str(setup["tmp"] / "auto.yaml")
+    code, d = run("request", "--policy", pol, *REQ)
+    assert code == 0 and d["dry_run"]
+    code, d = run("request", "--apply", "--policy", pol, *REQ)
+    assert code == 0 and d["status"] == "granted"
+
+
 def test_postgres_request_does_not_open_snowflake(
     setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -32,11 +32,15 @@ from datagrant.rowfilter import RowFilterError, parse_row_filter
 MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null"})
 APPROVAL_MODES = frozenset({"auto", "two-person"})
 SOD_MODES = frozenset({"none", "distinct-groups"})
-ENGINES = frozenset({"postgres", "snowflake"})
+ENGINES = frozenset({"postgres", "snowflake", "bigquery"})
 _DURATION_RE = re.compile(r"^(\d{1,6})([mhd])$")
 _SMALL_DURATION_RE = re.compile(r"^(\d{1,6})([smhd])$")
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+# GCP project id: 6-30 chars, lowercase letter, then letters/digits/hyphens, not ending in hyphen.
+_BQ_PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+_BQ_DATASET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
+_BQ_LOCATION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MEMBER_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
 MAX_POLICY_BYTES = 1_000_000
@@ -80,6 +84,7 @@ class Dataset:
     max_concurrent_grants: int | None = None
     engine: str = "postgres"
     schema: str | None = None
+    location: str | None = None
 
     def __post_init__(self) -> None:
         if not self.hash_scope:
@@ -211,7 +216,52 @@ def _str_list(val: object, where: str) -> list[str]:
     return val
 
 
-def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> TableRule:
+def _parse_bq_table_name(name: str, where: str, database: str, schema: str | None) -> None:
+    """dataset.table, or project.dataset.table when project matches database."""
+    parts = name.split(".")
+    if len(parts) == 3:
+        project, ds, table = parts
+        if not _BQ_PROJECT_RE.fullmatch(project):
+            raise PolicyError(f"{where}.name: invalid GCP project id {project!r}")
+        if project != database:
+            raise PolicyError(
+                f"{where}.name: project {project!r} must match dataset.database {database!r}"
+            )
+        if not _BQ_DATASET_RE.fullmatch(ds) or not _BQ_DATASET_RE.fullmatch(table):
+            raise PolicyError(
+                f"{where}.name: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
+            )
+        if schema is not None and ds != schema:
+            raise PolicyError(
+                f"{where}.name: dataset id {ds!r} must match dataset.schema {schema!r}"
+            )
+        return
+    if len(parts) == 2:
+        ds, table = parts
+        if not _BQ_DATASET_RE.fullmatch(ds) or not _BQ_DATASET_RE.fullmatch(table):
+            raise PolicyError(
+                f"{where}.name: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
+            )
+        if schema is not None and ds != schema:
+            raise PolicyError(
+                f"{where}.name: dataset id {ds!r} must match dataset.schema {schema!r}"
+            )
+        return
+    raise PolicyError(
+        f"{where}.name: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
+    )
+
+
+def _parse_table(
+    raw: object,
+    where: str,
+    cap: timedelta,
+    groups: set[str],
+    *,
+    engine: str = "postgres",
+    database: str = "",
+    schema: str | None = None,
+) -> TableRule:
     if not isinstance(raw, dict):
         raise PolicyError(f"{where}: expected a mapping")
     _check_keys(
@@ -229,9 +279,12 @@ def _parse_table(raw: object, where: str, cap: timedelta, groups: set[str]) -> T
         where,
     )
     name = _req(raw, "name", str, where)
-    parts = name.split(".")
-    if len(parts) != 2 or not all(_IDENT_RE.fullmatch(p) for p in parts):
-        raise PolicyError(f"{where}.name: expected 'schema.table' identifiers, got {name!r}")
+    if engine == "bigquery":
+        _parse_bq_table_name(name, where, database, schema)
+    else:
+        parts = name.split(".")
+        if len(parts) != 2 or not all(_IDENT_RE.fullmatch(p) for p in parts):
+            raise PolicyError(f"{where}.name: expected 'schema.table' identifiers, got {name!r}")
     allowed = _str_list(_req(raw, "allowed_groups", list, where), f"{where}.allowed_groups")
     for g in allowed:
         if g not in groups:
@@ -515,35 +568,62 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
                 "max_concurrent_grants",
                 "engine",
                 "schema",
+                "location",
             },
             where,
         )
         name = _req(ds, "name", str, where)
         if not _NAME_RE.fullmatch(name) or name in datasets:
             raise PolicyError(f"{where}.name: invalid or duplicate dataset name {name!r}")
-        db = _req(ds, "database", str, where)
-        if not _IDENT_RE.fullmatch(db):
-            raise PolicyError(f"{where}.database: invalid database name {db!r}")
         raw_engine = ds.get("engine", "postgres")
         if not isinstance(raw_engine, str) or raw_engine not in ENGINES:
             raise PolicyError(
                 f"{where}.engine: must be one of {sorted(ENGINES)} (omit for postgres)"
             )
         engine = raw_engine
+        db = _req(ds, "database", str, where)
+        if engine == "bigquery":
+            if not _BQ_PROJECT_RE.fullmatch(db):
+                raise PolicyError(f"{where}.database: invalid GCP project id {db!r}")
+        elif not _IDENT_RE.fullmatch(db):
+            raise PolicyError(f"{where}.database: invalid database name {db!r}")
         schema: str | None = None
         if "schema" in ds:
-            if engine != "snowflake":
-                raise PolicyError(f"{where}.schema: only valid when engine is snowflake")
+            if engine not in {"snowflake", "bigquery"}:
+                raise PolicyError(
+                    f"{where}.schema: only valid when engine is snowflake or bigquery"
+                )
             raw_schema = ds["schema"]
-            if not isinstance(raw_schema, str) or not _IDENT_RE.fullmatch(raw_schema):
+            schema_ok = isinstance(raw_schema, str) and (
+                _BQ_DATASET_RE.fullmatch(raw_schema)
+                if engine == "bigquery"
+                else _IDENT_RE.fullmatch(raw_schema)
+            )
+            if not schema_ok:
                 raise PolicyError(f"{where}.schema: invalid schema name {raw_schema!r}")
             schema = raw_schema
+        location: str | None = None
+        if "location" in ds:
+            if engine != "bigquery":
+                raise PolicyError(f"{where}.location: only valid when engine is bigquery")
+            raw_loc = ds["location"]
+            if not isinstance(raw_loc, str) or not _BQ_LOCATION_RE.fullmatch(raw_loc):
+                raise PolicyError(f"{where}.location: invalid BigQuery location {raw_loc!r}")
+            location = raw_loc
         scope = ds.get("hash_scope", name)
         if not isinstance(scope, str) or not _NAME_RE.fullmatch(scope):
             raise PolicyError(f"{where}.hash_scope: invalid hash scope {scope!r}")
         tables: dict[str, TableRule] = {}
         for j, t in enumerate(_req(ds, "tables", list, where)):
-            rule = _parse_table(t, f"{where}.tables[{j}]", cap, set(groups))
+            rule = _parse_table(
+                t,
+                f"{where}.tables[{j}]",
+                cap,
+                set(groups),
+                engine=engine,
+                database=db,
+                schema=schema,
+            )
             if rule.name in tables:
                 raise PolicyError(f"{where}.tables[{j}]: duplicate table {rule.name!r}")
             tables[rule.name] = rule
@@ -554,7 +634,7 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
             if "max_concurrent_grants" in ds
             else None
         )
-        datasets[name] = Dataset(name, db, tables, scope, ds_cap, engine, schema)
+        datasets[name] = Dataset(name, db, tables, scope, ds_cap, engine, schema, location)
     approvers = frozenset(_str_list(data.get("approvers", []), "policy.approvers"))
     unknown = approvers - set(groups)
     if unknown:
@@ -588,9 +668,7 @@ def parse_policy(data: object, sha256: str = "", *, env: Mapping[str, str] | Non
     if "separation_of_duties" in data:
         raw_sod = data["separation_of_duties"]
         if not isinstance(raw_sod, str) or raw_sod not in SOD_MODES:
-            raise PolicyError(
-                f"policy.separation_of_duties: must be one of {sorted(SOD_MODES)}"
-            )
+            raise PolicyError(f"policy.separation_of_duties: must be one of {sorted(SOD_MODES)}")
         sod = raw_sod
     strict_preflight = _opt_bool(data, "strict_preflight", "policy")
     strict_policy_permissions = _opt_bool(data, "strict_policy_permissions", "policy")

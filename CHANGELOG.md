@@ -4,6 +4,10 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+- Optional dataset `engine: bigquery`, BigQuery `schema` (dataset id), and optional `location`. `database` is the GCP project id. Table names are `dataset.table` or `project.dataset.table` matching `database`. Unknown engines and a table-level `engine` stay policy errors. Mixed postgres/snowflake/bigquery files parse (`datagrant policy check`).
+- BigQuery `--apply` routing: requires the optional extra `datagrant[bigquery]` (`pip install 'datagrant[bigquery]'`), `--bigquery-project` / `$DATAGRANT_BIGQUERY_PROJECT`, and Application Default Credentials. A JSON key path, `credentials_path`, `private_key`, or `--bigquery-dsn` is refused (exit 2). Dry run does not call GCP and does not need ADC. Grant issue `--apply` is not implemented yet. Postgres and Snowflake `--apply` do not probe the BigQuery extra.
+
 ## [0.6.0] - 2026-11-14
 
 Snowflake warehouse support.
