@@ -10,6 +10,7 @@ import importlib
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -30,6 +31,10 @@ JSON_KEY_ADC_MSG = (
 _GCE_METADATA_TIMEOUT_ENV = "GCE_METADATA_TIMEOUT"
 _ADC_METADATA_TIMEOUT_SEC = "1"
 _SERVICE_ACCOUNT_TYPE = "service_account"
+_GDCH_SERVICE_ACCOUNT_TYPE = "gdch_service_account"
+_IMPERSONATED_TYPE = "impersonated_service_account"
+_REFUSED_ADC_TYPES = frozenset({_SERVICE_ACCOUNT_TYPE, _GDCH_SERVICE_ACCOUNT_TYPE})
+_ADC_UNWRAP_LIMIT = 8
 ADC_SCOPES = ["https://www.googleapis.com/auth/bigquery"]
 _REFUSED_KEYS = (
     "credentials_path",
@@ -77,42 +82,117 @@ def _well_known_adc_path() -> Path:
     return Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
 
 
-def _read_adc_type(path: Path) -> str | None:
-    """Return the JSON ``type`` field only. Never log the file."""
-    try:
-        if not path.is_file():
-            return None
-        data = path.read_bytes()[:MAX_ADC_FILE_BYTES]
-        body = json.loads(data.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(body, dict):
-        return None
+def _json_type(body: Mapping[str, Any]) -> str | None:
     raw = body.get("type")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return None
 
 
-def _is_service_account_credentials(creds: Any) -> bool:
+def _adc_body_is_json_key(body: object, *, depth: int = 0) -> bool:
+    """True for a service-account JSON key, including nested impersonation sources."""
+    if depth > _ADC_UNWRAP_LIMIT or not isinstance(body, dict):
+        return False
+    kind = _json_type(body)
+    if kind in _REFUSED_ADC_TYPES:
+        return True
+    if kind == _IMPERSONATED_TYPE:
+        source = body.get("source_credentials")
+        if isinstance(source, dict):
+            src_kind = _json_type(source)
+            if src_kind in _REFUSED_ADC_TYPES:
+                return True
+            return _adc_body_is_json_key(source, depth=depth + 1)
+    return False
+
+
+def _load_adc_json(path: Path) -> dict[str, Any] | None:
+    """Load ADC JSON. Refuse a FIFO, device, or oversized file. Never log contents."""
     try:
-        sa = importlib.import_module("google.oauth2.service_account")
+        info = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_ADC_FILE_BYTES:
+        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(MAX_ADC_FILE_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_ADC_FILE_BYTES:
+        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+    try:
+        body = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    return body
+
+
+def _read_adc_type(path: Path) -> str | None:
+    """Return the JSON ``type`` field only. Never log the file.
+
+    A FIFO, device node, or file larger than MAX_ADC_FILE_BYTES is refused
+    (exit 2) instead of being read without a bound.
+    """
+    body = _load_adc_json(path)
+    if body is None:
+        return None
+    return _json_type(body)
+
+
+def _adc_file_is_json_key(path: Path) -> bool:
+    body = _load_adc_json(path)
+    if body is None:
+        return False
+    return _adc_body_is_json_key(body)
+
+
+def _refuse_adc_file_json_key() -> None:
+    """Refuse a JSON key in GAC or gcloud ADC. Call before google.auth.default()."""
+    gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if isinstance(gac, str) and gac.strip():
+        if _adc_file_is_json_key(Path(gac.strip())):
+            raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+        return
+    if _adc_file_is_json_key(_well_known_adc_path()):
+        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+
+
+def _isinstance_mod(creds: Any, module: str, attr: str) -> bool:
+    try:
+        mod = importlib.import_module(module)
     except ImportError:
         return False
-    cls = getattr(sa, "Credentials", None)
+    cls = getattr(mod, attr, None)
     return isinstance(cls, type) and isinstance(creds, cls)
+
+
+def _is_service_account_credentials(creds: Any) -> bool:
+    current = creds
+    seen: set[int] = set()
+    for _ in range(_ADC_UNWRAP_LIMIT):
+        if current is None:
+            return False
+        ident = id(current)
+        if ident in seen:
+            return False
+        seen.add(ident)
+        if _isinstance_mod(current, "google.oauth2.service_account", "Credentials"):
+            return True
+        if _isinstance_mod(current, "google.oauth2.gdch_credentials", "ServiceAccountCredentials"):
+            return True
+        if _isinstance_mod(current, "google.auth.impersonated_credentials", "Credentials"):
+            current = getattr(current, "_source_credentials", None)
+            continue
+        return False
+    return False
 
 
 def _refuse_service_account_json_key(creds: Any) -> None:
     """Refuse a service-account JSON key loaded via ADC. Allowed: user, WIF, impersonation, GCE."""
     if _is_service_account_credentials(creds):
-        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
-    gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if isinstance(gac, str) and gac.strip():
-        if _read_adc_type(Path(gac.strip())) == _SERVICE_ACCOUNT_TYPE:
-            raise BigQuerySetupError(JSON_KEY_ADC_MSG)
-        return
-    if _read_adc_type(_well_known_adc_path()) == _SERVICE_ACCOUNT_TYPE:
         raise BigQuerySetupError(JSON_KEY_ADC_MSG)
 
 
@@ -152,6 +232,7 @@ def adc_available() -> bool:
     Refuses a service-account JSON key loaded via ADC (exit 2 at the CLI).
     """
     print(ADC_CHECKING_MSG, file=sys.stderr)
+    _refuse_adc_file_json_key()
     try:
         google_auth = importlib.import_module("google.auth")
         auth_exceptions = importlib.import_module("google.auth.exceptions")

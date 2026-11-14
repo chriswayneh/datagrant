@@ -171,6 +171,23 @@ class _SAMod:
     Credentials = _SACreds
 
 
+class _ImpersonatedCreds:
+    def __init__(self, source: Any = None) -> None:
+        self._source_credentials = source
+
+
+class _ImpersonatedMod:
+    Credentials = _ImpersonatedCreds
+
+
+class _GdchSACreds:
+    pass
+
+
+class _GdchMod:
+    ServiceAccountCredentials = _GdchSACreds
+
+
 class _AuthMod:
     def __init__(self, creds: Any, *, boom: BaseException | None = None) -> None:
         self._creds = creds
@@ -211,6 +228,10 @@ def _auth_loader(creds: Any, *, boom: BaseException | None = None) -> Any:
             return _AuthExc
         if name == "google.oauth2.service_account":
             return _SAMod
+        if name == "google.oauth2.gdch_credentials":
+            return _GdchMod
+        if name == "google.auth.impersonated_credentials":
+            return _ImpersonatedMod
         raise ImportError(name)
 
     return load
@@ -463,6 +484,136 @@ def test_adc_transport_request_typeerror_retries_and_restores_timeout(
     monkeypatch.setattr("datagrant.bigquery_support.importlib.import_module", load)
     assert adc_available() is True
     assert os.environ.get("GCE_METADATA_TIMEOUT") == "9"
+
+
+def _adc_file_via(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: dict[str, Any], via: str
+) -> None:
+    adc = tmp_path / "adc.json"
+    adc.write_text(json.dumps(body), encoding="utf-8")
+    if via == "gac":
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc))
+        monkeypatch.setattr(
+            "datagrant.bigquery_support._well_known_adc_path",
+            lambda: tmp_path / "missing-adc.json",
+        )
+    else:
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setattr("datagrant.bigquery_support._well_known_adc_path", lambda: adc)
+    monkeypatch.setattr(
+        "datagrant.bigquery_support.importlib.import_module",
+        _auth_loader(_UserCreds()),
+    )
+
+
+@pytest.mark.parametrize("via", ("gac", "well_known"))
+@pytest.mark.parametrize(
+    "body",
+    (
+        {"type": "gdch_service_account"},
+        {
+            "type": "impersonated_service_account",
+            "source_credentials": {"type": "service_account", "private_key": "CANARY-SA-KEY"},
+        },
+    ),
+)
+def test_adc_refuses_gdch_and_sa_source_impersonation_files(
+    via: str, body: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _adc_file_via(monkeypatch, tmp_path, body, via)
+    with pytest.raises(BigQuerySetupError, match=re.escape(JSON_KEY_ADC_MSG)) as excinfo:
+        adc_available()
+    assert "CANARY-SA-KEY" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("via", ("gac", "well_known"))
+def test_adc_allows_impersonation_from_authorized_user(
+    via: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _adc_file_via(
+        monkeypatch,
+        tmp_path,
+        {
+            "type": "impersonated_service_account",
+            "source_credentials": {"type": "authorized_user", "client_id": "x"},
+        },
+        via,
+    )
+    assert adc_available() is True
+
+
+def test_adc_refuses_impersonated_credentials_wrapping_service_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _no_adc_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "datagrant.bigquery_support.importlib.import_module",
+        _auth_loader(_ImpersonatedCreds(_SACreds())),
+    )
+    with pytest.raises(BigQuerySetupError, match=re.escape(JSON_KEY_ADC_MSG)):
+        adc_available()
+
+
+def test_adc_refuses_nested_impersonated_credentials_wrapping_service_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _no_adc_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "datagrant.bigquery_support.importlib.import_module",
+        _auth_loader(_ImpersonatedCreds(_ImpersonatedCreds(_SACreds()))),
+    )
+    with pytest.raises(BigQuerySetupError, match=re.escape(JSON_KEY_ADC_MSG)):
+        adc_available()
+
+
+def test_adc_refuses_gdch_service_account_credentials_class(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _no_adc_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "datagrant.bigquery_support.importlib.import_module",
+        _auth_loader(_GdchSACreds()),
+    )
+    with pytest.raises(BigQuerySetupError, match=re.escape(JSON_KEY_ADC_MSG)):
+        adc_available()
+
+
+def test_adc_allows_impersonated_credentials_wrapping_user(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _no_adc_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "datagrant.bigquery_support.importlib.import_module",
+        _auth_loader(_ImpersonatedCreds(_UserCreds())),
+    )
+    assert adc_available() is True
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFO on this platform")
+def test_adc_refuses_fifo_credentials_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fifo = tmp_path / "adc.fifo"
+    os.mkfifo(fifo)
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(fifo))
+    monkeypatch.setattr(
+        "datagrant.bigquery_support._well_known_adc_path",
+        lambda: tmp_path / "missing-adc.json",
+    )
+
+    class _Auth:
+        @staticmethod
+        def default(request: Any = None, scopes: Any = None) -> tuple[Any, str]:
+            raise AssertionError("google.auth.default() must not run on a FIFO")
+
+    def load(name: str) -> Any:
+        if name == "google.auth":
+            return _Auth
+        if name == "google.auth.exceptions":
+            return _AuthExc
+        raise ImportError(name)
+
+    monkeypatch.setattr("datagrant.bigquery_support.importlib.import_module", load)
+    with pytest.raises(BigQuerySetupError, match=re.escape(JSON_KEY_ADC_MSG)):
+        adc_available()
 
 
 def test_adc_metadata_request_init_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
