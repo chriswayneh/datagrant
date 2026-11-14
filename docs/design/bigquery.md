@@ -1,6 +1,6 @@
 # Design: BigQuery (v0.7.0+ / M5)
 
-Status: M5 Inception. Design approved 2026-11-14 4:51 PM CT (Chris: "Approve all 11 revised BigQuery picks"; picks 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B). Recorded in [audit.md](../../aidlc-docs/audit.md). No runtime. Construction does not start until Chris says go.
+Status: M5 construction in progress (PR 2 of 7). Design approved 2026-11-14 4:51 PM CT (Chris: "Approve all 11 revised BigQuery picks"; picks 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B). Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../../aidlc-docs/audit.md).
 
 M4 (v0.6.0) shipped Snowflake. ROADMAP next item is **the same request, mask, expire, revoke, sweep and receipt model on BigQuery** (IAM / authorized views, not a password user). Target **v0.7.0+**. Rate limits, `max_rows`, and break-glass stay out.
 
@@ -293,11 +293,11 @@ Quotas that can bite (not policy keys): IAM bindings per resource, authorized re
 - Live (optional): if `DATAGRANT_TEST_BIGQUERY` is set (project + ADC), issue, SELECT as a throwaway principal, revoke, confirm the view is gone. Fictional data only. CI default is unset (skip). That live test **asserts both**: (a) the grantee can query the view **without** `bigquery.tables.get`; (b) the grantee can `SELECT` a view that calls `datagrant.hash_hmac` **without** IAM on the UDF dataset. After bind/unbind, wait: IAM changes typically take 2 minutes and can take 7 minutes or longer; do not treat a still-denied or still-allowed query as a product bug until that window has passed.
 - No real IdP, no real PHI/PII. Fictional names only.
 
-## Follow-up PRs (construction, after Chris says go)
+## Follow-up PRs (construction in progress, PR 2 of 7)
 
 Same shape as M4: one concern per PR, tests in each, docs last. No rate-limit PR. No `max_rows` PR. No break-glass PR. No policy-tag PR.
 
-1. **This PR.** Design, ROADMAP pointer, audit pointer. No runtime. Design approved. Construction waits until Chris says go.
+1. **Done (design PR #56).** Design, ROADMAP pointer, audit pointer. No runtime. Design approved.
 2. Policy `engine: bigquery` and ADC routing. Parse `bigquery`, `schema` as dataset, optional `location`. `--apply` requires extra + ADC + project. Refuse JSON keys. Dry run without GCP.
 3. BigQuery grant engine (mocked client). `issuing` row, authorized view in shared `datagrant_views`, one-time authorized dataset on the source, receipt, IAM bind last with `resource.name` of exactly `G_<id>` and one grant-project `jobUser` binding whose condition title is `G_<id>`, `accessPolicyVersion=3`, etag RMW with 409 retry, `active`. Two-person stores principal only. Custom grantee role without `tables.get`. Restricted hash table plus authorized SQL UDF. Reverse-drop the view, not the standing authorized dataset. Unit test: IAM JSON names exactly one view; `jobUser` title is `G_<id>`; etag conflict retries.
 4. BigQuery revoke and sweep. Drop view first; remove this grant's dataset bind and this grant's `jobUser` bind (title `G_<id>`) only; never decide from other grants; `jobs.cancel` best-effort (`jobs.listAll` + `jobs.update`); 10-minute issuing/enabling grace; pending TTL does not drop objects; `grant list` / `status`; rowcount claims so a revoked grant cannot return to `active`. Unit test: two grants for one principal, revoke one, the other `jobUser` binding stays. Include `accessPolicyVersion=3` on dataset IAM get/update if PR 3 did not already.
@@ -397,4 +397,4 @@ Checked against Google docs (not inferred from SDK types):
 3. **`max_rows` stays out.**
 4. **No break-glass.** Emergency path is a reviewed policy edit to `approval: auto`.
 5. **M4 shipped in v0.6.0** (PRs #47 to #53, tag `v0.6.0` at `6581ab8`).
-6. **M5 design approved 2026-11-14 4:51 PM CT.** Chris: "Approve all 11 revised BigQuery picks". Picks: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Construction does not start until Chris says go.
+6. **M5 design approved 2026-11-14 4:51 PM CT.** Chris: "Approve all 11 revised BigQuery picks". Picks: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Status: construction in progress (PR 2 of 7).

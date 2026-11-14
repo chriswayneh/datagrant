@@ -44,6 +44,9 @@ from datagrant.keys import (
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_RECEIPT, EXIT_REVOKE_FAILED = 0, 1, 2, 3, 4
 DSN_ENV = "DATAGRANT_DSN"
 SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
+BIGQUERY_PROJECT_ENV = "DATAGRANT_BIGQUERY_PROJECT"
+BIGQUERY_DSN_ENV = "DATAGRANT_BIGQUERY_DSN"
+BIGQUERY_CREDENTIALS_ENV = "DATAGRANT_BIGQUERY_CREDENTIALS"
 REDACTED = "<redacted>"
 POLICY_ENV = "DATAGRANT_POLICY"
 STRICT_POLICY_PERM_ENV = "DATAGRANT_STRICT_POLICY_PERMISSIONS"
@@ -69,8 +72,14 @@ _SECRET_KV = re.compile(
     re.IGNORECASE,
 )
 _PW_URL = re.compile(r"(\w+://[^:/@\s]*:)[^@\s]*@")
-_SECRET_FLAG_RE = re.compile(r"(--(?:snowflake-)?dsn)(=|\s+)(\S+)", re.IGNORECASE)
-_DSN_TAIL_RE = re.compile(r"(--(?:snowflake-)?dsn)\b.*", re.IGNORECASE | re.DOTALL)
+_SECRET_FLAG_RE = re.compile(
+    r"(--(?:snowflake-)?dsn|--bigquery-dsn|--credentials-path)(=|\s+)(\S+)",
+    re.IGNORECASE,
+)
+_DSN_TAIL_RE = re.compile(
+    r"(--(?:snowflake-)?dsn|--bigquery-dsn|--credentials-path)\b.*",
+    re.IGNORECASE | re.DOTALL,
+)
 _UNRECOGNIZED_ARGS = "unrecognized arguments:"
 
 
@@ -94,9 +103,21 @@ def redact(text: str, dsn: str | None = None) -> str:
 def _secret_dsn_values(args: argparse.Namespace | None = None) -> tuple[str, ...]:
     found: list[str] = []
     seen: set[str] = set()
-    raws: list[object] = [os.environ.get(DSN_ENV), os.environ.get(SNOWFLAKE_DSN_ENV)]
+    raws: list[object] = [
+        os.environ.get(DSN_ENV),
+        os.environ.get(SNOWFLAKE_DSN_ENV),
+        os.environ.get(BIGQUERY_DSN_ENV),
+        os.environ.get(BIGQUERY_CREDENTIALS_ENV),
+    ]
     if args is not None:
-        raws.extend((getattr(args, "dsn", None), getattr(args, "snowflake_dsn", None)))
+        raws.extend(
+            (
+                getattr(args, "dsn", None),
+                getattr(args, "snowflake_dsn", None),
+                getattr(args, "bigquery_dsn", None),
+                getattr(args, "credentials_path", None),
+            )
+        )
     for raw in raws:
         if not isinstance(raw, str):
             continue
@@ -957,6 +978,69 @@ def _print_sf_grant(
     return EXIT_OK
 
 
+def _bq_refuse_locator(args: argparse.Namespace) -> None:
+    from datagrant.bigquery_support import BigQuerySetupError, refuse_secret_locator
+
+    try:
+        refuse_secret_locator(
+            getattr(args, "bigquery_project", None),
+            dsn_flag=getattr(args, "bigquery_dsn", None),
+            credentials_path=getattr(args, "credentials_path", None),
+        )
+    except BigQuerySetupError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
+
+
+def _bq_require_apply_setup(args: argparse.Namespace) -> None:
+    from datagrant.bigquery_support import (
+        BigQuerySetupError,
+        require_adc,
+        require_driver,
+        resolve_location,
+        resolve_project,
+    )
+
+    _bq_refuse_locator(args)
+    try:
+        require_driver()
+        resolve_project(getattr(args, "bigquery_project", None))
+        resolve_location(getattr(args, "bigquery_location", None))
+        require_adc()
+    except BigQuerySetupError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
+
+
+def _bigquery_request(ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any) -> int:
+    """BigQuery dry run, or --apply setup checks. Grant issue is a later PR."""
+    from datagrant.bigquery_support import EXTRA_HINT
+
+    a = ctx.args
+    ds = policy.datasets[req.dataset]
+    _bq_refuse_locator(a)
+    if not a.apply:
+        what = (
+            "store a pending request for another person to approve"
+            if decision.approval == "two-person"
+            else "bind an authorized view"
+        )
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "bigquery",
+                "approval": decision.approval,
+                "dataset": req.dataset,
+                "table": req.table,
+                "requester": caller.username,
+                "location": ds.location,
+            },
+            "dry run: allowed by policy; engine=bigquery; with --apply datagrant would "
+            f"require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC, then {what}",
+        )
+        return EXIT_OK
+    _bq_require_apply_setup(a)
+    raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
+
+
 def _snowflake_request(
     ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any, ttl: timedelta
 ) -> int:
@@ -1321,7 +1405,13 @@ def cmd_request(ctx: Ctx) -> int:
     from datagrant.pg.mask import inspect_table
     from datagrant.pg.requests import create_request
     from datagrant.pg.scram import scram_verifier
-    from datagrant.policy import Request, evaluate, parse_duration
+    from datagrant.policy import (
+        PolicyError,
+        Request,
+        _parse_bq_table_name,
+        evaluate,
+        parse_duration,
+    )
 
     a = ctx.args
     policy = _policy(a, ctx, apply=bool(a.apply))
@@ -1336,10 +1426,17 @@ def cmd_request(ctx: Ctx) -> int:
     caller = _resolve_caller(ctx, policy)
     user, source = caller.username, caller.source
     cols = tuple(c.strip() for c in a.columns.split(",") if c.strip())
+    table = a.table
+    ds = policy.datasets.get(a.dataset)
+    if ds is not None and ds.engine == "bigquery":
+        try:
+            table = _parse_bq_table_name(a.table, "--table", ds.database, ds.schema)
+        except PolicyError as exc:
+            raise CliError(str(exc), EXIT_USAGE) from None
     req = Request(
         user,
         a.dataset,
-        a.table,
+        table,
         cols,
         parse_duration(a.duration, "--duration"),
         a.purpose,
@@ -1348,6 +1445,8 @@ def cmd_request(ctx: Ctx) -> int:
     decision = evaluate(policy, req, extra_groups=caller.mapped_groups)
     if not decision.allowed:
         return _refuse_request(ctx, req, policy, decision.reasons, caller)
+    if policy.datasets[req.dataset].engine == "bigquery":
+        return _bigquery_request(ctx, req, decision, policy, caller)
     if policy.datasets[req.dataset].engine == "snowflake":
         return _snowflake_request(ctx, req, decision, policy, caller, ttl)
     two_person = decision.approval == "two-person"
@@ -2399,6 +2498,16 @@ _SF_DSN_HELP = (
     f"Snowflake admin DSN (default ${SNOWFLAKE_DSN_ENV}); service user with "
     "private_key_file (key-pair only, password not supported); ignored for postgres"
 )
+_BQ_PROJECT_HELP = (
+    f"GCP project id for BigQuery grants (default ${BIGQUERY_PROJECT_ENV}); "
+    "ADC only, not a JSON key; ignored for postgres and snowflake"
+)
+_BQ_DSN_HELP = "refused: datagrant uses ADC, not a BigQuery DSN or JSON key"
+_BQ_CREDS_HELP = "refused: datagrant uses ADC, not credentials_path"
+_BQ_LOCATION_HELP = (
+    "optional BigQuery location (default $DATAGRANT_BIGQUERY_LOCATION); "
+    "ignored for postgres and snowflake"
+)
 _GRANTING = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
 _REVOKING = ("json", "dsn", "signing_key", "receipt_log", *_SINK)
 _DOCTOR = ("json", "dsn", "signing_key", "hash_key", "receipt_log", *_SINK)
@@ -2557,6 +2666,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--duration", required=True, help="e.g. 30m, 2h")
     r.add_argument("--purpose", required=True)
     r.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
+    r.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    r.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
+    r.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
+    r.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     r.add_argument(
         "--pending-ttl",
         default=None,
@@ -2570,6 +2683,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("request_id")
     ap.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
+    ap.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    ap.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
+    ap.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
+    ap.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     ap.set_defaults(fn=cmd_approve)
 
     g = sub.add_parser("grant", help="inspect grants").add_subparsers(
@@ -2578,15 +2695,24 @@ def build_parser() -> argparse.ArgumentParser:
     gl = g.add_parser("list", parents=only("json", "dsn"), help="list active grants")
     gl.add_argument("--all", action="store_true", help="include revoked/expired")
     gl.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
+    gl.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    gl.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
+    gl.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     gl.set_defaults(fn=cmd_grant_list)
     gs = g.add_parser("status", parents=only("json", "dsn"), help="show one grant")
     gs.add_argument("grant_id")
     gs.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
+    gs.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    gs.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
+    gs.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     gs.set_defaults(fn=cmd_grant_status)
 
     rv = sub.add_parser("revoke", parents=[*only(*_REVOKING), apply], help="revoke a grant now")
     rv.add_argument("grant_id")
     rv.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
+    rv.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    rv.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
+    rv.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     rv.set_defaults(fn=cmd_revoke)
     sw = sub.add_parser(
         "sweep",
@@ -2594,6 +2720,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="revoke expired grants (run on a schedule)",
     )
     sw.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
+    sw.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    sw.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
+    sw.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     sw.set_defaults(fn=cmd_sweep)
 
     rc = sub.add_parser("receipts", help="receipt tools").add_subparsers(
@@ -2680,6 +2809,16 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         print("datagrant: error: --apply and --dry-run conflict", file=sys.stderr)
         return EXIT_USAGE
     ctx = Ctx(args, out)
+    creds_flag = getattr(args, "credentials_path", None)
+    bq_dsn_flag = getattr(args, "bigquery_dsn", None)
+    if (isinstance(creds_flag, str) and creds_flag.strip()) or (
+        isinstance(bq_dsn_flag, str) and bq_dsn_flag.strip()
+    ):
+        try:
+            _bq_refuse_locator(args)
+        except CliError as exc:
+            _err(ctx, str(exc), exc.code)
+            return exc.code
     if "receipt_sink" in _accepts(args):
         from datagrant.sink import SinkConfigError, sink_from_config
 
