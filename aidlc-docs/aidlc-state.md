@@ -13,7 +13,7 @@
 | Construction | Build and test | ✅ CI: lint/type/test matrix, Postgres integration, demo, demo-compose |
 | Construction | M2 / v0.4.0 | ✅ Released (PRs #33 to #38, tag `v0.4.0` at `7ab4e3c`, 2026-11-10 CT). |
 | Construction | M3 / v0.5.0 | ✅ Released (PRs #40 to #45, tag `v0.5.0` at `9aadcf2`, 2026-11-11 CT). |
-| Construction | M4 / v0.6.0 | Ready, release pending (PRs #47 to #52). Not tagged. |
+| Construction | M4 / v0.6.0 | ✅ Released (PRs #47 to #53, tag `v0.6.0` at `6581ab8`, 2026-11-14 CT). |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
-**Current stage:** v0.6.0 ready, release pending (not tagged). M4 Snowflake warehouses implemented (PRs #47 to #52). Inception (U1–U8) approved 2026-11-02.
+**Current stage:** v0.6.0 released. M4 Snowflake warehouses shipped in v0.6.0. Inception (U1–U8) approved 2026-11-02.

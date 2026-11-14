@@ -1,6 +1,10 @@
 # Roadmap working guide
 
-The [roadmap overview](../ROADMAP.md) is the readable summary. [Task definitions](issues.yml) hold the why, files, acceptance criteria, size and dependencies for every task.
+The [roadmap overview](../ROADMAP.md) is the readable summary of what has shipped. [Task definitions](issues.yml) hold early planning (why, files, acceptance, size, dependencies). Treat `ROADMAP.md` as current; `issues.yml` is historical and does not list M4.
+
+**v0.6.0 is released** (tag `v0.6.0`, 2026-11-14). M4 Snowflake warehouses shipped: grant, approve, revoke, sweep, masks, row filters, catalog inspect, key-pair-only DSN. Notes: [docs/release-notes/v0.6.0.md](../docs/release-notes/v0.6.0.md). Product README: [../README.md](../README.md).
+
+**Next after M4:** BigQuery, target v0.7.0+ (IAM / authorized views, not a password user). Rate limits, `max_rows`, and break-glass stay out.
 
 Update task status in `issues.yml` and the overview in the same PR as the work. Mark a version released only after the maintainer publishes it.
 
@@ -20,7 +24,7 @@ Update task status in `issues.yml` and the overview in the same PR as the work. 
 1. All milestone tasks are merged and CI is green on `main`.
 2. `pyproject.toml` and `src/datagrant/__init__.py` versions match the target.
 3. CHANGELOG `[Unreleased]` moved under the new version with today's date.
-4. README status and SECURITY.md updated.
+4. README status and SECURITY.md updated. Every README matches the shipped version (install, CLI, feature list, relative links).
 5. AI-DLC gate for the stage approved in `aidlc-docs/audit.md`.
 6. Secrets scan clean.
 7. Maintainer creates the tag and GitHub release.

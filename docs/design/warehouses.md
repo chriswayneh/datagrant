@@ -1,6 +1,6 @@
 # Design: warehouses (v0.6.0 / M4)
 
-Status: implemented in v0.6.0 (PRs #47 to #52; release pending, not tagged). M4 design and execution plan (warehouses, target v0.6.0) from the v1.0 plan Chris authorized. M2 parked other warehouses at v0.5.0+ so they would not land in v0.4.0. M3 moved them to **v0.6.0+** so ops hardening could finish first. M3 is released. Chris approved the recommended picks and merged the design as PR #47 at `0449a0b`. The [CLI](../cli.md), [policy](../policy.md), and [security](../security.md) pages are authoritative. Roadmap: [ROADMAP.md](../../ROADMAP.md).
+Status: implemented in v0.6.0 (PRs #47 to #53). M4 design and execution plan (warehouses, target v0.6.0) from the v1.0 plan Chris authorized. M2 parked other warehouses at v0.5.0+ so they would not land in v0.4.0. M3 moved them to **v0.6.0+** so ops hardening could finish first. M3 is released. Chris approved the recommended picks and merged the design as PR #47 at `0449a0b`. The [CLI](../cli.md), [policy](../policy.md), and [security](../security.md) pages are authoritative. Roadmap: [ROADMAP.md](../../ROADMAP.md).
 
 Grounded in the v0.5.0 code on `main` (`src/datagrant/cli.py`, `policy.py`, `pg/grant.py`, `pg/revoke.py`, `pg/mask.py`, `receipt.py`, `docs/security.md`, `docs/policy.md`).
 
