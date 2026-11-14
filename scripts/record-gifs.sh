@@ -5,6 +5,7 @@
 # Tools: vhs, ttyd, ffmpeg, gifsicle, python3, datagrant.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 PATH="${HOME}/go/bin:/usr/local/bin:${PATH}"
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 2; }; }
@@ -51,7 +52,16 @@ record_one() {
   secs="$(python3 -c "print(round(float('$secs') + 1.2, 2))")"
   local run
   run="$(mktemp --suffix=.tape)"
-  sed -E "s/__SLEEP__/${secs}s/; s|__LOG__|${log}|; s|__GIF__|${gif}|" "$tape" > "$run"
+  ROOT="$ROOT" SLEEP="${secs}s" LOG="$log" GIF="$gif" python3 - "$tape" "$run" <<'PY'
+import os, shlex, sys
+src, dest = sys.argv[1], sys.argv[2]
+text = open(src, encoding="utf-8").read()
+text = text.replace("__SLEEP__", os.environ["SLEEP"])
+text = text.replace("__LOG__", os.environ["LOG"])
+text = text.replace("__GIF__", os.environ["GIF"])
+text = text.replace("__ROOT__", shlex.quote(os.environ["ROOT"]))
+open(dest, "w", encoding="utf-8").write(text)
+PY
   echo "recording $gif (${secs}s, $title)"
   vhs "$run"
   rm -f "$run"
