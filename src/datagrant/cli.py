@@ -46,6 +46,7 @@ DSN_ENV = "DATAGRANT_DSN"
 SNOWFLAKE_DSN_ENV = "DATAGRANT_SNOWFLAKE_DSN"
 BIGQUERY_PROJECT_ENV = "DATAGRANT_BIGQUERY_PROJECT"
 BIGQUERY_DSN_ENV = "DATAGRANT_BIGQUERY_DSN"
+BIGQUERY_CREDENTIALS_ENV = "DATAGRANT_BIGQUERY_CREDENTIALS"
 REDACTED = "<redacted>"
 POLICY_ENV = "DATAGRANT_POLICY"
 STRICT_POLICY_PERM_ENV = "DATAGRANT_STRICT_POLICY_PERMISSIONS"
@@ -106,6 +107,7 @@ def _secret_dsn_values(args: argparse.Namespace | None = None) -> tuple[str, ...
         os.environ.get(DSN_ENV),
         os.environ.get(SNOWFLAKE_DSN_ENV),
         os.environ.get(BIGQUERY_DSN_ENV),
+        os.environ.get(BIGQUERY_CREDENTIALS_ENV),
     ]
     if args is not None:
         raws.extend(

@@ -7,16 +7,29 @@ Postgres and Snowflake paths must not call these helpers. Never log a JSON key.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import re
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 BIGQUERY_PROJECT_ENV = "DATAGRANT_BIGQUERY_PROJECT"
 BIGQUERY_LOCATION_ENV = "DATAGRANT_BIGQUERY_LOCATION"
 BIGQUERY_DSN_ENV = "DATAGRANT_BIGQUERY_DSN"
+BIGQUERY_CREDENTIALS_ENV = "DATAGRANT_BIGQUERY_CREDENTIALS"
 EXTRA_HINT = "pip install 'datagrant[bigquery]'"
 MAX_LOCATOR_BYTES = 8192
+MAX_ADC_FILE_BYTES = 65536
+ADC_CHECKING_MSG = "checking Application Default Credentials..."
+JSON_KEY_ADC_MSG = (
+    "service-account JSON key is not supported; use ADC user login, "
+    "workload identity, or impersonation"
+)
+_GCE_METADATA_TIMEOUT_ENV = "GCE_METADATA_TIMEOUT"
+_ADC_METADATA_TIMEOUT_SEC = "1"
+_SERVICE_ACCOUNT_TYPE = "service_account"
 _REFUSED_KEYS = (
     "credentials_path",
     "credentials-path",
@@ -46,20 +59,111 @@ def require_driver() -> None:
         raise BigQuerySetupError(f"BigQuery extra is not installed: {EXTRA_HINT}")
 
 
+def _well_known_adc_path() -> Path:
+    """gcloud application_default_credentials.json (CLOUDSDK_CONFIG or default)."""
+    try:
+        sdk = importlib.import_module("google.auth._cloud_sdk")
+        getter = getattr(sdk, "get_application_default_credentials_path", None)
+        if callable(getter):
+            raw = getter()
+            if isinstance(raw, str) and raw.strip():
+                return Path(raw.strip())
+    except (ImportError, OSError, AttributeError, TypeError, ValueError):
+        pass
+    cloudsdk = os.environ.get("CLOUDSDK_CONFIG")
+    if isinstance(cloudsdk, str) and cloudsdk.strip():
+        return Path(cloudsdk.strip()) / "application_default_credentials.json"
+    return Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+
+
+def _read_adc_type(path: Path) -> str | None:
+    """Return the JSON ``type`` field only. Never log the file."""
+    try:
+        if not path.is_file():
+            return None
+        data = path.read_bytes()[:MAX_ADC_FILE_BYTES]
+        body = json.loads(data.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("type")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def _is_service_account_credentials(creds: Any) -> bool:
+    try:
+        sa = importlib.import_module("google.oauth2.service_account")
+    except ImportError:
+        return False
+    cls = getattr(sa, "Credentials", None)
+    return isinstance(cls, type) and isinstance(creds, cls)
+
+
+def _refuse_service_account_json_key(creds: Any) -> None:
+    """Refuse a service-account JSON key loaded via ADC. Allowed: user, WIF, impersonation, GCE."""
+    if _is_service_account_credentials(creds):
+        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+    gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if isinstance(gac, str) and gac.strip():
+        if _read_adc_type(Path(gac.strip())) == _SERVICE_ACCOUNT_TYPE:
+            raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+        return
+    if _read_adc_type(_well_known_adc_path()) == _SERVICE_ACCOUNT_TYPE:
+        raise BigQuerySetupError(JSON_KEY_ADC_MSG)
+
+
+def _metadata_request() -> Any:
+    try:
+        transport = importlib.import_module("google.auth.transport.requests")
+    except ImportError:
+        return None
+    request_cls = getattr(transport, "Request", None)
+    if not callable(request_cls):
+        return None
+    try:
+        return request_cls()
+    except (TypeError, OSError):
+        return None
+
+
+def _call_google_auth_default(google_auth: Any, request: Any) -> Any:
+    default = google_auth.default
+    if request is None:
+        return default()
+    try:
+        return default(request=request)
+    except TypeError:
+        return default()
+
+
 def adc_available() -> bool:
     """True when Application Default Credentials can be loaded.
 
     May contact the GCP metadata server. Call only on ``--apply``.
+    Refuses a service-account JSON key loaded via ADC (exit 2 at the CLI).
     """
+    print(ADC_CHECKING_MSG, file=sys.stderr)
     try:
         google_auth = importlib.import_module("google.auth")
         auth_exceptions = importlib.import_module("google.auth.exceptions")
     except ImportError:
         return False
+    request = _metadata_request()
+    previous_timeout = os.environ.get(_GCE_METADATA_TIMEOUT_ENV)
+    os.environ[_GCE_METADATA_TIMEOUT_ENV] = _ADC_METADATA_TIMEOUT_SEC
     try:
-        google_auth.default()
+        creds, _project = _call_google_auth_default(google_auth, request)
     except (auth_exceptions.GoogleAuthError, OSError, AttributeError):
         return False
+    finally:
+        if previous_timeout is None:
+            os.environ.pop(_GCE_METADATA_TIMEOUT_ENV, None)
+        else:
+            os.environ[_GCE_METADATA_TIMEOUT_ENV] = previous_timeout
+    _refuse_service_account_json_key(creds)
     return True
 
 
@@ -103,7 +207,6 @@ def refuse_secret_locator(
         credentials_path,
         env.get(BIGQUERY_PROJECT_ENV),
         env.get(BIGQUERY_DSN_ENV),
-        env.get("DATAGRANT_BIGQUERY_CREDENTIALS"),
     ):
         if isinstance(raw, str) and raw.strip():
             chunks.append(raw)
@@ -111,8 +214,11 @@ def refuse_secret_locator(
         reason = _refused_reason(raw)
         if reason:
             raise BigQuerySetupError(reason)
-    if (isinstance(dsn_flag, str) and dsn_flag.strip()) or (
-        isinstance(env.get(BIGQUERY_DSN_ENV), str) and str(env.get(BIGQUERY_DSN_ENV)).strip()
+    creds_env = env.get(BIGQUERY_CREDENTIALS_ENV)
+    if (
+        (isinstance(dsn_flag, str) and dsn_flag.strip())
+        or (isinstance(env.get(BIGQUERY_DSN_ENV), str) and str(env.get(BIGQUERY_DSN_ENV)).strip())
+        or (isinstance(creds_env, str) and creds_env.strip())
     ):
         raise BigQuerySetupError(
             "BigQuery DSN / JSON key is not supported; use ADC and "
