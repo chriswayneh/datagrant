@@ -216,40 +216,34 @@ def _str_list(val: object, where: str) -> list[str]:
     return val
 
 
-def _parse_bq_table_name(name: str, where: str, database: str, schema: str | None) -> None:
-    """dataset.table, or project.dataset.table when project matches database."""
+def _parse_bq_table_name(name: str, where: str, database: str, schema: str | None) -> str:
+    """Return canonical dataset.table, dropping project when it equals database."""
     parts = name.split(".")
     if len(parts) == 3:
         project, ds, table = parts
         if not _BQ_PROJECT_RE.fullmatch(project):
-            raise PolicyError(f"{where}.name: invalid GCP project id {project!r}")
+            raise PolicyError(f"{where}: invalid GCP project id {project!r}")
         if project != database:
             raise PolicyError(
-                f"{where}.name: project {project!r} must match dataset.database {database!r}"
+                f"{where}: project {project!r} must match dataset.database {database!r}"
             )
         if not _BQ_DATASET_RE.fullmatch(ds) or not _BQ_DATASET_RE.fullmatch(table):
             raise PolicyError(
-                f"{where}.name: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
+                f"{where}: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
             )
         if schema is not None and ds != schema:
-            raise PolicyError(
-                f"{where}.name: dataset id {ds!r} must match dataset.schema {schema!r}"
-            )
-        return
+            raise PolicyError(f"{where}: dataset id {ds!r} must match dataset.schema {schema!r}")
+        return f"{ds}.{table}"
     if len(parts) == 2:
         ds, table = parts
         if not _BQ_DATASET_RE.fullmatch(ds) or not _BQ_DATASET_RE.fullmatch(table):
             raise PolicyError(
-                f"{where}.name: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
+                f"{where}: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
             )
         if schema is not None and ds != schema:
-            raise PolicyError(
-                f"{where}.name: dataset id {ds!r} must match dataset.schema {schema!r}"
-            )
-        return
-    raise PolicyError(
-        f"{where}.name: expected 'dataset.table' or 'project.dataset.table', got {name!r}"
-    )
+            raise PolicyError(f"{where}: dataset id {ds!r} must match dataset.schema {schema!r}")
+        return f"{ds}.{table}"
+    raise PolicyError(f"{where}: expected 'dataset.table' or 'project.dataset.table', got {name!r}")
 
 
 def _parse_table(
@@ -280,7 +274,7 @@ def _parse_table(
     )
     name = _req(raw, "name", str, where)
     if engine == "bigquery":
-        _parse_bq_table_name(name, where, database, schema)
+        name = _parse_bq_table_name(name, f"{where}.name", database, schema)
     else:
         parts = name.split(".")
         if len(parts) != 2 or not all(_IDENT_RE.fullmatch(p) for p in parts):
@@ -752,7 +746,13 @@ def evaluate(
     ds = policy.datasets.get(req.dataset)
     if ds is None:
         return deny(f"dataset {req.dataset!r} is not in policy")
-    rule = ds.tables.get(req.table)
+    table_name = req.table
+    if ds.engine == "bigquery":
+        try:
+            table_name = _parse_bq_table_name(req.table, "table", ds.database, ds.schema)
+        except PolicyError as exc:
+            return deny(str(exc))
+    rule = ds.tables.get(table_name)
     if rule is None:
         return deny(f"table {req.table!r} is not in dataset {req.dataset!r}")
     if not (policy.groups_of(req.requester) | extra_groups) & rule.allowed_groups:

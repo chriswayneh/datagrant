@@ -171,7 +171,76 @@ def test_bigquery_three_part_table_matching_project() -> None:
         )
     )
     p = parse_policy(d)
-    assert "clinic-proj.clinic_ds.patients" in p.datasets["bq_clinic"].tables
+    assert "clinic_ds.patients" in p.datasets["bq_clinic"].tables
+    assert "clinic-proj.clinic_ds.patients" not in p.datasets["bq_clinic"].tables
+
+
+@pytest.mark.parametrize(
+    "names",
+    (
+        ("clinic_ds.patients", "clinic-proj.clinic_ds.patients"),
+        ("clinic-proj.clinic_ds.patients", "clinic_ds.patients"),
+    ),
+)
+def test_bigquery_two_and_three_part_same_table_is_duplicate(names: tuple[str, str]) -> None:
+    d = doc()
+    d["datasets"].append(
+        _bq_ds(
+            tables=[
+                {
+                    "name": names[0],
+                    "allowed_groups": ["ml"],
+                    "columns": {"patient_id": "passthrough"},
+                },
+                {
+                    "name": names[1],
+                    "allowed_groups": ["ml"],
+                    "columns": {"ssn": "hash"},
+                },
+            ]
+        )
+    )
+    with pytest.raises(PolicyError, match="duplicate table"):
+        parse_policy(d)
+
+
+def test_bigquery_three_part_request_matches_two_part_rule() -> None:
+    d = doc()
+    d["datasets"].append(_bq_ds())
+    p = parse_policy(d)
+    decision = evaluate(
+        p,
+        Request(
+            "alice",
+            "bq_clinic",
+            "clinic-proj.clinic_ds.patients",
+            ("patient_id",),
+            timedelta(hours=1),
+            "eval",
+            None,
+        ),
+    )
+    assert decision.allowed
+
+
+def test_bigquery_evaluate_three_part_wrong_project_denied() -> None:
+    d = doc()
+    d["datasets"].append(_bq_ds())
+    p = parse_policy(d)
+    decision = evaluate(
+        p,
+        Request(
+            "alice",
+            "bq_clinic",
+            "other-proj.clinic_ds.patients",
+            ("patient_id",),
+            timedelta(hours=1),
+            "eval",
+            None,
+        ),
+    )
+    assert not decision.allowed
+    assert any("must match dataset.database" in r for r in decision.reasons)
 
 
 def test_bigquery_three_part_table_wrong_project() -> None:
