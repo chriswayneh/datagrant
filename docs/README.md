@@ -12,6 +12,6 @@ These pages match [v0.6.0](https://github.com/chriswayneh/datagrant/releases/tag
 | [OIDC demo](demo-oidc.md) | Request and approve with synthetic tokens |
 | [v0.6.0 notes](release-notes/v0.6.0.md) | Snowflake warehouse support |
 
-Design notes: [warehouses](design/warehouses.md) (M4 / v0.6.0, Snowflake shipped), [ops hardening](design/ops-hardening.md), [approvals](design/approvals-policy-limits.md), [OIDC](design/oidc-identity.md), [receipt sink](design/receipt-sink.md).
+Design notes: [BigQuery](design/bigquery.md) (M5 / v0.7.0+, pending approval), [warehouses](design/warehouses.md) (M4 / v0.6.0, Snowflake shipped), [ops hardening](design/ops-hardening.md), [approvals](design/approvals-policy-limits.md), [OIDC](design/oidc-identity.md), [receipt sink](design/receipt-sink.md).
 
 Example policies live in [examples/](../examples/). Changelog and roadmap: [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md). Next after M4 is BigQuery (v0.7.0+).

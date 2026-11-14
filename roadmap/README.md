@@ -4,7 +4,7 @@ The [roadmap overview](../ROADMAP.md) is the readable summary of what has shippe
 
 **v0.6.0 is released** (tag `v0.6.0`, 2026-11-14). M4 Snowflake warehouses shipped: grant, approve, revoke, sweep, masks, row filters, catalog inspect, key-pair-only DSN. Notes: [docs/release-notes/v0.6.0.md](../docs/release-notes/v0.6.0.md). Product README: [../README.md](../README.md).
 
-**Next after M4:** BigQuery, target v0.7.0+ (IAM / authorized views, not a password user). Rate limits, `max_rows`, and break-glass stay out.
+**Next after M4:** BigQuery, target v0.7.0+. M5 Inception is in progress. Design pending approval: [docs/design/bigquery.md](../docs/design/bigquery.md). Rate limits, `max_rows`, and break-glass stay out.
 
 Update task status in `issues.yml` and the overview in the same PR as the work. Mark a version released only after the maintainer publishes it.
 
