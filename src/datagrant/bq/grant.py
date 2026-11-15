@@ -54,7 +54,10 @@ class GrantPlan:
 
 
 class GrantClient(Protocol):
-    """Mocked in tests. IAM bind is a recorded stub until PR 3b."""
+    """Mocked in tests. IAM bind is a recorded stub until PR 3b.
+
+    ``drop_view`` must succeed if the view does not exist (IF EXISTS).
+    """
 
     def insert_issuing(self, plan: GrantPlan) -> None: ...
     def create_view(self, plan: GrantPlan) -> None: ...
@@ -63,7 +66,10 @@ class GrantClient(Protocol):
     def claim_enabling(self, plan: GrantPlan) -> int: ...
     def bind_iam(self, plan: GrantPlan) -> None: ...
     def claim_active(self, plan: GrantPlan) -> int: ...
-    def drop_view(self, plan: GrantPlan) -> None: ...
+    def drop_view(self, plan: GrantPlan) -> None:
+        """Drop ``G_<id>``. Must succeed if the view does not exist."""
+        ...
+
     def mark_failed(self, plan: GrantPlan) -> None: ...
 
 
@@ -81,8 +87,31 @@ def q_project(name: str) -> str:
 
 
 def lit(value: str) -> str:
-    """BigQuery string literal for DDL. Never interpolates raw text."""
-    return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+    """GoogleSQL string literal. Escape backslash first, then quote as \\'."""
+    out: list[str] = []
+    for ch in value:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "'":
+            out.append("\\'")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\v":
+            out.append("\\v")
+        elif o < 32 or o == 127:
+            out.append(f"\\x{o:02x}")
+        else:
+            out.append(ch)
+    return "'" + "".join(out) + "'"
 
 
 def _src_col(col: str) -> str:
@@ -302,9 +331,20 @@ def build_plan(
 
 
 def reverse_drop(client: GrantClient, plan: GrantPlan) -> None:
-    """Drop the grant view. Do not de-authorize datagrant_views on the source."""
-    client.drop_view(plan)
+    """Drop the grant view. Always mark_failed. Never de-authorize the source.
+
+    ``drop_view`` is called inside try; ``mark_failed`` always runs. ``drop_view``
+    must succeed if the view does not exist. A drop error is raised after the
+    status update so sweep can still see ``failed``.
+    """
+    drop_exc: Exception | None = None
+    try:
+        client.drop_view(plan)
+    except Exception as exc:  # noqa: BLE001 - mark_failed still runs
+        drop_exc = exc
     client.mark_failed(plan)
+    if drop_exc is not None:
+        raise GrantError(f"grant {plan.grant_id}: drop_view failed ({drop_exc})") from drop_exc
 
 
 def append_revoked(plan: GrantPlan, receipts: ReceiptSink | None, *, reason: str) -> None:
@@ -328,22 +368,24 @@ def apply_plan(
     plan: GrantPlan,
     receipts: ReceiptSink | None = None,
 ) -> None:
-    """Fail-safe apply. IAM last is a client stub in 3a (filled in 3b)."""
+    """Fail-safe apply. IAM last is a client stub in 3a (filled in 3b).
+
+    Cleanup calls ``drop_view`` at most once. ``mark_failed`` always runs.
+    A post-issued failure still writes ``revoked`` if cleanup fails.
+    """
     created = False
     issued = False
+    revoked_reason = "apply_failed"
     try:
         client.insert_issuing(plan)
         created = True
         client.create_view(plan)
         client.authorize_views_dataset_if_missing(plan)
         if client.update_names(plan) != 1:
-            reverse_drop(client, plan)
             raise GrantError(f"grant {plan.grant_id}: not issuing at row update; view dropped")
         if receipts is None:
-            reverse_drop(client, plan)
             raise GrantError(f"grant {plan.grant_id}: issued receipt is required before IAM")
         if plan.facts is None:
-            reverse_drop(client, plan)
             raise GrantError(f"grant {plan.grant_id}: plan has no receipt facts")
         try:
             receipt.append(
@@ -355,34 +397,38 @@ def apply_plan(
                 details={"engine": "bigquery", "principal": plan.principal, "view": plan.view_id},
             )
             issued = True
-        except BaseException as exc:
-            reverse_drop(client, plan)
-            if not isinstance(exc, Exception):
-                raise
+        except Exception as exc:
             raise GrantError(
                 f"grant {plan.grant_id}: receipt not written ({exc}); view dropped"
             ) from exc
         if client.claim_enabling(plan) != 1:
-            reverse_drop(client, plan)
-            append_revoked(plan, receipts, reason="lost_issuing")
+            revoked_reason = "lost_issuing"
             raise GrantError(f"grant {plan.grant_id}: not issuing at IAM; view dropped")
         try:
             client.bind_iam(plan)
         except BaseException as exc:
-            reverse_drop(client, plan)
-            append_revoked(plan, receipts, reason="iam_failed")
+            revoked_reason = "iam_failed"
             if not isinstance(exc, Exception):
                 raise
             raise GrantError(f"grant {plan.grant_id}: IAM failed ({exc}); view dropped") from exc
         if client.claim_active(plan) != 1:
-            reverse_drop(client, plan)
-            append_revoked(plan, receipts, reason="lost_enabling")
+            revoked_reason = "lost_enabling"
             raise GrantError(f"grant {plan.grant_id}: not enabling after IAM; view dropped")
-    except GrantError:
-        raise
-    except Exception as exc:
+    except BaseException as original:
+        cleanup_exc: Exception | None = None
         if created:
-            reverse_drop(client, plan)
+            try:
+                reverse_drop(client, plan)
+            except Exception as exc:  # noqa: BLE001 - keep original; name both
+                cleanup_exc = exc
             if issued:
-                append_revoked(plan, receipts, reason="apply_failed")
-        raise GrantError(f"grant {plan.grant_id} failed: {exc}") from exc
+                append_revoked(plan, receipts, reason=revoked_reason)
+        if cleanup_exc is not None:
+            raise GrantError(
+                f"grant {plan.grant_id}: {original}; cleanup failed ({cleanup_exc})"
+            ) from original
+        if not isinstance(original, Exception):
+            raise
+        if isinstance(original, GrantError):
+            raise
+        raise GrantError(f"grant {plan.grant_id} failed: {original}") from original

@@ -70,9 +70,11 @@ class FakeClient:
         names_rowcount: int = 1,
         enabling_rowcount: int = 1,
         active_rowcount: int = 1,
+        fail_drop: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.fail_on = fail_on
+        self.fail_drop = fail_drop
         self.authorized = False
         self.authorize_added: list[bool] = []
         self.views: set[str] = set()
@@ -132,6 +134,8 @@ class FakeClient:
 
     def drop_view(self, plan: GrantPlan) -> None:
         self.calls.append("drop_view")
+        if self.fail_drop:
+            raise RuntimeError("stub:drop_view")
         self.views.discard(plan.view_id)
 
     def mark_failed(self, plan: GrantPlan) -> None:
@@ -215,6 +219,10 @@ def test_row_filter_uses_src_alias() -> None:
         hash_key=KEY,
     )
     assert "WHERE `SRC`.`region` = 'TX' AND `SRC`.`deceased` IS NULL" in plan.view_sql
+    apostrophe, _ = render_row_filter("name = 'O''Brien'")
+    assert apostrophe == r"`SRC`.`name` = 'O\'Brien'"
+    slash_quote, _ = render_row_filter("path = 'a\\''b'")
+    assert slash_quote == r"`SRC`.`path` = 'a\\\'b'"
     cond, cols = render_row_filter("flag = true OR n != 1")
     assert cond == "`SRC`.`flag` = TRUE OR `SRC`.`n` <> 1"
     assert cols == frozenset({"flag", "n"})
@@ -364,7 +372,11 @@ def test_plan_guards_and_quoting() -> None:
     assert q_project(PROJECT) == "`clinic-proj`"
     with pytest.raises(GrantError, match="unsafe GCP project"):
         q_project("1bad")
-    assert lit("o'hara\\x") == "'o''hara\\\\x'"
+    assert lit("O'Brien") == r"'O\'Brien'"
+    assert lit("foo\\'bar") == r"'foo\\\'bar'"
+    assert lit("a\nb") == r"'a\nb'"
+    assert lit("\r\t\b\f\v\x01\x7f") == r"'\r\t\b\f\v\x01\x7f'"
+    assert "''" not in lit("O'Brien")
     with pytest.raises(GrantError, match="needs a dataset"):
         build_plan(
             dec(masks={"id": "passthrough"}),
@@ -425,6 +437,43 @@ def test_reverse_drop_helper_does_not_deauthorize() -> None:
     reverse_drop(client, _plan())
     assert client.calls == ["drop_view", "mark_failed"]
     assert client.authorized is True
+
+
+def test_reverse_drop_marks_failed_if_drop_view_raises() -> None:
+    client = FakeClient(fail_drop=True)
+    with pytest.raises(GrantError, match="drop_view failed"):
+        reverse_drop(client, _plan())
+    assert client.calls == ["drop_view", "mark_failed"]
+    assert client.status[GID] == "failed"
+    assert client.authorized is False
+
+
+def test_cleanup_drop_view_failure_keeps_mark_failed_and_revoked(tmp_path: Path) -> None:
+    sink = _sink(tmp_path)
+    iam = FakeClient(fail_on="bind_iam", fail_drop=True)
+    with pytest.raises(GrantError, match=r"IAM failed.*cleanup failed"):
+        apply_plan(iam, _plan(), sink)
+    assert iam.calls.count("drop_view") == 1
+    assert "mark_failed" in iam.calls
+    assert iam.status[GID] == "failed"
+    assert _events(tmp_path / "r.jsonl") == ["issued", "revoked"]
+
+    view = FakeClient(fail_on="create_view", fail_drop=True)
+    with pytest.raises(GrantError, match=r"stub:create_view.*cleanup failed"):
+        apply_plan(view, _plan(), sink)
+    assert view.calls.count("drop_view") == 1
+    assert "mark_failed" in view.calls
+    assert view.status[GID] == "failed"
+    assert "bind_iam" not in view.calls
+
+    names = FakeClient(names_rowcount=0, fail_drop=True)
+    with pytest.raises(GrantError, match=r"not issuing at row update.*cleanup failed"):
+        apply_plan(names, _plan(), sink)
+    assert names.calls.count("drop_view") == 1
+    assert "mark_failed" in names.calls
+    assert names.status[GID] == "failed"
+    assert "bind_iam" not in names.calls
+    assert "deauthorize" not in names.calls
 
 
 def test_insert_and_authorize_failures(tmp_path: Path) -> None:
