@@ -71,10 +71,12 @@ class FakeClient:
         enabling_rowcount: int = 1,
         active_rowcount: int = 1,
         fail_drop: bool = False,
+        raise_after_bind: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.fail_on = fail_on
         self.fail_drop = fail_drop
+        self.raise_after_bind = raise_after_bind
         self.authorized = False
         self.authorize_added: list[bool] = []
         self.views: set[str] = set()
@@ -122,6 +124,13 @@ class FakeClient:
 
     def bind_iam(self, plan: GrantPlan) -> None:
         self._step("bind_iam")
+        if self.raise_after_bind:
+            raise RuntimeError("stub:bind_after")
+
+    def unbind_iam(self, plan: GrantPlan) -> None:
+        self.calls.append("unbind_iam")
+        if self.fail_on == "unbind_iam":
+            raise RuntimeError("stub:unbind_iam")
 
     def claim_active(self, plan: GrantPlan) -> int:
         self._step("claim_active")
@@ -162,6 +171,51 @@ def _plan(**kw: Any) -> GrantPlan:
     )
 
 
+def _assert_cleanup(client: FakeClient, *, unbind: bool) -> None:
+    assert "drop_view" in client.calls
+    assert "mark_failed" in client.calls
+    if unbind:
+        assert client.calls.index("unbind_iam") < client.calls.index("drop_view")
+    else:
+        assert "unbind_iam" not in client.calls
+    assert client.calls.index("drop_view") < client.calls.index("mark_failed")
+
+
+def unlit(sql: str) -> str:
+    """Decode a GoogleSQL string literal produced by lit()."""
+    if len(sql) < 2 or sql[0] != "'" or sql[-1] != "'":
+        raise AssertionError(f"not a literal: {sql!r}")
+    body = sql[1:-1]
+    out: list[str] = []
+    i = 0
+    escapes = {
+        "\\": "\\",
+        "'": "'",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "b": "\b",
+        "f": "\f",
+        "v": "\v",
+    }
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= len(body):
+            raise AssertionError("dangling backslash")
+        nxt = body[i + 1]
+        if nxt == "x":
+            out.append(chr(int(body[i + 2 : i + 4], 16)))
+            i += 4
+            continue
+        out.append(escapes[nxt])
+        i += 2
+    return "".join(out)
+
+
 def _events(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -177,7 +231,8 @@ def test_view_sql_src_hash_hmac_no_key_bytes() -> None:
     sql = plan.view_sql
     assert plan.view_id == f"{PROJECT}.{VIEW_DATASET}.G_{GID}"
     assert f"FROM `{PROJECT}`.`clinic`.`patients` AS `SRC`" in sql
-    assert "`datagrant`.`hash_hmac`('bq_clinic', CAST(`SRC`.`ssn` AS STRING))" in sql
+    assert f"`{PROJECT}`.`datagrant`.`hash_hmac`(" in sql
+    assert f"`{PROJECT}`.`datagrant`.`hash_hmac`('bq_clinic', CAST(`SRC`.`ssn` AS STRING))" in sql
     assert KEY.derived.hex() not in sql
     assert KEY.derived.hex() not in plan.view_id
     assert "google.cloud" not in Path("src/datagrant/bq/grant.py").read_text()
@@ -200,7 +255,7 @@ def test_five_masks() -> None:
         hash_scope="bq_clinic",
     )
     assert "`SRC`.`id` AS `id`" in sql
-    assert "`datagrant`.`hash_hmac`" in sql
+    assert f"`{PROJECT}`.`datagrant`.`hash_hmac`(" in sql
     assert "'[REDACTED]' AS `note`" in sql
     assert "REPEAT('*'" in sql and "RIGHT(" in sql
     assert "CAST(NULL AS STRING) AS `email`" in sql
@@ -333,10 +388,10 @@ def test_iam_failure_after_issued_drops_view_writes_revoked(tmp_path: Path) -> N
     client = FakeClient(fail_on="bind_iam")
     with pytest.raises(GrantError, match="IAM failed"):
         apply_plan(client, _plan(), _sink(tmp_path))
-    assert "drop_view" in client.calls
     assert "claim_active" not in client.calls
     assert client.authorized is True
     assert "deauthorize" not in client.calls
+    _assert_cleanup(client, unbind=True)
     assert client.status[GID] == "failed"
     assert _events(tmp_path / "r.jsonl") == ["issued", "revoked"]
 
@@ -419,14 +474,14 @@ def test_zero_row_enabling_and_active_reverse_drop(tmp_path: Path) -> None:
     with pytest.raises(GrantError, match="not issuing at IAM"):
         apply_plan(client, _plan(), sink)
     assert "bind_iam" not in client.calls
-    assert "drop_view" in client.calls
+    _assert_cleanup(client, unbind=False)
     assert _events(tmp_path / "r.jsonl") == ["issued", "revoked"]
     sink2 = _sink(tmp_path / "b")
     client2 = FakeClient(active_rowcount=0)
     with pytest.raises(GrantError, match="not enabling after IAM"):
         apply_plan(client2, _plan(), sink2)
     assert "bind_iam" in client2.calls
-    assert "drop_view" in client2.calls
+    _assert_cleanup(client2, unbind=True)
     assert client2.authorized is True
     assert _events(tmp_path / "b" / "r.jsonl") == ["issued", "revoked"]
 
@@ -454,7 +509,7 @@ def test_cleanup_drop_view_failure_keeps_mark_failed_and_revoked(tmp_path: Path)
     with pytest.raises(GrantError, match=r"IAM failed.*cleanup failed"):
         apply_plan(iam, _plan(), sink)
     assert iam.calls.count("drop_view") == 1
-    assert "mark_failed" in iam.calls
+    _assert_cleanup(iam, unbind=True)
     assert iam.status[GID] == "failed"
     assert _events(tmp_path / "r.jsonl") == ["issued", "revoked"]
 
@@ -462,7 +517,7 @@ def test_cleanup_drop_view_failure_keeps_mark_failed_and_revoked(tmp_path: Path)
     with pytest.raises(GrantError, match=r"stub:create_view.*cleanup failed"):
         apply_plan(view, _plan(), sink)
     assert view.calls.count("drop_view") == 1
-    assert "mark_failed" in view.calls
+    _assert_cleanup(view, unbind=False)
     assert view.status[GID] == "failed"
     assert "bind_iam" not in view.calls
 
@@ -470,7 +525,7 @@ def test_cleanup_drop_view_failure_keeps_mark_failed_and_revoked(tmp_path: Path)
     with pytest.raises(GrantError, match=r"not issuing at row update.*cleanup failed"):
         apply_plan(names, _plan(), sink)
     assert names.calls.count("drop_view") == 1
-    assert "mark_failed" in names.calls
+    _assert_cleanup(names, unbind=False)
     assert names.status[GID] == "failed"
     assert "bind_iam" not in names.calls
     assert "deauthorize" not in names.calls
@@ -499,7 +554,7 @@ def test_bind_iam_keyboardinterrupt_still_drops_view(tmp_path: Path) -> None:
     client = Boom()
     with pytest.raises(KeyboardInterrupt):
         apply_plan(client, _plan(), _sink(tmp_path))
-    assert "drop_view" in client.calls
+    _assert_cleanup(client, unbind=True)
     assert client.status[GID] == "failed"
 
 
@@ -549,7 +604,7 @@ def test_generated_grant_id_and_dataset_default() -> None:
         now=NOW,
         hash_key=KEY,
     )
-    assert "`datagrant`.`hash_hmac`('bq_clinic'" in scoped.view_sql
+    assert f"`{PROJECT}`.`datagrant`.`hash_hmac`('bq_clinic'" in scoped.view_sql
     timed = build_plan(
         dec(masks={"patient_id": "passthrough"}),
         req(columns=("patient_id",)),
@@ -623,4 +678,87 @@ def test_revoked_receipt_failure_is_swallowed(
     with pytest.raises(GrantError, match="IAM failed"):
         apply_plan(client, _plan(), _sink(tmp_path))
     assert _events(tmp_path / "r.jsonl") == ["issued"]
-    assert "drop_view" in client.calls
+    _assert_cleanup(client, unbind=True)
+
+
+def test_lit_round_trip() -> None:
+    cases = ["O'Brien", "'x'", "'", "\\", *[n * "'" for n in range(2, 7)], "foo\\'bar"]
+    for raw in cases:
+        encoded = lit(raw)
+        assert encoded.startswith("'") and encoded.endswith("'")
+        assert unlit(encoded) == raw
+    for raw in ("a\nb", "\rX", "\t", "\x01", "\x7f"):
+        assert unlit(lit(raw)) == raw
+
+
+def test_principal_allowlist() -> None:
+    ok = (
+        "user:alice@example.com",
+        "serviceAccount:sa@clinic-proj.iam.gserviceaccount.com",
+        "group:eng@example.com",
+    )
+    for principal in ok:
+        plan = build_plan(
+            dec(masks={"patient_id": "passthrough"}),
+            req(columns=("patient_id",)),
+            project=PROJECT,
+            principal=principal,
+            source_dataset="clinic",
+            grant_id=GID,
+            now=NOW,
+        )
+        assert plan.principal == principal
+    for bad in ("allUsers", "allAuthenticatedUsers", "domain:example.com"):
+        with pytest.raises(GrantError, match="refused google principal"):
+            build_plan(
+                dec(masks={"patient_id": "passthrough"}),
+                req(columns=("patient_id",)),
+                project=PROJECT,
+                principal=bad,
+                source_dataset="clinic",
+                now=NOW,
+            )
+    for bad in ("alice@example.com", "principal://x", "user:"):
+        with pytest.raises(GrantError, match="principal"):
+            build_plan(
+                dec(masks={"patient_id": "passthrough"}),
+                req(columns=("patient_id",)),
+                project=PROJECT,
+                principal=bad,
+                source_dataset="clinic",
+                now=NOW,
+            )
+
+
+def test_unbind_iam_on_bind_attempt(tmp_path: Path) -> None:
+    sink = _sink(tmp_path)
+    lost = FakeClient(active_rowcount=0)
+    with pytest.raises(GrantError, match="not enabling after IAM"):
+        apply_plan(lost, _plan(), sink)
+    _assert_cleanup(lost, unbind=True)
+    assert lost.calls.count("unbind_iam") == 1
+
+    after = FakeClient(raise_after_bind=True)
+    with pytest.raises(GrantError, match="IAM failed"):
+        apply_plan(after, _plan(), sink)
+    _assert_cleanup(after, unbind=True)
+    assert after.calls.index("bind_iam") < after.calls.index("unbind_iam")
+
+    drop = FakeClient(fail_on="bind_iam", fail_drop=True)
+    with pytest.raises(GrantError, match=r"IAM failed.*cleanup failed"):
+        apply_plan(drop, _plan(), sink)
+    _assert_cleanup(drop, unbind=True)
+    assert drop.calls.count("drop_view") == 1
+    assert drop.status[GID] == "failed"
+
+
+def test_client_grant_error_still_cleans_up(tmp_path: Path) -> None:
+    class Boom(FakeClient):
+        def create_view(self, plan: GrantPlan) -> None:
+            self.calls.append("create_view")
+            raise GrantError("client boom")
+
+    client = Boom()
+    with pytest.raises(GrantError, match="client boom"):
+        apply_plan(client, _plan(), _sink(tmp_path))
+    _assert_cleanup(client, unbind=False)

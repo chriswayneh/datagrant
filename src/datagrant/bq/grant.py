@@ -32,6 +32,8 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
 _PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 REDACTED = "[REDACTED]"
+_PRINCIPAL_PREFIXES = ("user:", "serviceAccount:", "group:")
+_REFUSED_PRINCIPALS = frozenset({"allusers", "allauthenticatedusers"})
 
 
 class GrantError(RuntimeError):
@@ -56,7 +58,7 @@ class GrantPlan:
 class GrantClient(Protocol):
     """Mocked in tests. IAM bind is a recorded stub until PR 3b.
 
-    ``drop_view`` must succeed if the view does not exist (IF EXISTS).
+    ``unbind_iam`` and ``drop_view`` must succeed if the object does not exist.
     """
 
     def insert_issuing(self, plan: GrantPlan) -> None: ...
@@ -66,6 +68,10 @@ class GrantClient(Protocol):
     def claim_enabling(self, plan: GrantPlan) -> int: ...
     def bind_iam(self, plan: GrantPlan) -> None: ...
     def claim_active(self, plan: GrantPlan) -> int: ...
+    def unbind_iam(self, plan: GrantPlan) -> None:
+        """Remove this grant's IAM binds. Idempotent if none exist."""
+        ...
+
     def drop_view(self, plan: GrantPlan) -> None:
         """Drop ``G_<id>``. Must succeed if the view does not exist."""
         ...
@@ -132,7 +138,23 @@ def _reject_controls(label: str, value: str) -> None:
         raise GrantError(f"{label} contains NUL or control characters")
 
 
-def _col_expr(col: str, mask: str, hash_scope: str) -> str:
+def _parse_principal(raw: str) -> str:
+    principal = raw.strip()
+    if not principal:
+        raise GrantError("google principal is required")
+    _reject_controls("google principal", principal)
+    lowered = principal.lower()
+    if lowered in _REFUSED_PRINCIPALS or lowered.startswith("domain:"):
+        raise GrantError(f"refused google principal {principal!r}")
+    if not any(principal.startswith(p) for p in _PRINCIPAL_PREFIXES):
+        raise GrantError("google principal must be user:, serviceAccount:, or group:")
+    rest = principal.split(":", 1)[1]
+    if not rest:
+        raise GrantError("google principal is required")
+    return principal
+
+
+def _col_expr(col: str, mask: str, hash_scope: str, *, project: str) -> str:
     ident = q(col)
     src = _src_col(col)
     if mask == "passthrough":
@@ -149,7 +171,7 @@ def _col_expr(col: str, mask: str, hash_scope: str) -> str:
             f"ELSE REPEAT('*', LENGTH({text})) END AS {ident}"
         )
     if mask == "hash":
-        fn = f"{q(STATE_DATASET)}.{q(HASH_UDF)}"
+        fn = f"{q_project(project)}.{q(STATE_DATASET)}.{q(HASH_UDF)}"
         return f"{fn}({lit(hash_scope)}, CAST({src} AS STRING)) AS {ident}"
     raise GrantError(f"unknown mask {mask!r}")
 
@@ -244,8 +266,8 @@ def view_select_sql(
     source_dataset: str,
     hash_scope: str,
 ) -> str:
-    """SELECT for G_<id>. Calls datagrant.hash_hmac; never embeds key bytes."""
-    cols = ", ".join(_col_expr(c, masks[c], hash_scope) for c in req.columns)
+    """SELECT for G_<id>. Calls project.datagrant.hash_hmac; never embeds key bytes."""
+    cols = ", ".join(_col_expr(c, masks[c], hash_scope, project=project) for c in req.columns)
     ds, table = _split_table(req.table, source_dataset)
     from_tbl = f"{q_project(project)}.{q(ds)}.{q(table)}"
     select = f"SELECT {cols} FROM {from_tbl} AS {q(SRC_ALIAS)}"  # nosec B608
@@ -276,8 +298,7 @@ def build_plan(
     """Pure plan. IAM bind details are PR 3b; this only names the last step."""
     if not decision.allowed:
         raise GrantError("cannot build a grant for a denied decision")
-    if not principal.strip():
-        raise GrantError("google principal is required")
+    principal = _parse_principal(principal)
     _reject_controls("purpose", req.purpose)
     gid = grant_id or secrets.token_hex(6)
     if not _GRANT_ID_RE.fullmatch(gid):
@@ -322,7 +343,7 @@ def build_plan(
         project,
         f"{project}.{ds}",
         req.table,
-        principal.strip(),
+        principal,
         expires,
         location,
         facts,
@@ -330,21 +351,33 @@ def build_plan(
     )
 
 
-def reverse_drop(client: GrantClient, plan: GrantPlan) -> None:
-    """Drop the grant view. Always mark_failed. Never de-authorize the source.
+def reverse_drop(client: GrantClient, plan: GrantPlan, *, unbind: bool = False) -> None:
+    """Unbind (if IAM was attempted), drop the view, always mark_failed.
 
-    ``drop_view`` is called inside try; ``mark_failed`` always runs. ``drop_view``
-    must succeed if the view does not exist. A drop error is raised after the
-    status update so sweep can still see ``failed``.
+    Each step is try/finally so one failure cannot skip the next. Never
+    de-authorize the standing source dataset. ``unbind_iam`` and ``drop_view``
+    must succeed if the object does not exist.
     """
-    drop_exc: Exception | None = None
+    parts: list[str] = []
     try:
-        client.drop_view(plan)
-    except Exception as exc:  # noqa: BLE001 - mark_failed still runs
-        drop_exc = exc
-    client.mark_failed(plan)
-    if drop_exc is not None:
-        raise GrantError(f"grant {plan.grant_id}: drop_view failed ({drop_exc})") from drop_exc
+        if unbind:
+            try:
+                client.unbind_iam(plan)
+            except Exception as exc:  # noqa: BLE001 - drop_view still runs
+                parts.append(f"unbind_iam failed ({exc})")
+    finally:
+        try:
+            try:
+                client.drop_view(plan)
+            except Exception as exc:  # noqa: BLE001 - mark_failed still runs
+                parts.append(f"drop_view failed ({exc})")
+        finally:
+            try:
+                client.mark_failed(plan)
+            except Exception as exc:  # noqa: BLE001 - still report earlier errors
+                parts.append(f"mark_failed failed ({exc})")
+    if parts:
+        raise GrantError(f"grant {plan.grant_id}: {'; '.join(parts)}")
 
 
 def append_revoked(plan: GrantPlan, receipts: ReceiptSink | None, *, reason: str) -> None:
@@ -375,6 +408,7 @@ def apply_plan(
     """
     created = False
     issued = False
+    iam_attempted = False
     revoked_reason = "apply_failed"
     try:
         client.insert_issuing(plan)
@@ -404,6 +438,7 @@ def apply_plan(
         if client.claim_enabling(plan) != 1:
             revoked_reason = "lost_issuing"
             raise GrantError(f"grant {plan.grant_id}: not issuing at IAM; view dropped")
+        iam_attempted = True
         try:
             client.bind_iam(plan)
         except BaseException as exc:
@@ -415,10 +450,11 @@ def apply_plan(
             revoked_reason = "lost_enabling"
             raise GrantError(f"grant {plan.grant_id}: not enabling after IAM; view dropped")
     except BaseException as original:
+        # GrantError from a client call is included: cleanup still runs.
         cleanup_exc: Exception | None = None
         if created:
             try:
-                reverse_drop(client, plan)
+                reverse_drop(client, plan, unbind=iam_attempted)
             except Exception as exc:  # noqa: BLE001 - keep original; name both
                 cleanup_exc = exc
             if issued:
