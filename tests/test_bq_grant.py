@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,16 +11,26 @@ from typing import Any
 import pytest
 
 from datagrant.bq.grant import (
+    ACCESS_POLICY_VERSION,
+    GRANTEE_PERMISSIONS,
+    JOB_USER_ROLE,
     VIEW_DATASET,
+    ConflictError,
     GrantError,
     GrantPlan,
+    IamPolicy,
+    apply_bind,
     apply_plan,
+    apply_unbind,
     build_plan,
+    dataset_binding,
+    job_user_binding,
     lit,
     q,
     q_project,
     render_row_filter,
     reverse_drop,
+    view_resource_name,
     view_select_sql,
 )
 from datagrant.keys import HashKey, init_keys, load_signing_key
@@ -62,7 +73,7 @@ def dec(masks: dict[str, str] | None = None, **kw: object) -> Decision:
 
 
 class FakeClient:
-    """Records grant RPCs. bind_iam is a 3a stub (3b fills IAM JSON)."""
+    """Records grant RPCs. bind_iam applies IAM JSON with etag RMW."""
 
     def __init__(
         self,
@@ -72,6 +83,8 @@ class FakeClient:
         active_rowcount: int = 1,
         fail_drop: bool = False,
         raise_after_bind: bool = False,
+        conflict_dataset: int = 0,
+        conflict_project: int = 0,
     ) -> None:
         self.calls: list[str] = []
         self.fail_on = fail_on
@@ -85,6 +98,12 @@ class FakeClient:
         self.enabling_rowcount = enabling_rowcount
         self.active_rowcount = active_rowcount
         self.view_sql: str | None = None
+        self.dataset_policy = IamPolicy(etag='W/"1"')
+        self.project_policy = IamPolicy(etag='W/"1"')
+        self.conflict_dataset = conflict_dataset
+        self.conflict_project = conflict_project
+        self.iam_versions: list[int] = []
+        self.iam_etags: list[str] = []
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -122,8 +141,80 @@ class FakeClient:
         self.status[plan.grant_id] = "enabling"
         return 1
 
+    def _iam_get(self, stored: IamPolicy, name: str, access_policy_version: int) -> IamPolicy:
+        self.calls.append(name)
+        self.iam_versions.append(access_policy_version)
+        return IamPolicy(
+            etag=stored.etag,
+            bindings=copy.deepcopy(stored.bindings),
+            version=stored.version,
+        )
+
+    def _iam_set(
+        self,
+        attr: str,
+        name: str,
+        policy: IamPolicy,
+        *,
+        access_policy_version: int,
+        conflict_attr: str,
+    ) -> None:
+        self.calls.append(name)
+        self.iam_versions.append(access_policy_version)
+        self.iam_etags.append(policy.etag)
+        if not policy.etag:
+            raise RuntimeError("etag omitted")
+        stored: IamPolicy = getattr(self, attr)
+        left = getattr(self, conflict_attr)
+        if left > 0:
+            setattr(self, conflict_attr, left - 1)
+            stored.etag = 'W/"2"'
+            raise ConflictError("409")
+        if policy.etag != stored.etag:
+            raise ConflictError("409")
+        setattr(
+            self,
+            attr,
+            IamPolicy(
+                etag=policy.etag,
+                bindings=copy.deepcopy(policy.bindings),
+                version=policy.version,
+            ),
+        )
+
+    def get_dataset_iam(
+        self, project: str, dataset: str, *, access_policy_version: int
+    ) -> IamPolicy:
+        return self._iam_get(self.dataset_policy, "get_dataset_iam", access_policy_version)
+
+    def set_dataset_iam(
+        self, project: str, dataset: str, policy: IamPolicy, *, access_policy_version: int
+    ) -> None:
+        self._iam_set(
+            "dataset_policy",
+            "set_dataset_iam",
+            policy,
+            access_policy_version=access_policy_version,
+            conflict_attr="conflict_dataset",
+        )
+
+    def get_project_iam(self, project: str, *, access_policy_version: int) -> IamPolicy:
+        return self._iam_get(self.project_policy, "get_project_iam", access_policy_version)
+
+    def set_project_iam(
+        self, project: str, policy: IamPolicy, *, access_policy_version: int
+    ) -> None:
+        self._iam_set(
+            "project_policy",
+            "set_project_iam",
+            policy,
+            access_policy_version=access_policy_version,
+            conflict_attr="conflict_project",
+        )
+
     def bind_iam(self, plan: GrantPlan) -> None:
         self._step("bind_iam")
+        apply_bind(self, plan)
         if self.raise_after_bind:
             raise RuntimeError("stub:bind_after")
 
@@ -131,6 +222,7 @@ class FakeClient:
         self.calls.append("unbind_iam")
         if self.fail_on == "unbind_iam":
             raise RuntimeError("stub:unbind_iam")
+        apply_unbind(self, plan)
 
     def claim_active(self, plan: GrantPlan) -> int:
         self._step("claim_active")
@@ -210,6 +302,10 @@ def unlit(sql: str) -> str:
         if nxt == "x":
             out.append(chr(int(body[i + 2 : i + 4], 16)))
             i += 4
+            continue
+        if nxt == "u":
+            out.append(chr(int(body[i + 2 : i + 6], 16)))
+            i += 6
             continue
         out.append(escapes[nxt])
         i += 2
@@ -310,6 +406,10 @@ def test_apply_order_iam_last_before_active(tmp_path: Path) -> None:
         "update_names",
         "claim_enabling",
         "bind_iam",
+        "get_dataset_iam",
+        "set_dataset_iam",
+        "get_project_iam",
+        "set_project_iam",
         "claim_active",
     ]
     assert client.status[GID] == "active"
@@ -558,6 +658,20 @@ def test_bind_iam_keyboardinterrupt_still_drops_view(tmp_path: Path) -> None:
     assert client.status[GID] == "failed"
 
 
+def test_keyboardinterrupt_cleanup_failure_reraises(tmp_path: Path) -> None:
+    class Boom(FakeClient):
+        def bind_iam(self, plan: GrantPlan) -> None:
+            self.calls.append("bind_iam")
+            apply_bind(self, plan)
+            raise KeyboardInterrupt
+
+    client = Boom(fail_drop=True)
+    with pytest.raises(KeyboardInterrupt):
+        apply_plan(client, _plan(), _sink(tmp_path))
+    _assert_cleanup(client, unbind=True)
+    assert client.status[GID] == "failed"
+
+
 def test_unknown_mask_and_passthrough_omits_key() -> None:
     with pytest.raises(GrantError, match="unknown mask"):
         view_select_sql(
@@ -687,8 +801,10 @@ def test_lit_round_trip() -> None:
         encoded = lit(raw)
         assert encoded.startswith("'") and encoded.endswith("'")
         assert unlit(encoded) == raw
-    for raw in ("a\nb", "\rX", "\t", "\x01", "\x7f"):
+    for raw in ("a\nb", "\rX", "\t", "\x01", "\x7f", "\u2028", "\u0085"):
         assert unlit(lit(raw)) == raw
+    assert lit("\u2028") == r"'\u2028'"
+    assert lit("\u0085") == r"'\u0085'"
 
 
 def test_principal_allowlist() -> None:
@@ -710,6 +826,16 @@ def test_principal_allowlist() -> None:
         assert plan.principal == principal
     for bad in ("allUsers", "allAuthenticatedUsers", "domain:example.com"):
         with pytest.raises(GrantError, match="refused google principal"):
+            build_plan(
+                dec(masks={"patient_id": "passthrough"}),
+                req(columns=("patient_id",)),
+                project=PROJECT,
+                principal=bad,
+                source_dataset="clinic",
+                now=NOW,
+            )
+    for bad in ("user:not-an-email", "user:alice@", "user:@example.com", "user:a@b@c"):
+        with pytest.raises(GrantError, match="email is invalid"):
             build_plan(
                 dec(masks={"patient_id": "passthrough"}),
                 req(columns=("patient_id",)),
@@ -762,3 +888,104 @@ def test_client_grant_error_still_cleans_up(tmp_path: Path) -> None:
     with pytest.raises(GrantError, match="client boom"):
         apply_plan(client, _plan(), _sink(tmp_path))
     _assert_cleanup(client, unbind=False)
+
+
+def test_cleanup_error_does_not_duplicate_grant_prefix(tmp_path: Path) -> None:
+    client = FakeClient(fail_on="bind_iam", fail_drop=True)
+    with pytest.raises(GrantError, match=r"^grant abcdef012345: IAM failed") as ei:
+        apply_plan(client, _plan(), _sink(tmp_path))
+    msg = str(ei.value)
+    assert msg.count("grant abcdef012345:") == 1
+    assert "cleanup failed" in msg
+
+
+def _titles(policy: IamPolicy) -> list[str]:
+    return [str((b.get("condition") or {}).get("title")) for b in policy.bindings]
+
+
+def test_iam_json_one_view_no_tables_get(tmp_path: Path) -> None:
+    client = FakeClient()
+    plan = _plan()
+    apply_plan(client, plan, _sink(tmp_path))
+    assert all(v == ACCESS_POLICY_VERSION for v in client.iam_versions)
+    ds = client.dataset_policy.bindings
+    ju = client.project_policy.bindings
+    assert len(ds) == 1 and len(ju) == 1
+    expr = ds[0]["condition"]["expression"]
+    resource = view_resource_name(PROJECT, GID)
+    assert resource == f"projects/{PROJECT}/datasets/datagrant_views/tables/G_{GID}"
+    assert f'resource.name == "{resource}"' in expr
+    assert expr.count("/tables/G_") == 1
+    assert 'resource.type == "bigquery.googleapis.com/Table"' in expr
+    assert "request.time < timestamp(" in expr
+    assert "tables.get" not in json.dumps(ds)
+    assert "bigquery.tables.get" not in GRANTEE_PERMISSIONS
+    assert GRANTEE_PERMISSIONS == ("bigquery.tables.getData",)
+    assert ju[0]["role"] == JOB_USER_ROLE
+    assert ju[0]["condition"]["title"] == f"G_{GID}"
+    assert ds[0]["condition"]["title"] == f"G_{GID}"
+    assert "resource.name" not in ju[0]["condition"]["expression"]
+    assert ju[0]["condition"]["expression"].startswith("request.time < timestamp(")
+    blob = json.dumps(ds) + json.dumps(ju)
+    assert KEY.derived.hex() not in blob
+    bind = dataset_binding(plan)
+    job = job_user_binding(plan)
+    assert bind["members"] == [PRINCIPAL]
+    assert job["members"] == [PRINCIPAL]
+    assert bind["role"] == f"projects/{PROJECT}/roles/datagrantViewGetData"
+
+
+def test_two_grants_two_jobuser_titles(tmp_path: Path) -> None:
+    client = FakeClient()
+    sink = _sink(tmp_path)
+    apply_plan(client, _plan(), sink)
+    other = build_plan(
+        dec(),
+        req(),
+        project=PROJECT,
+        principal=PRINCIPAL,
+        source_dataset="clinic",
+        grant_id="bbbbbb000000",
+        now=NOW,
+        hash_key=KEY,
+    )
+    apply_plan(client, other, sink)
+    titles = _titles(client.project_policy)
+    assert titles == [f"G_{GID}", "G_bbbbbb000000"]
+    ds_expr = [b["condition"]["expression"] for b in client.dataset_policy.bindings]
+    assert ds_expr[0].count("G_abcdef012345") == 1
+    assert "G_bbbbbb000000" not in ds_expr[0]
+    assert "G_abcdef012345" not in ds_expr[1]
+    apply_unbind(client, _plan())
+    assert _titles(client.project_policy) == ["G_bbbbbb000000"]
+    assert _titles(client.dataset_policy) == ["G_bbbbbb000000"]
+    apply_unbind(client, _plan())
+    assert _titles(client.project_policy) == ["G_bbbbbb000000"]
+
+
+def test_unbind_idempotent_when_no_bindings() -> None:
+    client = FakeClient()
+    apply_unbind(client, _plan())
+    apply_unbind(client, _plan())
+    assert client.dataset_policy.bindings == []
+    assert client.project_policy.bindings == []
+    assert client.calls.count("set_dataset_iam") == 0
+    assert client.calls.count("set_project_iam") == 0
+
+
+def test_etag_409_retries_once_with_fresh_etag(tmp_path: Path) -> None:
+    client = FakeClient(conflict_dataset=1, conflict_project=1)
+    apply_plan(client, _plan(), _sink(tmp_path))
+    assert client.dataset_policy.bindings
+    assert client.project_policy.bindings
+    assert client.calls.count("get_dataset_iam") == 2
+    assert client.calls.count("set_dataset_iam") == 2
+    assert client.calls.count("get_project_iam") == 2
+    assert client.calls.count("set_project_iam") == 2
+    assert all(v == ACCESS_POLICY_VERSION for v in client.iam_versions)
+    assert client.iam_etags == ['W/"1"', 'W/"2"', 'W/"1"', 'W/"2"']
+    stuck = FakeClient(conflict_dataset=5)
+    with pytest.raises(GrantError, match="etag conflict after 2"):
+        apply_plan(stuck, _plan(), _sink(tmp_path / "b"))
+    assert stuck.calls.count("set_dataset_iam") == 2
+    assert stuck.calls.count("get_dataset_iam") >= 2
