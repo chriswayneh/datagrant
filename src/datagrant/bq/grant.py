@@ -526,9 +526,7 @@ def apply_bind(client: GrantClient, plan: GrantPlan) -> None:
     try:
         _rmw(
             lambda **kw: client.get_dataset_iam(plan.project, VIEW_DATASET, **kw),
-            lambda policy, **kw: client.set_dataset_iam(
-                plan.project, VIEW_DATASET, policy, **kw
-            ),
+            lambda policy, **kw: client.set_dataset_iam(plan.project, VIEW_DATASET, policy, **kw),
             lambda policy: _upsert_binding(policy, dataset_binding(plan)),
         )
         _rmw(
@@ -544,27 +542,35 @@ def apply_bind(client: GrantClient, plan: GrantPlan) -> None:
 
 
 def apply_unbind(client: GrantClient, plan: GrantPlan) -> None:
-    """Remove this grant's two bindings by condition title. Idempotent."""
+    """Remove this grant's two bindings by condition title. Idempotent.
+
+    Project jobUser and dataset unbinds both run even if one fails.
+    """
+    parts: list[str] = []
     try:
-        _rmw(
-            lambda **kw: client.get_project_iam(plan.project, **kw),
-            lambda policy, **kw: client.set_project_iam(plan.project, policy, **kw),
-            lambda policy: _remove_grant_bindings(policy, plan.grant_id),
-            skip_unchanged=True,
-        )
-        _rmw(
-            lambda **kw: client.get_dataset_iam(plan.project, VIEW_DATASET, **kw),
-            lambda policy, **kw: client.set_dataset_iam(
-                plan.project, VIEW_DATASET, policy, **kw
-            ),
-            lambda policy: _remove_grant_bindings(policy, plan.grant_id),
-            skip_unchanged=True,
-        )
-    except GrantError as exc:
-        prefix = f"grant {plan.grant_id}: "
-        if str(exc).startswith(prefix):
-            raise
-        raise GrantError(prefix + str(exc)) from exc
+        try:
+            _rmw(
+                lambda **kw: client.get_project_iam(plan.project, **kw),
+                lambda policy, **kw: client.set_project_iam(plan.project, policy, **kw),
+                lambda policy: _remove_grant_bindings(policy, plan.grant_id),
+                skip_unchanged=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - dataset unbind still runs
+            parts.append(f"project jobUser unbind failed ({_strip_grant_prefix(plan, str(exc))})")
+    finally:
+        try:
+            _rmw(
+                lambda **kw: client.get_dataset_iam(plan.project, VIEW_DATASET, **kw),
+                lambda policy, **kw: client.set_dataset_iam(
+                    plan.project, VIEW_DATASET, policy, **kw
+                ),
+                lambda policy: _remove_grant_bindings(policy, plan.grant_id),
+                skip_unchanged=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - still report project error
+            parts.append(f"dataset unbind failed ({_strip_grant_prefix(plan, str(exc))})")
+    if parts:
+        raise GrantError(f"grant {plan.grant_id}: {'; '.join(parts)}")
 
 
 def _strip_grant_prefix(plan: GrantPlan, msg: str) -> str:

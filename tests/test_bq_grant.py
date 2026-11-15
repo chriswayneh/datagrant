@@ -162,6 +162,8 @@ class FakeClient:
         self.calls.append(name)
         self.iam_versions.append(access_policy_version)
         self.iam_etags.append(policy.etag)
+        if self.fail_on == name:
+            raise RuntimeError(f"stub:{name}")
         if not policy.etag:
             raise RuntimeError("etag omitted")
         stored: IamPolicy = getattr(self, attr)
@@ -971,6 +973,24 @@ def test_unbind_idempotent_when_no_bindings() -> None:
     assert client.project_policy.bindings == []
     assert client.calls.count("set_dataset_iam") == 0
     assert client.calls.count("set_project_iam") == 0
+
+
+def test_unbind_project_failure_still_removes_dataset(tmp_path: Path) -> None:
+    client = FakeClient()
+    apply_plan(client, _plan(), _sink(tmp_path))
+    assert _titles(client.dataset_policy) == [f"G_{GID}"]
+    assert _titles(client.project_policy) == [f"G_{GID}"]
+    client.fail_on = "set_project_iam"
+    with pytest.raises(
+        GrantError, match=r"project jobUser unbind failed \(stub:set_project_iam\)"
+    ) as ei:
+        apply_unbind(client, _plan())
+    msg = str(ei.value)
+    assert msg.count("grant abcdef012345:") == 1
+    assert "dataset unbind failed" not in msg
+    assert _titles(client.dataset_policy) == []
+    assert _titles(client.project_policy) == [f"G_{GID}"]
+    assert "set_dataset_iam" in client.calls
 
 
 def test_etag_409_retries_once_with_fresh_etag(tmp_path: Path) -> None:
