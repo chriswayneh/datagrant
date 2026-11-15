@@ -50,8 +50,8 @@ Chris authorized a v1.0 plan that parked **warehouses (Snowflake/BigQuery)** aft
 
 Implemented (PRs #47 to #53). Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Design approved (PR #47 at `0449a0b`). v0.6.0 released 2026-11-14.
 
-## Post-v0.6.0: M5 / BigQuery (construction in progress, PR 2 of 7)
+## Post-v0.6.0: M5 / BigQuery (construction in progress, PR 3a of 7)
 
 Chris authorized a v1.0 plan that parked **BigQuery** after Snowflake. M4 released as v0.6.0. M5 is that warehouse work, target **v0.7.0+**. Same request, mask, expire, revoke, sweep and receipt model. IAM / authorized views, not a password user. Rate limits and `max_rows` stay out. No break-glass.
 
-**Status:** construction in progress (PR 2 of 7). Artifact: [docs/design/bigquery.md](../../docs/design/bigquery.md). Chris approved all 11 revised picks on 2026-11-14 4:51 PM CT: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Quote: "Approve all 11 revised BigQuery picks". Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../audit.md).
+**Status:** construction in progress (PR 3a of 7). Artifact: [docs/design/bigquery.md](../../docs/design/bigquery.md). Chris approved all 11 revised picks on 2026-11-14 4:51 PM CT: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Quote: "Approve all 11 revised BigQuery picks". Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../audit.md).

@@ -63,6 +63,6 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| BigQuery | The same model on BigQuery (IAM / authorized views, not a password user). Design: [docs/design/bigquery.md](docs/design/bigquery.md) (**design approved** 2026-11-14; picks 1B through 11B). **construction in progress (PR 2 of 7).** | v0.7.0+ |
+| BigQuery | The same model on BigQuery (IAM / authorized views, not a password user). Design: [docs/design/bigquery.md](docs/design/bigquery.md) (**design approved** 2026-11-14; picks 1B through 11B). **construction in progress (PR 3a of 7).** | v0.7.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.
