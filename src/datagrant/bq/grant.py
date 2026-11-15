@@ -1,10 +1,10 @@
-"""BigQuery per-grant engine: authorized view, issuing-row fail-safe (PR 3a).
+"""BigQuery per-grant engine: authorized view, issuing-row fail-safe (PR 3b).
 
 Order: issuing row, view in shared datagrant_views, authorize dataset only if
-missing, names-row update, issued receipt, enabling, IAM last (stub in 3a),
-active. Reverse-drop the view on failure; never de-authorize the standing
-source entry. IAM JSON (resource.name, jobUser title, etag 409,
-accessPolicyVersion=3) is PR 3b. CLI --apply stays refused.
+missing, names-row update, issued receipt, enabling, IAM last, active.
+IAM bind JSON: dataset resource.name of G_<id>, per-grant jobUser title G_<id>,
+accessPolicyVersion=3, etag 409 retry. Reverse-drop unbinds this grant only.
+CLI --apply stays refused.
 """
 
 from __future__ import annotations
@@ -34,10 +34,22 @@ _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 REDACTED = "[REDACTED]"
 _PRINCIPAL_PREFIXES = ("user:", "serviceAccount:", "group:")
 _REFUSED_PRINCIPALS = frozenset({"allusers", "allauthenticatedusers"})
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+$")
+ACCESS_POLICY_VERSION = 3
+ETAG_MAX_TRIES = 2
+JOB_USER_ROLE = "roles/bigquery.jobUser"
+GRANTEE_ROLE_ID = "datagrantViewGetData"
+GRANTEE_PERMISSIONS = ("bigquery.tables.getData",)
+TABLE_RESOURCE_TYPE = "bigquery.googleapis.com/Table"
+TABLE_RESOURCE_SERVICE = "bigquery.googleapis.com"
 
 
 class GrantError(RuntimeError):
     """Raised when a BigQuery grant cannot be planned or applied."""
+
+
+class ConflictError(GrantError):
+    """HTTP 409 / ABORTED on an IAM set (stale etag)."""
 
 
 @dataclass(frozen=True)
@@ -55,8 +67,17 @@ class GrantPlan:
     hash_key: HashKey | None = field(default=None, repr=False)
 
 
+@dataclass
+class IamPolicy:
+    """IAM allow policy. version is accessPolicyVersion."""
+
+    etag: str
+    bindings: list[dict[str, Any]] = field(default_factory=list)
+    version: int = ACCESS_POLICY_VERSION
+
+
 class GrantClient(Protocol):
-    """Mocked in tests. IAM bind is a recorded stub until PR 3b.
+    """Mocked in tests. get/set IAM always send accessPolicyVersion and etag.
 
     ``unbind_iam`` and ``drop_view`` must succeed if the object does not exist.
     """
@@ -66,6 +87,16 @@ class GrantClient(Protocol):
     def authorize_views_dataset_if_missing(self, plan: GrantPlan) -> bool: ...
     def update_names(self, plan: GrantPlan) -> int: ...
     def claim_enabling(self, plan: GrantPlan) -> int: ...
+    def get_dataset_iam(
+        self, project: str, dataset: str, *, access_policy_version: int
+    ) -> IamPolicy: ...
+    def set_dataset_iam(
+        self, project: str, dataset: str, policy: IamPolicy, *, access_policy_version: int
+    ) -> None: ...
+    def get_project_iam(self, project: str, *, access_policy_version: int) -> IamPolicy: ...
+    def set_project_iam(
+        self, project: str, policy: IamPolicy, *, access_policy_version: int
+    ) -> None: ...
     def bind_iam(self, plan: GrantPlan) -> None: ...
     def claim_active(self, plan: GrantPlan) -> int: ...
     def unbind_iam(self, plan: GrantPlan) -> None:
@@ -113,6 +144,12 @@ def lit(value: str) -> str:
             out.append("\\f")
         elif ch == "\v":
             out.append("\\v")
+        elif ch == "\u2028":
+            out.append("\\u2028")
+        elif ch == "\u2029":
+            out.append("\\u2029")
+        elif ch == "\u0085":
+            out.append("\\u0085")
         elif o < 32 or o == 127:
             out.append(f"\\x{o:02x}")
         else:
@@ -149,8 +186,8 @@ def _parse_principal(raw: str) -> str:
     if not any(principal.startswith(p) for p in _PRINCIPAL_PREFIXES):
         raise GrantError("google principal must be user:, serviceAccount:, or group:")
     rest = principal.split(":", 1)[1]
-    if not rest:
-        raise GrantError("google principal is required")
+    if not _EMAIL_RE.fullmatch(rest):
+        raise GrantError("google principal email is invalid")
     return principal
 
 
@@ -295,7 +332,7 @@ def build_plan(
     requester_identity: Mapping[str, Any] | None = None,
     approver_identities: Sequence[Mapping[str, Any]] | None = None,
 ) -> GrantPlan:
-    """Pure plan. IAM bind details are PR 3b; this only names the last step."""
+    """Pure plan, including IAM condition titles and resource.name for G_<id>."""
     if not decision.allowed:
         raise GrantError("cannot build a grant for a denied decision")
     principal = _parse_principal(principal)
@@ -380,6 +417,224 @@ def reverse_drop(client: GrantClient, plan: GrantPlan, *, unbind: bool = False) 
         raise GrantError(f"grant {plan.grant_id}: {'; '.join(parts)}")
 
 
+def rfc3339(ts: datetime) -> str:
+    return ts.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def view_resource_name(project: str, grant_id: str) -> str:
+    return f"projects/{project}/datasets/{VIEW_DATASET}/tables/G_{grant_id}"
+
+
+def grantee_role(project: str) -> str:
+    return f"projects/{project}/roles/{GRANTEE_ROLE_ID}"
+
+
+def condition_title(grant_id: str) -> str:
+    return f"G_{grant_id}"
+
+
+def dataset_condition_expr(plan: GrantPlan) -> str:
+    name = view_resource_name(plan.project, plan.grant_id)
+    return (
+        f'resource.type == "{TABLE_RESOURCE_TYPE}" && '
+        f'resource.service == "{TABLE_RESOURCE_SERVICE}" && '
+        f'resource.name == "{name}" && '
+        f'request.time < timestamp("{rfc3339(plan.expires_at)}")'
+    )
+
+
+def job_user_condition_expr(plan: GrantPlan) -> str:
+    return f'request.time < timestamp("{rfc3339(plan.expires_at)}")'
+
+
+def dataset_binding(plan: GrantPlan) -> dict[str, Any]:
+    return {
+        "role": grantee_role(plan.project),
+        "members": [plan.principal],
+        "condition": {
+            "title": condition_title(plan.grant_id),
+            "expression": dataset_condition_expr(plan),
+        },
+    }
+
+
+def job_user_binding(plan: GrantPlan) -> dict[str, Any]:
+    return {
+        "role": JOB_USER_ROLE,
+        "members": [plan.principal],
+        "condition": {
+            "title": condition_title(plan.grant_id),
+            "expression": job_user_condition_expr(plan),
+        },
+    }
+
+
+def _binding_title(binding: Mapping[str, Any]) -> str | None:
+    cond = binding.get("condition")
+    if not isinstance(cond, dict):
+        return None
+    title = cond.get("title")
+    return title if isinstance(title, str) else None
+
+
+def _binding_expr(binding: Mapping[str, Any]) -> str | None:
+    cond = binding.get("condition")
+    if not isinstance(cond, dict):
+        return None
+    expr = cond.get("expression")
+    return expr if isinstance(expr, str) else None
+
+
+def _ours(existing: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    """True only when role, condition title, and expression all match."""
+    return (
+        existing.get("role") == expected.get("role")
+        and _binding_title(existing) == _binding_title(expected)
+        and _binding_expr(existing) == _binding_expr(expected)
+    )
+
+
+def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
+    title = _binding_title(binding)
+    principal = binding["members"][0]
+    for existing in policy.bindings:
+        if _binding_title(existing) != title:
+            continue
+        if not _ours(existing, binding):
+            raise GrantError(f"IAM condition title {title} already in use")
+        members = existing.get("members")
+        if not isinstance(members, list):
+            raise GrantError(f"IAM condition title {title} already in use")
+        if principal in members:
+            return False
+        members.append(principal)
+        return True
+    policy.bindings.append(binding)
+    return True
+
+
+def _remove_grant_bindings(policy: IamPolicy, expected: Mapping[str, Any]) -> bool:
+    """Remove plan.principal from the matching binding; drop it if empty."""
+    principal = expected["members"][0]
+    title = _binding_title(expected)
+    changed = False
+    keep: list[dict[str, Any]] = []
+    for existing in policy.bindings:
+        if _binding_title(existing) != title or not _ours(existing, expected):
+            keep.append(existing)
+            continue
+        members = existing.get("members")
+        if not isinstance(members, list) or principal not in members:
+            keep.append(existing)
+            continue
+        changed = True
+        remaining = [m for m in members if m != principal]
+        if remaining:
+            updated = dict(existing)
+            updated["members"] = remaining
+            keep.append(updated)
+    if changed:
+        policy.bindings[:] = keep
+    return changed
+
+
+def _conditional_cap_hit(msg: str) -> bool:
+    lower = msg.lower()
+    if "condition" not in lower:
+        return False
+    cap = any(w in lower for w in ("limit", "exceed", "too many", "quota", "maximum"))
+    who = any(w in lower for w in ("principal", "member", "identity"))
+    return cap and who
+
+
+def _rmw(
+    getter: Any,
+    setter: Any,
+    edit: Any,
+    *,
+    skip_unchanged: bool = False,
+) -> None:
+    last: Exception | None = None
+    for _attempt in range(ETAG_MAX_TRIES):
+        policy = getter(access_policy_version=ACCESS_POLICY_VERSION)
+        if not getattr(policy, "etag", None):
+            raise GrantError("IAM policy etag missing")
+        changed = edit(policy)
+        policy.version = ACCESS_POLICY_VERSION
+        if skip_unchanged and not changed:
+            return
+        try:
+            setter(policy, access_policy_version=ACCESS_POLICY_VERSION)
+            return
+        except ConflictError as exc:
+            last = exc
+            continue
+        except Exception as exc:
+            if _conditional_cap_hit(str(exc)):
+                raise GrantError(
+                    "Google IAM per-principal conditional-binding cap was hit"
+                ) from exc
+            raise
+    raise GrantError(f"IAM etag conflict after {ETAG_MAX_TRIES} attempts") from last
+
+
+def apply_bind(client: GrantClient, plan: GrantPlan) -> None:
+    """Add this grant's dataset bind and project jobUser bind (etag RMW)."""
+    try:
+        _rmw(
+            lambda **kw: client.get_dataset_iam(plan.project, VIEW_DATASET, **kw),
+            lambda policy, **kw: client.set_dataset_iam(plan.project, VIEW_DATASET, policy, **kw),
+            lambda policy: _upsert_binding(policy, dataset_binding(plan)),
+        )
+        _rmw(
+            lambda **kw: client.get_project_iam(plan.project, **kw),
+            lambda policy, **kw: client.set_project_iam(plan.project, policy, **kw),
+            lambda policy: _upsert_binding(policy, job_user_binding(plan)),
+        )
+    except GrantError as exc:
+        prefix = f"grant {plan.grant_id}: "
+        if str(exc).startswith(prefix):
+            raise
+        raise GrantError(prefix + str(exc)) from exc
+
+
+def apply_unbind(client: GrantClient, plan: GrantPlan) -> None:
+    """Remove this grant's principal from matching bindings. Idempotent.
+
+    A binding is ours only when role, title, and expression match. Project
+    jobUser and dataset unbinds both run even if one fails.
+    """
+    parts: list[str] = []
+    try:
+        try:
+            _rmw(
+                lambda **kw: client.get_project_iam(plan.project, **kw),
+                lambda policy, **kw: client.set_project_iam(plan.project, policy, **kw),
+                lambda policy: _remove_grant_bindings(policy, job_user_binding(plan)),
+                skip_unchanged=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - dataset unbind still runs
+            parts.append(f"project jobUser unbind failed ({_strip_grant_prefix(plan, str(exc))})")
+    finally:
+        try:
+            _rmw(
+                lambda **kw: client.get_dataset_iam(plan.project, VIEW_DATASET, **kw),
+                lambda policy, **kw: client.set_dataset_iam(
+                    plan.project, VIEW_DATASET, policy, **kw
+                ),
+                lambda policy: _remove_grant_bindings(policy, dataset_binding(plan)),
+                skip_unchanged=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - still report project error
+            parts.append(f"dataset unbind failed ({_strip_grant_prefix(plan, str(exc))})")
+    if parts:
+        raise GrantError(f"grant {plan.grant_id}: {'; '.join(parts)}")
+
+
+def _strip_grant_prefix(plan: GrantPlan, msg: str) -> str:
+    return msg.removeprefix(f"grant {plan.grant_id}: ")
+
+
 def append_revoked(plan: GrantPlan, receipts: ReceiptSink | None, *, reason: str) -> None:
     if receipts is None or plan.facts is None:
         return
@@ -401,7 +656,7 @@ def apply_plan(
     plan: GrantPlan,
     receipts: ReceiptSink | None = None,
 ) -> None:
-    """Fail-safe apply. IAM last is a client stub in 3a (filled in 3b).
+    """Fail-safe apply. IAM last: dataset bind + project jobUser, etag RMW.
 
     Cleanup calls ``drop_view`` at most once. ``mark_failed`` always runs.
     A post-issued failure still writes ``revoked`` if cleanup fails.
@@ -441,6 +696,9 @@ def apply_plan(
         iam_attempted = True
         try:
             client.bind_iam(plan)
+        except GrantError:
+            revoked_reason = "iam_failed"
+            raise
         except BaseException as exc:
             revoked_reason = "iam_failed"
             if not isinstance(exc, Exception):
@@ -459,12 +717,15 @@ def apply_plan(
                 cleanup_exc = exc
             if issued:
                 append_revoked(plan, receipts, reason=revoked_reason)
-        if cleanup_exc is not None:
-            raise GrantError(
-                f"grant {plan.grant_id}: {original}; cleanup failed ({cleanup_exc})"
-            ) from original
         if not isinstance(original, Exception):
-            raise
+            # Bare `raise` would re-raise cleanup_exc if reverse_drop failed.
+            raise original  # noqa: TRY201
+        if cleanup_exc is not None:
+            orig = _strip_grant_prefix(plan, str(original))
+            clean = _strip_grant_prefix(plan, str(cleanup_exc))
+            raise GrantError(
+                f"grant {plan.grant_id}: {orig}; cleanup failed ({clean})"
+            ) from original
         if isinstance(original, GrantError):
             raise
         raise GrantError(f"grant {plan.grant_id} failed: {original}") from original
