@@ -146,6 +146,8 @@ def lit(value: str) -> str:
             out.append("\\v")
         elif ch == "\u2028":
             out.append("\\u2028")
+        elif ch == "\u2029":
+            out.append("\\u2029")
         elif ch == "\u0085":
             out.append("\\u0085")
         elif o < 32 or o == 127:
@@ -475,25 +477,74 @@ def _binding_title(binding: Mapping[str, Any]) -> str | None:
     return title if isinstance(title, str) else None
 
 
+def _binding_expr(binding: Mapping[str, Any]) -> str | None:
+    cond = binding.get("condition")
+    if not isinstance(cond, dict):
+        return None
+    expr = cond.get("expression")
+    return expr if isinstance(expr, str) else None
+
+
+def _ours(existing: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    """True only when role, condition title, and expression all match."""
+    return (
+        existing.get("role") == expected.get("role")
+        and _binding_title(existing) == _binding_title(expected)
+        and _binding_expr(existing) == _binding_expr(expected)
+    )
+
+
 def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
     title = _binding_title(binding)
-    for i, existing in enumerate(policy.bindings):
-        if _binding_title(existing) == title:
-            if existing == binding:
-                return False
-            policy.bindings[i] = binding
-            return True
+    principal = binding["members"][0]
+    for existing in policy.bindings:
+        if _binding_title(existing) != title:
+            continue
+        if not _ours(existing, binding):
+            raise GrantError(f"IAM condition title {title} already in use")
+        members = existing.get("members")
+        if not isinstance(members, list):
+            raise GrantError(f"IAM condition title {title} already in use")
+        if principal in members:
+            return False
+        members.append(principal)
+        return True
     policy.bindings.append(binding)
     return True
 
 
-def _remove_grant_bindings(policy: IamPolicy, grant_id: str) -> bool:
-    title = condition_title(grant_id)
-    keep = [b for b in policy.bindings if _binding_title(b) != title]
-    if len(keep) == len(policy.bindings):
+def _remove_grant_bindings(policy: IamPolicy, expected: Mapping[str, Any]) -> bool:
+    """Remove plan.principal from the matching binding; drop it if empty."""
+    principal = expected["members"][0]
+    title = _binding_title(expected)
+    changed = False
+    keep: list[dict[str, Any]] = []
+    for existing in policy.bindings:
+        if _binding_title(existing) != title or not _ours(existing, expected):
+            keep.append(existing)
+            continue
+        members = existing.get("members")
+        if not isinstance(members, list) or principal not in members:
+            keep.append(existing)
+            continue
+        changed = True
+        remaining = [m for m in members if m != principal]
+        if remaining:
+            updated = dict(existing)
+            updated["members"] = remaining
+            keep.append(updated)
+    if changed:
+        policy.bindings[:] = keep
+    return changed
+
+
+def _conditional_cap_hit(msg: str) -> bool:
+    lower = msg.lower()
+    if "condition" not in lower:
         return False
-    policy.bindings[:] = keep
-    return True
+    cap = any(w in lower for w in ("limit", "exceed", "too many", "quota", "maximum"))
+    who = any(w in lower for w in ("principal", "member", "identity"))
+    return cap and who
 
 
 def _rmw(
@@ -518,6 +569,12 @@ def _rmw(
         except ConflictError as exc:
             last = exc
             continue
+        except Exception as exc:
+            if _conditional_cap_hit(str(exc)):
+                raise GrantError(
+                    "Google IAM per-principal conditional-binding cap was hit"
+                ) from exc
+            raise
     raise GrantError(f"IAM etag conflict after {ETAG_MAX_TRIES} attempts") from last
 
 
@@ -542,9 +599,10 @@ def apply_bind(client: GrantClient, plan: GrantPlan) -> None:
 
 
 def apply_unbind(client: GrantClient, plan: GrantPlan) -> None:
-    """Remove this grant's two bindings by condition title. Idempotent.
+    """Remove this grant's principal from matching bindings. Idempotent.
 
-    Project jobUser and dataset unbinds both run even if one fails.
+    A binding is ours only when role, title, and expression match. Project
+    jobUser and dataset unbinds both run even if one fails.
     """
     parts: list[str] = []
     try:
@@ -552,7 +610,7 @@ def apply_unbind(client: GrantClient, plan: GrantPlan) -> None:
             _rmw(
                 lambda **kw: client.get_project_iam(plan.project, **kw),
                 lambda policy, **kw: client.set_project_iam(plan.project, policy, **kw),
-                lambda policy: _remove_grant_bindings(policy, plan.grant_id),
+                lambda policy: _remove_grant_bindings(policy, job_user_binding(plan)),
                 skip_unchanged=True,
             )
         except Exception as exc:  # noqa: BLE001 - dataset unbind still runs
@@ -564,7 +622,7 @@ def apply_unbind(client: GrantClient, plan: GrantPlan) -> None:
                 lambda policy, **kw: client.set_dataset_iam(
                     plan.project, VIEW_DATASET, policy, **kw
                 ),
-                lambda policy: _remove_grant_bindings(policy, plan.grant_id),
+                lambda policy: _remove_grant_bindings(policy, dataset_binding(plan)),
                 skip_unchanged=True,
             )
         except Exception as exc:  # noqa: BLE001 - still report project error

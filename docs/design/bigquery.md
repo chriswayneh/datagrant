@@ -204,6 +204,8 @@ Construction:
 3. `datasets.update` / `setIamPolicy` with the **same etag** and `accessPolicyVersion=3`.
 4. On conflict (HTTP 409 / `ABORTED`): retry from a fresh get, bounded times, then exit 4. Do not retry forever inside `--apply`.
 
+The live `--apply` client (PR 5) must preserve non-IAM dataset `access` entries (authorized datasets, views, and routines) on `datasets.update`, and must use the default `updateMask` so an IAM or ACL write does not wipe those entries.
+
 Unit test (construction PR 3): stub get returns etag `W/"1"`; first update returns 409; second get returns `W/"2"`; second update with `W/"2"` succeeds. A second writer that omits etag is treated as a test failure (the client always sends etag).
 
 ## Hash key
@@ -252,8 +254,9 @@ M5 does **not** add `max_bytes_billed`, slot reservations, or custom quotas as p
 - Put grant views and `jobUser` in a **dedicated grant project** with a GCP budget and alerts.
 - Not grant `jobUser` on the source project.
 - Know that `INFORMATION_SCHEMA` and dry-run plans are not a substitute for a budget.
+- Residual: `jobUser` lets the grantee run query jobs billed to the operator grant project until the `request.time` expiry. Suggest a custom quota or reservation on that project (not a policy key).
 
-Quotas that can bite (not policy keys): IAM bindings per resource, authorized resources per dataset (Google documents a 2500 authorized-resource limit; authorizing one dataset is one resource, not one per view) ([authorized datasets](https://cloud.google.com/bigquery/docs/authorized-datasets)), jobs per day. Per-grant service accounts are out, so the default 100 SAs per project is not the M5 bottleneck.
+Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-principal IAM Conditions cap on a resource, authorized resources per dataset (Google documents a 2500 authorized-resource limit; authorizing one dataset is one resource, not one per view) ([authorized datasets](https://cloud.google.com/bigquery/docs/authorized-datasets)), jobs per day. Per-grant service accounts are out, so the default 100 SAs per project is not the M5 bottleneck.
 
 `max_concurrent_grants` stays the existing per-engine count (issuing / enabling / active in that project's `datagrant.grants`). Postgres, Snowflake, and BigQuery stores are separate; there is no cross-engine total.
 
@@ -300,7 +303,7 @@ Same shape as M4: one concern per PR, tests in each, docs last. No rate-limit PR
 1. **Done (design PR #56).** Design, ROADMAP pointer, audit pointer. No runtime. Design approved.
 2. Policy `engine: bigquery` and ADC routing. Parse `bigquery`, `schema` as dataset, optional `location`. `--apply` requires extra + ADC + project. Refuse JSON keys. Dry run without GCP.
 3. BigQuery grant engine (mocked client), split **3a / 3b**. **3a** (merged as #58): view SQL for `G_<id>` in shared `datagrant_views` (`` `SRC` ``, `datagrant.hash_hmac`, no key bytes), plan order (`issuing` row, view, authorize dataset only if missing, receipt, IAM last as a stub, `active`), reverse-drop the view (not the standing authorized dataset). **3b** (this PR): IAM bind JSON (`resource.name` of exactly `G_<id>`, one grant-project `jobUser` binding whose condition title is `G_<id>` and `request.time` only, `accessPolicyVersion=3`, etag RMW with 409 retry), custom grantee role without `tables.get`, `unbind_iam` removes only this grant's two bindings. Unit tests: IAM JSON names exactly one view; two grants produce two `jobUser` titles; etag 409 retries with a fresh etag; unbind leaves the other grant.
-4. BigQuery revoke and sweep. Drop view first; remove this grant's dataset bind and this grant's `jobUser` bind (title `G_<id>`) only; never decide from other grants; `jobs.cancel` best-effort (`jobs.listAll` + `jobs.update`); 10-minute issuing/enabling grace; pending TTL does not drop objects; `grant list` / `status`; rowcount claims so a revoked grant cannot return to `active`. Unit test: two grants for one principal, revoke one, the other `jobUser` binding stays. Include `accessPolicyVersion=3` on dataset IAM get/update if PR 3 did not already.
+4. BigQuery revoke and sweep. Drop view first; remove this grant's dataset bind and this grant's `jobUser` bind (title `G_<id>`) only; never decide from other grants; `jobs.cancel` best-effort (`jobs.listAll` + `jobs.update`); 10-minute issuing/enabling grace; pending TTL does not drop objects; `grant list` / `status`; rowcount claims so a revoked grant cannot return to `active`. Sweep of `failed` rows (leftover IAM) uses `apply_unbind` and belongs to this PR 4. Unit test: two grants for one principal, revoke one, the other `jobUser` binding stays. Include `accessPolicyVersion=3` on dataset IAM get/update if PR 3 did not already.
 5. Re-enable BigQuery `--apply` for grant issue and approve (`apply_plan`, `claim_pending`, `mark_request_failed`). Concurrent cap counts all BigQuery datasets (issuing/enabling/active). Sweep every 1 minute. Two-person `request --apply` stores principal only (no view and no IAM until final approve). Unit test: pending TTL expiry does not call BigQuery DDL.
 6. Masks and catalog. Five mask names, `INFORMATION_SCHEMA` type inspect, `` `SRC` ``-qualified filters. Restricted hash table plus authorized SQL UDF (`hash_hmac`). Hash docs: not designed to be joinable with Postgres or Snowflake.
 7. Docs, runbook, CHANGELOG, package version 0.7.0 (no tag until Chris publishes). `make demo` stays Postgres.

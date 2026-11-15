@@ -803,9 +803,10 @@ def test_lit_round_trip() -> None:
         encoded = lit(raw)
         assert encoded.startswith("'") and encoded.endswith("'")
         assert unlit(encoded) == raw
-    for raw in ("a\nb", "\rX", "\t", "\x01", "\x7f", "\u2028", "\u0085"):
+    for raw in ("a\nb", "\rX", "\t", "\x01", "\x7f", "\u2028", "\u2029", "\u0085"):
         assert unlit(lit(raw)) == raw
     assert lit("\u2028") == r"'\u2028'"
+    assert lit("\u2029") == r"'\u2029'"
     assert lit("\u0085") == r"'\u0085'"
 
 
@@ -1009,3 +1010,45 @@ def test_etag_409_retries_once_with_fresh_etag(tmp_path: Path) -> None:
         apply_plan(stuck, _plan(), _sink(tmp_path / "b"))
     assert stuck.calls.count("set_dataset_iam") == 2
     assert stuck.calls.count("get_dataset_iam") >= 2
+
+
+def test_clashing_title_bind_refuses_and_leaves_operator_binding(tmp_path: Path) -> None:
+    client = FakeClient()
+    clash = {
+        "role": "roles/bigquery.dataViewer",
+        "members": ["user:ops@example.com"],
+        "condition": {"title": f"G_{GID}", "expression": "true"},
+    }
+    client.dataset_policy.bindings.append(copy.deepcopy(clash))
+    with pytest.raises(GrantError, match="IAM condition title G_abcdef012345 already in use"):
+        apply_plan(client, _plan(), _sink(tmp_path))
+    assert client.dataset_policy.bindings == [clash]
+    assert client.project_policy.bindings == []
+
+
+def test_unbind_keeps_matching_binding_with_extra_member(tmp_path: Path) -> None:
+    client = FakeClient()
+    apply_plan(client, _plan(), _sink(tmp_path))
+    extra = "user:ops@example.com"
+    client.dataset_policy.bindings[0]["members"].append(extra)
+    client.project_policy.bindings[0]["members"].append(extra)
+    apply_unbind(client, _plan())
+    assert client.dataset_policy.bindings[0]["members"] == [extra]
+    assert client.project_policy.bindings[0]["members"] == [extra]
+    assert _titles(client.dataset_policy) == [f"G_{GID}"]
+    assert _titles(client.project_policy) == [f"G_{GID}"]
+
+
+def test_conditional_binding_cap_is_named() -> None:
+    class Cap(FakeClient):
+        def set_dataset_iam(
+            self, project: str, dataset: str, policy: IamPolicy, *, access_policy_version: int
+        ) -> None:
+            self.calls.append("set_dataset_iam")
+            raise RuntimeError(
+                "The number of IAM Conditions for this principal exceeds the limit of 20"
+            )
+
+    client = Cap()
+    with pytest.raises(GrantError, match="per-principal conditional-binding cap"):
+        apply_bind(client, _plan())
