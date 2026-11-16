@@ -3,13 +3,14 @@
 name: datagrant-demo
 services:
   postgres:
-    image: postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81  # postgres:16, pinned 2026-11-02 (same as CI)
+    image: postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81  # Postgres 18 demo; CI integration also covers 16
     environment:
       POSTGRES_PASSWORD: ${DATAGRANT_DEMO_PG_PASSWORD:?set by scripts/demo.sh}
     ports:
       - "127.0.0.1:${DATAGRANT_DEMO_PORT:-55439}:5432"   # localhost only
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Postgres 18 uses PGDATA=/var/lib/postgresql/18/docker.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
