@@ -25,7 +25,7 @@ Run it yourself. It needs Python 3.11 or later and Docker with the compose plugi
 ```bash
 git clone https://github.com/chriswayneh/datagrant && cd datagrant
 pip install -e .
-make demo          # temporary Postgres 16 in Docker with fake patient data
+make demo          # temporary Postgres 18 in Docker with fake patient data
 make demo-down     # only needed if a run was interrupted; the demo tears down on exit
 ```
 
