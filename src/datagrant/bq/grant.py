@@ -335,6 +335,8 @@ def build_plan(
     """Pure plan, including IAM condition titles and resource.name for G_<id>."""
     if not decision.allowed:
         raise GrantError("cannot build a grant for a denied decision")
+    if decision.approval == "two-person" and not approvers:
+        raise GrantError("two-person approval: the grant needs an approver")
     principal = _parse_principal(principal)
     _reject_controls("purpose", req.purpose)
     gid = grant_id or secrets.token_hex(6)
@@ -661,6 +663,8 @@ def apply_plan(
     Cleanup calls ``drop_view`` at most once. ``mark_failed`` always runs.
     A post-issued failure still writes ``revoked`` if cleanup fails.
     """
+    if plan.facts is not None and plan.facts.approval == "two-person" and not plan.facts.approvers:
+        raise GrantError("two-person approval: the grant needs an approver")
     created = False
     issued = False
     iam_attempted = False

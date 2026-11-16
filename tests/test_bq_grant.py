@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -396,6 +397,51 @@ def test_row_filter_uses_src_alias() -> None:
 def test_denied_cannot_plan() -> None:
     with pytest.raises(GrantError, match="denied"):
         build_plan(dec(allowed=False), req(), project=PROJECT, principal=PRINCIPAL)
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"approvers": ()}])
+def test_two_person_plan_requires_an_approver(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(GrantError, match="two-person approval: the grant needs an approver"):
+        build_plan(
+            dec(approval="two-person"),
+            req(),
+            project=PROJECT,
+            principal=PRINCIPAL,
+            hash_key=KEY,
+            **kwargs,
+        )
+
+
+def test_two_person_apply_rejects_unapproved_facts_before_any_rpc(tmp_path: Path) -> None:
+    plan = _plan()
+    assert plan.facts is not None
+    unapproved = replace(plan, facts=replace(plan.facts, approval="two-person", approvers=()))
+    client = FakeClient()
+    sink = _sink(tmp_path)
+    with pytest.raises(GrantError, match="two-person approval: the grant needs an approver"):
+        apply_plan(client, unapproved, sink)
+    assert client.calls == []
+    assert client.views == set()
+    assert client.status == {}
+    assert not sink.log.exists()
+
+
+def test_two_person_approved_plan_still_activates(tmp_path: Path) -> None:
+    plan = build_plan(
+        dec(approval="two-person"),
+        req(),
+        project=PROJECT,
+        principal=PRINCIPAL,
+        grant_id=GID,
+        now=NOW,
+        hash_key=KEY,
+        approvers=("bob",),
+    )
+    client = FakeClient()
+    apply_plan(client, plan, _sink(tmp_path))
+    assert client.status[GID] == "active"
+    entry = json.loads((tmp_path / "r.jsonl").read_text().splitlines()[0])
+    assert entry["receipt"]["approvers"] == ["bob"]
 
 
 def test_apply_order_iam_last_before_active(tmp_path: Path) -> None:
