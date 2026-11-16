@@ -4,6 +4,9 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+- Snowflake setup provisions a secure Python 3.12 HMAC-SHA256 primitive using the standard library instead of calling the unavailable `SHA2_HMAC` built-in. The existing SQL wrapper keeps the key in its restricted table, preserves scope derivation and hex output, and keeps NULL distinct from empty strings. Added RFC 4231 handler regressions and an opt-in live SQL/secure-view smoke test (`DATAGRANT_TEST_SNOWFLAKE_DSN`); live validation is still required before release.
+
 ## [0.6.0] - 2026-11-13
 
 Snowflake warehouse support.
