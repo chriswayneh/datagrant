@@ -52,6 +52,10 @@ Snowflake is the second engine. Postgres `--apply` is unchanged. BigQuery is lat
 
 **Hashes.** Snowflake hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Keep separate `hash_scope` values.
 
+Unreleased hash repair: setup creates a secure Python 3.12 `_HMAC_SHA256` function using only the standard library, then the existing SQL `HASH_HMAC` wrapper over the protected key table. The operator needs permission to create Python functions. Grant users need neither function's `USAGE` privilege and must not receive `SELECT` on the key table. NULL remains NULL; an empty string has its own hash.
+
+**Opt-in hash smoke test.** Install `.[dev,snowflake]`, set `DATAGRANT_TEST_SNOWFLAKE_DSN` to a key-pair operator DSN targeting a scratch database with an active warehouse, and run `python -m pytest -q tests/integration/test_sf_hash.py`. This deliberately creates two randomly named `DG_TEST_*` schemas, provisions the functions and fictional key, then drops those schemas in a `finally` cleanup. The operator needs CREATE SCHEMA/FUNCTION/TABLE/VIEW in that scratch database. An interrupted process may leave its named test schemas for operator cleanup. The test is skipped when the variable is unset. It validates SQL compilation, RFC HMAC output, scope separation, NULL/empty/Unicode inputs, and secure-view use as the operator; it does not yet validate access as a separate grantee or revoke/sweep behavior.
+
 `make demo` stays Postgres. Try Snowflake against a throwaway account after `datagrant policy check`.
 
 ## Ops hardening (v0.5.0)
