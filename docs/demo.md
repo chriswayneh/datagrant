@@ -11,7 +11,7 @@ make demo-down     # only needed if a run was interrupted; the demo tears down o
 ```
 
 ## What happens
-1. `scripts/demo.sh` generates a random Postgres password and starts `postgres:16` (digest-pinned) from `scripts/demo-compose.yml`, bound to `127.0.0.1:55439` only. A `trap` runs `docker compose down -v` on exit, removing the containers and the volume.
+1. `scripts/demo.sh` generates a random Postgres password and starts `postgres:18` (digest-pinned) from `scripts/demo-compose.yml`, bound to `127.0.0.1:55439` only. Its disposable volume mounts at `/var/lib/postgresql` for Postgres 18's versioned data directory. A `trap` runs `docker compose down -v` on exit, removing the containers and the volume.
 2. `scripts/demo.py` creates a temp dir for keys, receipts, an `offhost/` folder standing in for another host, and two policy files (auto and two-person). The policy has two datasets over the same table: `clinic` (filters on `region` through `filter_columns`, so `region` is never in the view) and `research` (its own `hash_scope`). Then it:
    1. seeds `dg_demo.patients` (8 rows such as `Fake Patient 001`, SSN `000-00-0001` (never issued), phone `555-01xx-…` (fictional range)) and prints the raw admin view;
    2. runs `keys init --apply`, `policy check` and `preflight --apply`;
