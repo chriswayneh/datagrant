@@ -175,14 +175,25 @@ def test_two_person_flow_and_sweep_and_verify(env: dict[str, Path]) -> None:
     assert run("sweep", "--apply")[1]["results"] == []
 
     code, v = run("receipts", "verify")
-    assert code == EXIT_OK and v["ok"] and v["count"] == 2  # issued + expired
+    assert code == EXIT_OK and v["ok"] and v["count"] == 7
     events = [
         json.loads(x)["receipt"]
         for x in Path(os.environ["DATAGRANT_RECEIPT_LOG"]).read_text().splitlines()
     ]
-    assert [e["event"] for e in events] == ["issued", "expired"]
-    assert events[0]["approvers"] == ["carol"] and events[0]["approval"] == "two-person"
-    assert events[0]["requester"] == "alice"
+    assert [e["event"] for e in events] == [
+        "not_approved",
+        "not_approved",
+        "issued",
+        "not_approved",
+        "request_expired",
+        "not_approved",
+        "expired",
+    ]
+    issued = events[2]
+    assert issued["approvers"] == ["carol"] and issued["approval"] == "two-person"
+    assert issued["requester"] == "alice"
+    assert "grant_id" not in events[0]
+    assert events[4]["details"]["request_id"] == p2["request_id"]
     head = v["head_sha256"]
     assert run("receipts", "verify", "--expect-head", head)[0] == EXIT_OK
     assert run("receipts", "verify", "--expect-head", "0" * 64)[0] == EXIT_FAILED
@@ -296,3 +307,180 @@ def test_custom_key_paths_end_to_end(
     code, v = run("receipts", "verify", "--signing-key", str(sk))
     assert code == EXIT_OK and v["count"] == 1
     assert run("revoke", "--apply", g["grant_id"], "--signing-key", str(sk))[0] == EXIT_OK
+
+
+def test_oidc_request_approve_revoke_and_receipts_e2e(
+    env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import time
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from test_oidc import KeySet, _base_claims
+
+    keys = KeySet()
+    issuer_box = {"url": ""}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            if self.path == "/.well-known/openid-configuration":
+                doc: Any = {
+                    "issuer": issuer_box["url"],
+                    "jwks_uri": f"{issuer_box['url']}/jwks.json",
+                }
+            elif self.path == "/jwks.json":
+                doc = {"keys": keys.jwks()}
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            raw = json.dumps(doc).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    issuer_box["url"] = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("DATAGRANT_OIDC_ALLOW_INSECURE_LOCALHOST", "1")
+        monkeypatch.setenv("DATAGRANT_JWKS_CACHE_DIR", str(tmp_path / "jwks_c"))
+        pol = tmp_path / "oidc.yaml"
+        pol.write_text(
+            f"version: 1\napproval: two-person\napprovers: [sec]\nmax_duration: 8h\n"
+            f"groups: {{ml: [], sec: []}}\n"
+            f"identity:\n  mode: oidc\n  issuer: {issuer_box['url']}\n  audience: datagrant-cli\n"
+            f"  username_claim: email\n  groups_claim: groups\n"
+            f"  group_map: {{idp-ml: ml, idp-sec: sec}}\n"
+            f"datasets:\n  - name: clinic\n    database: postgres\n    tables:\n"
+            f"      - name: public.dg_cli\n        allowed_groups: [ml]\n"
+            f"        columns: {{id: passthrough, ssn: hash, region: passthrough}}\n"
+            f"        row_filters: [\"region = 'west'\"]\n"
+        )
+        now_ts = int(time.time())
+        t_alice = keys.sign(
+            _base_claims(
+                issuer_box["url"],
+                sub="sub-a",
+                email="alice@example.com",
+                groups=["idp-ml"],
+                iat=now_ts - 5,
+                exp=now_ts + 300,
+            ),
+            alg="EdDSA",
+        )
+        tf_a = tmp_path / "a.jwt"
+        tf_a.write_text(t_alice)
+        tf_a.chmod(0o600)
+
+        # Request pending in OIDC mode
+        code, pend = run(
+            "request",
+            "--apply",
+            "--policy",
+            str(pol),
+            "--oidc-token-file",
+            str(tf_a),
+            "--duration",
+            "1h",
+            *REQ,
+        )
+        assert code == EXIT_OK and pend["status"] == "pending"
+
+        # Self-approve with same (iss, sub) rejected
+        t_self = keys.sign(
+            _base_claims(
+                issuer_box["url"],
+                sub="sub-a",
+                email="alice2@example.com",
+                groups=["idp-sec"],
+                iat=now_ts - 5,
+                exp=now_ts + 300,
+            ),
+            alg="EdDSA",
+        )
+        monkeypatch.setenv("DATAGRANT_OIDC_TOKEN", t_self)
+        assert run("approve", "--apply", "--policy", str(pol), pend["request_id"])[0] == EXIT_FAILED
+
+        # Carol approves via group_map
+        t_carol = keys.sign(
+            _base_claims(
+                issuer_box["url"],
+                sub="sub-c",
+                email="carol@example.com",
+                groups=["idp-sec"],
+                iat=now_ts - 5,
+                exp=now_ts + 300,
+            ),
+            alg="RS256",
+        )
+        monkeypatch.setenv("DATAGRANT_OIDC_TOKEN", t_carol)
+        code, gr = run("approve", "--apply", "--policy", str(pol), pend["request_id"])
+        assert code == EXIT_OK and gr["status"] == "granted"
+
+        # Revoke also preserves identity + approver_identities on the revoked receipt
+        assert run("revoke", "--apply", gr["grant_id"])[0] == EXIT_OK
+        code, ver = run("receipts", "verify")
+        assert code == EXIT_OK and ver["ok"] is True and ver["count"] == 3
+        raw_log = Path(os.environ["DATAGRANT_RECEIPT_LOG"]).read_text()
+        assert t_alice not in raw_log and t_carol not in raw_log
+        recs = [json.loads(line)["receipt"] for line in raw_log.splitlines()]
+        assert [r["event"] for r in recs] == ["not_approved", "issued", "revoked"]
+        assert "grant_id" not in recs[0]
+        for rec in recs:
+            assert rec["identity"]["source"] == "oidc"
+            assert rec["identity"]["sub"] == "sub-a"
+        issued = recs[1]
+        assert issued["approver_identities"][0]["sub"] == "sub-c"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_quorum_nth_vote_race_creates_one_grant(env: dict[str, Path]) -> None:
+    import threading
+
+    pol = env["two-person"].parent / "quorum.yaml"
+    pol.write_text(
+        POLICY.format(approval="two-person")
+        .replace("approvers: [sec]", "approvers: [sec]\napprovals_required: 2")
+        .replace("sec: [carol]", "sec: [carol, dave, eve]")
+    )
+    p = str(pol)
+    assert run("preflight", "--apply")[0] == EXIT_OK
+    code, pend = run(
+        "request", "--apply", "--policy", p, "--as-user", "alice", "--duration", "1h", *REQ
+    )
+    assert code == EXIT_OK
+    code, first = run("approve", "--apply", pend["request_id"], "--policy", p, "--as-user", "carol")
+    assert code == EXIT_OK and first["status"] == "pending" and first["approvals"] == "1/2"
+    results: list[tuple[int, dict[str, Any]]] = []
+
+    def vote(user: str) -> None:
+        results.append(
+            run("approve", "--apply", pend["request_id"], "--policy", p, "--as-user", user)
+        )
+
+    t1 = threading.Thread(target=vote, args=("dave",))
+    t2 = threading.Thread(target=vote, args=("eve",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    granted = [d for c, d in results if d.get("status") == "granted"]
+    assert len(granted) == 1
+    assert DSN
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        n = admin.execute(
+            "SELECT count(*) FROM datagrant.grants WHERE requester = %s AND status = 'active'",
+            ("alice",),
+        ).fetchone()
+    assert n == (1,)

@@ -8,6 +8,10 @@ deleting, or reordering any line breaks verification. Truncating the newest
 lines can only be caught against an externally kept head hash (see verify).
 
 Receipts never contain passwords or key material; only the signing key id.
+Writer events: issued, revoked, expired, revoke_failed, denied, not_approved,
+request_expired, approval_recorded. ``denied`` / ``not_approved`` /
+``request_expired`` / ``approval_recorded`` omit ``grant_id``. ``verify``
+accepts any signed, chained line (old logs included).
 """
 
 from __future__ import annotations
@@ -34,9 +38,41 @@ RECEIPT_VERSION = 1
 GENESIS = "0" * 64
 MAX_LINE_BYTES = 64 * 1024
 RECEIPT_LOG_ENV = "DATAGRANT_RECEIPT_LOG"
-Event = Literal["issued", "revoked", "expired", "revoke_failed"]
-EVENTS = ("issued", "revoked", "expired", "revoke_failed")
-_FORBIDDEN_KEYS = {"password", "hash_key", "key", "derived", "secret", "private_key"}
+Event = Literal[
+    "issued",
+    "revoked",
+    "expired",
+    "revoke_failed",
+    "denied",
+    "not_approved",
+    "request_expired",
+    "approval_recorded",
+]
+EVENTS = (
+    "issued",
+    "revoked",
+    "expired",
+    "revoke_failed",
+    "denied",
+    "not_approved",
+    "request_expired",
+    "approval_recorded",
+)
+_NO_GRANT_EVENTS = frozenset(
+    {"denied", "not_approved", "request_expired", "approval_recorded"}
+)
+_FORBIDDEN_KEYS = {
+    "password",
+    "hash_key",
+    "key",
+    "derived",
+    "secret",
+    "private_key",
+    "id_token",
+    "oidc_token",
+    "token",
+    "access_token",
+}
 
 
 class ReceiptError(RuntimeError):
@@ -100,6 +136,8 @@ class GrantFacts:
     policy_version: int
     approval: str
     approvers: Sequence[str] = ()
+    identity: Mapping[str, Any] | None = None
+    approver_identities: Sequence[Mapping[str, Any]] | None = None
 
 
 def receipt_body(
@@ -115,12 +153,11 @@ def receipt_body(
 ) -> dict[str, Any]:
     if event not in EVENTS:
         raise ReceiptError(f"unknown receipt event {event!r}")
-    return {
+    body: dict[str, Any] = {
         "version": RECEIPT_VERSION,
         "event": event,
         "event_at": _utc(event_at or datetime.now(UTC)),
         "host": host or socket.gethostname(),
-        "grant_id": facts.grant_id,
         "requester": facts.requester,
         "dataset": facts.dataset,
         "table": facts.table,
@@ -138,6 +175,13 @@ def receipt_body(
         "prev_receipt_sha256": prev,
         "key_id": key_id,
     }
+    if event not in _NO_GRANT_EVENTS:
+        body["grant_id"] = facts.grant_id
+    if facts.identity is not None:
+        body["identity"] = dict(facts.identity)
+    if facts.approver_identities is not None:
+        body["approver_identities"] = [dict(x) for x in facts.approver_identities]
+    return body
 
 
 def sign_line(body: Mapping[str, Any], key: SigningKey) -> bytes:

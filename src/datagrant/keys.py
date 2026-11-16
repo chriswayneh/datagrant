@@ -32,6 +32,7 @@ DEFAULT_KEY_DIR = Path.home() / ".config" / "datagrant"
 MIN_KEY_BYTES = 32
 _MAX_FILE_BYTES = 1024
 _LABEL = b"datagrant/hash-mask/v1"
+_SCOPE_LABEL = b"datagrant/hash-scope/v1:"
 
 
 class KeyFileError(ValueError):
@@ -43,6 +44,13 @@ class HashKey:
     key_id: str
     derived: bytes = field(repr=False)
 
+    def scoped(self, scope: str) -> HashKey:
+        """Key for one hash scope: values hash differently in different scopes."""
+        if not scope:
+            raise KeyFileError("hash scope must be a non-empty string")
+        derived = hmac.digest(self.derived, _SCOPE_LABEL + scope.encode("utf-8"), "sha256")
+        return HashKey(hashlib.sha256(derived).hexdigest()[:16], derived)
+
 
 def hash_key_path() -> Path:
     """Path of the hash key file: $DATAGRANT_HASH_KEY (a path) or the default."""
@@ -51,14 +59,24 @@ def hash_key_path() -> Path:
 
 
 def _read_key_file(p: Path, kind: str) -> bytes:
-    """Hardened read: no symlink follow, checks on the opened fd, owner-only, bounded."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    """Hardened read: no symlink follow, checks on the opened fd, owner-only, bounded.
+
+    ``lstat`` rejects a FIFO/socket/device before ``open`` so a named pipe
+    cannot hang the process. ``O_NONBLOCK`` covers a replace-with-FIFO race.
+    """
+    from datagrant.hostfs import open_existing_fd
+
     try:
-        fd = os.open(p, flags)
+        fd = open_existing_fd(p)
+    except FileNotFoundError:
+        raise KeyFileError(f"cannot read {kind} {p}: No such file or directory") from None
     except OSError as exc:
         if p.is_dir():  # Windows cannot open a directory at all
             raise KeyFileError(f"{kind} {p} is not a regular file") from None
-        raise KeyFileError(f"cannot read {kind} {p}: {exc.strerror}") from None
+        err = exc.strerror or "Not a regular file"
+        if err == "Not a regular file":
+            raise KeyFileError(f"{kind} {p} is not a regular file") from None
+        raise KeyFileError(f"cannot read {kind} {p}: {err}") from None
     try:
         # Check the opened file itself (no stat-then-open race, no symlink follow).
         st = os.fstat(fd)

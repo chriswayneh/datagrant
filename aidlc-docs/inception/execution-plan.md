@@ -31,3 +31,29 @@
 ## Risks
 - RLS bypass via view owner (mitigated in U2/U3 tests).
 - Revoke failures (fail closed, retried by sweep).
+
+## Post-v0.3.0: M2 / v0.4.0 (implemented)
+
+v0.1.0 units U1–U8 above stay the approved original plan. Chris authorized a v1.0 plan that names **M2 = approvals and policy limits**, target v0.4.0.
+
+Implemented (PRs #33 to #38). Design: [docs/design/approvals-policy-limits.md](../../docs/design/approvals-policy-limits.md). v0.4.0 released 2026-11-10. No break-glass.
+
+## Post-v0.4.0: M3 / v0.5.0 (implemented)
+
+Chris authorized a v1.0 plan that names **M3 = ops hardening**, target v0.5.0. Warehouses (Snowflake/BigQuery) are proposed for **v0.6.0+**, not this milestone. Rate limits and `max_rows` stay out. No break-glass.
+
+Implemented (PRs #40 to #45). Design: [docs/design/ops-hardening.md](../../docs/design/ops-hardening.md). v0.5.0 released 2026-11-11.
+
+## Post-v0.5.0: M4 / v0.6.0 (implemented)
+
+Chris authorized a v1.0 plan that parked **warehouses (Snowflake/BigQuery)** after ops hardening. M3 released as v0.5.0. M4 is that warehouse work, target v0.6.0. **Snowflake first**; BigQuery is **v0.7.0+**. Rate limits and `max_rows` stay out. No break-glass.
+
+Implemented (PRs #47 to #53). Design: [docs/design/warehouses.md](../../docs/design/warehouses.md). Design approved (PR #47 at `0449a0b`). v0.6.0 released 2026-11-14.
+
+## Post-v0.6.0: M5 / BigQuery (construction in progress, PR 3b of 7)
+
+Chris authorized a v1.0 plan that parked **BigQuery** after Snowflake. M4 released as v0.6.0. M5 is that warehouse work, target **v0.7.0+**. Same request, mask, expire, revoke, sweep and receipt model. IAM / authorized views, not a password user. Rate limits and `max_rows` stay out. No break-glass.
+
+**Status:** construction in progress (PR 3b of 7). Artifact: [docs/design/bigquery.md](../../docs/design/bigquery.md). Chris approved all 11 revised picks on 2026-11-14 4:51 PM CT: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Quote: "Approve all 11 revised BigQuery picks". Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../audit.md).
+
+Construction PRs: 3a view SQL (merged #58); 3b IAM bind JSON (this PR). Two-person `request --apply` stores principal only (no view/IAM until final approve) is PR 5. Restricted hash table plus authorized SQL UDF (`hash_hmac`) is PR 6 (masks).

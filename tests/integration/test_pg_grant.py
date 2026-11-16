@@ -58,7 +58,33 @@ POLICY = parse_policy(
                         "row_filters": ["region = 'west'"],
                     }
                 ],
-            }
+            },
+            {
+                "name": "research",
+                "database": "postgres",
+                "tables": [
+                    {
+                        "name": "public.dg_patients",
+                        "allowed_groups": ["ml"],
+                        "columns": {"id": "passthrough", "ssn": "hash"},
+                        "filter_columns": ["region"],
+                        "row_filters": ["region = 'west'"],
+                        "require_row_filter": True,
+                    }
+                ],
+            },
+            {
+                "name": "clinic_copy",
+                "database": "postgres",
+                "hash_scope": "clinic",
+                "tables": [
+                    {
+                        "name": "public.dg_patients",
+                        "allowed_groups": ["ml"],
+                        "columns": {"id": "passthrough", "ssn": "hash"},
+                    }
+                ],
+            },
         ],
     },
     "a" * 64,
@@ -230,12 +256,16 @@ def test_grantee_sees_masked_values_only(admin: psycopg.Connection) -> None:
             c.execute("SELECT key FROM datagrant.hash_keys")
         viewdef = c.execute("SELECT pg_get_viewdef(%s::regclass)", (plan.view,)).fetchone()
     assert rows == [
-        (1, _hmac(KEY_A, "000-00-0001"), None, "*********1234", "[REDACTED]"),
+        (1, _hmac(KEY_A.scoped("clinic"), "000-00-0001"), None, "*********1234", "[REDACTED]"),
         (3, None, None, "**", "[REDACTED]"),
     ]
     assert types == ("date",)  # typed NULL keeps the column type
     assert viewdef is not None
-    for secret in (KEY_A.derived.hex(), KEY_A.derived.decode()):
+    for secret in (
+        KEY_A.derived.hex(),
+        KEY_A.derived.decode(),
+        KEY_A.scoped("clinic").derived.hex(),
+    ):
         assert secret not in viewdef[0]
 
 
@@ -250,6 +280,42 @@ def test_hash_stable_per_key(admin: psycopg.Connection) -> None:
     a1, a2, b = ssn_hash(KEY_A), ssn_hash(KEY_A), ssn_hash(KEY_B)
     assert a1 == a2 != b
     assert admin.execute("SELECT count(*) FROM datagrant.hash_keys").fetchone() == (2,)
+
+
+def _ssn1(admin: psycopg.Connection, dataset: str, row_filter: str | None) -> str:
+    plan, pw = _grant(
+        admin, hash_key=KEY_A, columns=("id", "ssn"), dataset=dataset, row_filter=row_filter
+    )
+    with _login(plan.role, pw) as c:
+        row = c.execute(f"SELECT ssn FROM {plan.view} WHERE id = 1").fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_hash_scope_per_dataset(admin: psycopg.Connection) -> None:
+    clinic = _ssn1(admin, "clinic", "region = 'west'")
+    research = _ssn1(admin, "research", "region = 'west'")
+    shared = _ssn1(admin, "clinic_copy", None)
+    assert clinic != research  # same value, same key file, different datasets
+    assert clinic == shared  # clinic_copy opts in to the clinic scope
+    assert research == _hmac(KEY_A.scoped("research"), "000-00-0001")
+
+
+def test_filter_column_not_in_view(admin: psycopg.Connection) -> None:
+    plan, pw = _grant(
+        admin,
+        hash_key=KEY_A,
+        columns=("id", "ssn"),
+        dataset="research",
+        row_filter="region = 'west'",
+    )
+    with _login(plan.role, pw) as c:
+        rows = sorted(c.execute(f"SELECT id FROM {plan.view}").fetchall())
+        cols = [d.name for d in c.execute(f"SELECT * FROM {plan.view}").description or ()]
+        with pytest.raises(psycopg.errors.UndefinedColumn):
+            c.execute(f"SELECT region FROM {plan.view}")
+    assert rows == [(1,), (3,)]  # filtered on region
+    assert cols == ["id", "ssn"]  # region is used by the filter but never exposed
 
 
 def test_hash_without_pgcrypto_fails_closed(admin: psycopg.Connection) -> None:

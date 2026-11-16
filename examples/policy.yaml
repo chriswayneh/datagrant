@@ -1,4 +1,5 @@
-# Example datagrant policy. Fictional names only.
+# Example datagrant policy (local identity, the default). Fictional names only.
+# For identity.mode: oidc see examples/policy-oidc.yaml and docs/demo-oidc.md.
 version: 1
 approval: auto            # auto | two-person (two-person also needs `approvers: [group]`)
 max_duration: 8h          # policy-wide cap
@@ -18,7 +19,7 @@ datasets:
           zip: partial
           diagnosis_code: passthrough
           full_name: redact
-          region: passthrough     # row filters may only use listed columns
+          region: passthrough     # row filters use columns or filter_columns
         row_filters:
           - "region = 'west'"
         require_row_filter: true

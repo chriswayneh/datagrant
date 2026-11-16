@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from psycopg import sql
@@ -32,6 +33,61 @@ _GRANT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 class GrantError(RuntimeError):
     """Raised when a grant cannot be planned or applied."""
+
+
+LOG_STATEMENT_NEED = (
+    "role cannot SET log_statement; needs superuser or PostgreSQL 15+"
+    " GRANT SET ON PARAMETER log_statement"
+)
+_PG15 = 150000
+_SUPER_SQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user"
+_VERSION_SQL = "SELECT current_setting('server_version_num')"
+_PARAM_SQL = (
+    "SELECT pg_catalog.has_parameter_privilege(current_user, 'log_statement', 'SET')"
+)
+SET_LOCAL_LOG_STATEMENT = sql.SQL("SET LOCAL log_statement = 'none'")
+
+
+def _bool_row(row: Any) -> bool:
+    if not row:
+        return False
+    v = row[0]
+    if isinstance(v, str):
+        return v.lower() in {"t", "true", "on", "1"}
+    return bool(v)
+
+
+def log_statement_capability(conn: Any) -> tuple[bool, str]:
+    """Whether the connected role can SET log_statement. Never issues SET."""
+    try:
+        super_row = conn.execute(_SUPER_SQL).fetchone()
+        if _bool_row(super_row):
+            return True, "superuser can SET log_statement"
+        ver_row = conn.execute(_VERSION_SQL).fetchone()
+        ver = int(ver_row[0]) if ver_row and ver_row[0] is not None else 0
+        if ver < _PG15:
+            return False, f"{LOG_STATEMENT_NEED} (server {ver})"
+        row = conn.execute(_PARAM_SQL).fetchone()
+    except Exception as exc:  # noqa: BLE001 - probe only; missing function is a fail
+        return False, f"{LOG_STATEMENT_NEED} ({exc})"
+    if _bool_row(row):
+        return True, "has SET privilege on log_statement"
+    return False, LOG_STATEMENT_NEED
+
+
+def can_set_log_statement(conn: Any) -> bool:
+    return log_statement_capability(conn)[0]
+
+
+def pin_log_statement(conn: Any) -> None:
+    """``SET LOCAL log_statement = none`` so grant DDL is not captured.
+
+    Raises ``GrantError`` if the role cannot SET that GUC.
+    """
+    ok, detail = log_statement_capability(conn)
+    if not ok:
+        raise GrantError(detail)
+    conn.execute(SET_LOCAL_LOG_STATEMENT)
 
 
 @dataclass(frozen=True)
@@ -99,6 +155,18 @@ STATE_DDL: tuple[sql.Composed, ...] = (
         " CHECK (status IN ('pending','approved','expired')),"
         " approver text, grant_id text)"
     ).format(sql.Identifier(STATE_SCHEMA)),
+    # v0.3.0: requester and approver identity provenance (local vs OIDC iss/sub/token_sha256).
+    sql.SQL("ALTER TABLE {}.requests ADD COLUMN IF NOT EXISTS requester_identity jsonb").format(
+        sql.Identifier(STATE_SCHEMA)
+    ),
+    sql.SQL(
+        "ALTER TABLE {}.grants ADD COLUMN IF NOT EXISTS requester_identity jsonb,"
+        " ADD COLUMN IF NOT EXISTS approver_identities jsonb"
+    ).format(sql.Identifier(STATE_SCHEMA)),
+    # M2 quorum: durable votes on a pending request (additive, default empty).
+    sql.SQL(
+        "ALTER TABLE {}.requests ADD COLUMN IF NOT EXISTS approvals jsonb NOT NULL DEFAULT '[]'::jsonb"
+    ).format(sql.Identifier(STATE_SCHEMA)),
 )
 
 
@@ -126,6 +194,22 @@ def ensure_state(conn: psycopg.Connection) -> list[str]:
     return preflight(conn)
 
 
+def count_active_grants(conn: psycopg.Connection, requester: str) -> int:
+    """How many live grants this principal holds.
+
+    Count is ``status = 'active' AND expires_at > now()``. Revoked grants and
+    grants past ``expires_at`` (swept or not) do not count.
+    """
+    row = conn.execute(
+        sql.SQL(
+            "SELECT count(*) FROM {}.grants WHERE requester = %s AND status = 'active'"
+            " AND expires_at > pg_catalog.now()"
+        ).format(sql.Identifier(STATE_SCHEMA)),
+        (requester,),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def build_plan(
     decision: Decision,
     req: Request,
@@ -138,6 +222,8 @@ def build_plan(
     now: datetime | None = None,
     approvers: Sequence[str] = (),
     verifier: str | None = None,
+    requester_identity: Mapping[str, Any] | None = None,
+    approver_identities: Sequence[Mapping[str, Any]] | None = None,
 ) -> GrantPlan:
     """Build the SQL for an allowed decision. Pure: no database access."""
     if not decision.allowed:
@@ -145,7 +231,7 @@ def build_plan(
     if decision.approval == "two-person" and not approvers:
         raise GrantError("two-person approval: the grant needs an approver")
     gid = grant_id or secrets.token_hex(6)
-    if not _GRANT_ID_RE.match(gid):
+    if not _GRANT_ID_RE.fullmatch(gid):
         raise GrantError("grant id must be 12 lowercase hex characters")
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
@@ -157,6 +243,9 @@ def build_plan(
     needs_key = any(decision.masks[c] == "hash" for c in req.columns)
     if needs_key and hash_key is None:
         raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
+    if hash_key is not None:
+        # Per-dataset scope: equal values hash differently unless datasets share a hash_scope.
+        hash_key = hash_key.scoped(decision.hash_scope or req.dataset)
     key_id = hash_key.key_id if hash_key is not None else None
     try:
         cols = sql.SQL(", ").join(
@@ -184,7 +273,7 @@ def build_plan(
         sql.SQL(
             "INSERT INTO {}.grants (id, role_name, view_name, dataset, table_name, requester,"
             " purpose, columns, row_filter, approval, policy_sha256, created_at, expires_at,"
-            " masks, policy_version, approvers)"
+            " masks, policy_version, approvers, requester_identity, approver_identities)"
             " VALUES ({})"
         ).format(
             sql.Identifier(STATE_SCHEMA),
@@ -207,6 +296,16 @@ def build_plan(
                     json.dumps({c: decision.masks[c] for c in req.columns}, sort_keys=True),
                     decision.policy_version,
                     list(approvers),
+                    (
+                        json.dumps(dict(requester_identity), sort_keys=True)
+                        if requester_identity is not None
+                        else None
+                    ),
+                    (
+                        json.dumps([dict(x) for x in approver_identities], sort_keys=True)
+                        if approver_identities is not None
+                        else None
+                    ),
                 )
             ),
         ),
@@ -234,6 +333,10 @@ def build_plan(
             decision.policy_version,
             decision.approval,
             tuple(approvers),
+            dict(requester_identity) if requester_identity is not None else None,
+            tuple(dict(x) for x in approver_identities)
+            if approver_identities is not None
+            else None,
         ),
     )
 
@@ -243,6 +346,23 @@ def new_password() -> str:
     return secrets.token_urlsafe(32)
 
 
+def _require_counted_matches_plan(
+    plan: GrantPlan, counted: Sequence[Mapping[str, Any]]
+) -> None:
+    """Fail closed when the locked counted set is not the plan's approvers."""
+    if plan.facts is None:
+        raise GrantError(
+            f"grant {plan.grant_id}: counted approvers changed during claim; retry approve"
+        )
+    locked = tuple(str(v.get("approver")) for v in counted)
+    planned = tuple(plan.facts.approvers)
+    if locked != planned:
+        raise GrantError(
+            f"grant {plan.grant_id}: counted approvers changed during claim "
+            f"({list(locked)} vs plan {list(planned)}); retry approve"
+        )
+
+
 def apply_plan(
     conn: psycopg.Connection,
     plan: GrantPlan,
@@ -250,17 +370,27 @@ def apply_plan(
     *,
     request_id: str | None = None,
     approver: str | None = None,
+    approvals: Sequence[Mapping[str, Any]] | None = None,
+    required: int | None = None,
+    policy_sha256: str = "",
+    issuer: str | None = None,
+    can_approve: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> None:
     """Execute a plan atomically; any failure rolls everything back.
 
     With ``receipts``, an ``issued`` receipt is written after commit. If that
     write fails the grant is revoked at once (no receipt, no access) and
-    GrantError is raised.
+    GrantError is raised. Quorum's Nth vote is claimed inside this same
+    transaction (``FOR UPDATE``, merge the caller's new vote with the locked
+    row, re-check eligible votes, write approvals). Plan facts are fixed
+    before that lock, so the counted names must match ``plan.facts.approvers``
+    or the transaction rolls back (request stays pending; retry approve).
     """
     try:
         with conn.transaction():
             # Resolve every unqualified name to built-ins only (CVE-2018-1058 class).
             conn.execute(sql.SQL("SET LOCAL search_path = pg_catalog, pg_temp"))
+            pin_log_statement(conn)
             current = conn.execute(sql.SQL("SELECT current_database()")).fetchone()
             if current != (plan.database,):
                 raise GrantError(
@@ -276,16 +406,33 @@ def apply_plan(
                 )
             if request_id is not None:
                 # Claim the pending request in the same transaction: exactly one approval wins.
-                claimed = conn.execute(
-                    sql.SQL(
-                        "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
-                        " verifier = NULL WHERE id = %s AND status = 'pending'"
-                        " AND expires_at > pg_catalog.now() RETURNING id"
-                    ).format(sql.Identifier(STATE_SCHEMA)),
-                    (approver, plan.grant_id, request_id),
-                ).fetchone()
-                if claimed is None:
-                    raise GrantError(f"request {request_id} is not pending (or has expired)")
+                # The Nth quorum vote is written here too so a failed apply rolls it back.
+                if approvals is not None:
+                    from datagrant.pg.requests import claim_request
+
+                    counted = claim_request(
+                        conn,
+                        request_id,
+                        grant_id=plan.grant_id,
+                        approver=approver,
+                        votes=approvals,
+                        required=required if required is not None else 1,
+                        policy_sha256=policy_sha256,
+                        issuer=issuer,
+                        can_approve=can_approve,
+                    )
+                    _require_counted_matches_plan(plan, counted)
+                else:
+                    claimed = conn.execute(
+                        sql.SQL(
+                            "UPDATE {}.requests SET status = 'approved', approver = %s, grant_id = %s,"
+                            " verifier = NULL WHERE id = %s AND status = 'pending'"
+                            " AND expires_at > pg_catalog.now() RETURNING id"
+                        ).format(sql.Identifier(STATE_SCHEMA)),
+                        (approver, plan.grant_id, request_id),
+                    ).fetchone()
+                    if claimed is None:
+                        raise GrantError(f"request {request_id} is not pending (or has expired)")
             for stmt in plan.statements:
                 conn.execute(stmt)
     except psycopg.Error as exc:

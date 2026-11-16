@@ -155,7 +155,8 @@ def _record_failure(conn: psycopg.Connection, grant_id: str, error: str) -> None
 
 _FACTS = sql.SQL(
     "SELECT requester, dataset, table_name, columns, masks, row_filter, purpose, created_at,"
-    " expires_at, policy_sha256, policy_version, approval, approvers"
+    " expires_at, policy_sha256, policy_version, approval, approvers,"
+    " requester_identity, approver_identities"
     " FROM {}.grants WHERE id = %s AND status = 'active'"
 ).format(sql.Identifier(STATE_SCHEMA))
 
@@ -170,6 +171,24 @@ def _load_facts(conn: psycopg.Connection, grant_id: str) -> GrantFacts | None:
         masks = json.loads(r[4]) if r[4] else {}
     except ValueError:
         masks = {}
+    raw_req_id = r[13] if len(r) > 13 else None
+    if isinstance(raw_req_id, str):
+        try:
+            raw_req_id = json.loads(raw_req_id)
+        except ValueError:
+            raw_req_id = None
+    req_ident = dict(raw_req_id) if isinstance(raw_req_id, dict) else None
+    raw_app_ids = r[14] if len(r) > 14 else None
+    if isinstance(raw_app_ids, str):
+        try:
+            raw_app_ids = json.loads(raw_app_ids)
+        except ValueError:
+            raw_app_ids = None
+    app_idents = (
+        tuple(dict(x) for x in raw_app_ids if isinstance(x, dict))
+        if isinstance(raw_app_ids, list)
+        else None
+    )
     return GrantFacts(
         grant_id,
         r[0],
@@ -185,6 +204,8 @@ def _load_facts(conn: psycopg.Connection, grant_id: str) -> GrantFacts | None:
         r[10] or 1,
         r[11],
         tuple(r[12] or ()),
+        req_ident,
+        app_idents,
     )
 
 

@@ -113,11 +113,94 @@ def test_redact(text: str, dsn: str | None) -> None:
     assert "s3cr3t" not in out and "***" in out
 
 
+@pytest.mark.parametrize(
+    ("text", "dsn", "must_keep", "must_drop"),
+    [
+        # length 1: do not globally replace "x" (would turn "extra" into "e***tra")
+        (
+            "exception extra: postgresql://u:x@h/db failed",
+            "postgresql://u:x@h/db",
+            ("exception extra", "postgresql://u:***@h/db"),
+            (":x@", "postgresql://u:x@h/db"),
+        ),
+        # length 2: "er" must not destroy "server error"
+        (
+            "server error: host=db password=er user=a",
+            "host=db password=er user=a",
+            ("server error", "password=***"),
+            ("password=er",),
+        ),
+        # length 3: keep "abc" in diagnostics; still strip URI user:pass@
+        (
+            "role dg_abc cannot connect; postgresql://u:abc@h/db",
+            "postgresql://u:abc@h/db",
+            ("role dg_abc cannot connect", "postgresql://u:***@h/db"),
+            (":abc@", "postgresql://u:abc@h/db"),
+        ),
+        # quoted conninfo, length 2
+        (
+            "bad conninfo password = 'pw' host=db",
+            "host=db password=pw",
+            ("password = ***",),
+            ("password = 'pw'", "password='pw'"),
+        ),
+        # DSN-form patterns with no extracted dsn, short password
+        (
+            "postgresql://admin:pw@db/x failed",
+            None,
+            ("postgresql://admin:***@db/x",),
+            (":pw@",),
+        ),
+        (
+            "host=db password=ab user=admin failed",
+            None,
+            ("password=***",),
+            ("password=ab",),
+        ),
+        # boundary 4: extracted password is replaced everywhere
+        (
+            "server said abcd is wrong",
+            "host=db password=abcd",
+            ("***",),
+            ("abcd",),
+        ),
+        # longer than 4 (existing global-replace behavior)
+        (
+            "server said s3cr3tpw is wrong",
+            "postgresql://u:s3cr3tpw@h/db",
+            ("***",),
+            ("s3cr3tpw", "s3cr3t"),
+        ),
+    ],
+)
+def test_redact_short_password_and_dsn_forms(
+    text: str, dsn: str | None, must_keep: tuple[str, ...], must_drop: tuple[str, ...]
+) -> None:
+    out = redact(text, dsn)
+    for needle in must_keep:
+        assert needle in out, (needle, out)
+    for needle in must_drop:
+        assert needle not in out, (needle, out)
+
+
 def test_connect_error_is_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     dsn = "postgresql://admin:hunter2zz@127.0.0.1:1/db?connect_timeout=1"
     assert main(["sweep", "--apply", "--dsn", dsn]) == EXIT_FAILED
     err = capsys.readouterr().err
     assert "cannot connect" in err and "hunter2zz" not in err
+
+
+def test_connect_error_short_password_redacts_dsn_not_diagnostics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dsn = "postgresql://admin:er@127.0.0.1:1/db?connect_timeout=1"
+    assert main(["sweep", "--apply", "--dsn", dsn]) == EXIT_FAILED
+    err = capsys.readouterr().err
+    assert "cannot connect" in err
+    assert "://admin:er@" not in err
+    assert ":er@" not in err
+    # length 2 must not mangle leftover diagnostic words such as "error"
+    assert "errror" not in err and "s***v" not in err
 
 
 def test_json_error_output() -> None:
@@ -221,3 +304,141 @@ def test_preflight_help_says_dry_run(capsys: pytest.CaptureFixture[str]) -> None
     out = _help([], capsys)
     assert "dry run; --apply creates state" in out
     assert "create state;" not in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "secret"),
+    [
+        (["keys", "init", "--snowflake-dsn", "snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
+        (["keys", "init", "--snowflake-dsn=snowflake://admin:S3cretPw@acct/db"], "S3cretPw"),
+        (["keys", "init", "--dsn", "postgresql://u:PgPw1234@h/db"], "PgPw1234"),
+        (["keys", "init", "--dsn=postgresql://u:PgPw1234@h/db"], "PgPw1234"),
+        (["keys", "init", "--snowflake-dsn", "password=Pw9999"], "Pw9999"),
+        (["keys", "init", "--snowflake-dsn=password=Pw9999"], "Pw9999"),
+        (["keys", "init", "--dsn", "token=TOKVALUE123"], "TOKVALUE123"),
+        (["keys", "init", "--dsn=token=TOKVALUE123"], "TOKVALUE123"),
+        (["keys", "init", "--snowflake-dsn", "private_key=PKSECRET99"], "PKSECRET99"),
+        (["keys", "init", "--dsn=private_key=PKSECRET99"], "PKSECRET99"),
+    ],
+)
+def test_argparse_error_redacts_secret_flags(
+    argv: list[str], secret: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(argv) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert secret not in err
+    assert "<redacted>" in err
+
+
+def test_argparse_error_redacts_env_dsns(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("DATAGRANT_DSN", "postgresql://u:EnvPw9999@h/db")
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", "snowflake://admin:SfEnvPw88@acct/db")
+    assert main(["keys", "init", "--bogus=postgresql://u:EnvPw9999@h/db"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "EnvPw9999" not in err
+    assert main(["approve", "x", "--bogus=snowflake://admin:SfEnvPw88@acct/db"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "SfEnvPw88" not in err
+
+
+def test_redact_does_not_mangle_oidc_token_flag() -> None:
+    blob = "unrecognized arguments: --oidc-token=aaaaaaaa.bbbbbbbb.cccccccc"
+    assert blob in redact(blob)
+    assert "token=***" not in redact(blob)
+
+
+def test_argparse_error_redacts_private_key_file_pwd_and_passcode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv = [
+        "approve",
+        "x",
+        "--snowflake-dsn",
+        "account=a user=b private_key_file_pwd=KeyPw999 passcode=123456",
+    ]
+    assert main(argv) == EXIT_USAGE
+    err = capsys.readouterr().err
+    for secret in ("KeyPw999", "123456"):
+        assert secret not in err
+
+
+def test_argparse_error_redacts_env_and_flag_spaced_snowflake_dsn(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn = "account=a private_key_file_pwd=EnvPw777"
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", dsn)
+    assert main(["approve", "x", "--snowflake-dsn", dsn]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "EnvPw777" not in err
+    assert dsn not in err
+
+
+def test_argparse_error_redacts_url_password_with_space(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["approve", "x", "--snowflake-dsn=snowflake://u:P@ss w0rd@acct"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "w0rd" not in err
+
+
+def test_cli_redact_replaces_literal_dsn_before_regexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dsn = "account=a private_key_file_pwd=EnvPw777"
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", dsn)
+    out = cli._cli_redact(f"fail --snowflake-dsn {dsn} trailing")
+    assert "EnvPw777" not in out
+    assert dsn not in out
+    assert "trailing" in out
+    assert "pass --dsn or set" in cli._cli_redact("no database: pass --dsn or set $DATAGRANT_DSN")
+
+
+def test_sweep_missing_dsn_message_stays_verbatim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    monkeypatch.delenv("DATAGRANT_SNOWFLAKE_DSN", raising=False)
+    assert main(["sweep"]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "pass --dsn or set $DATAGRANT_DSN" in err
+    assert "pass --dsn <redacted>" not in err
+
+
+def test_doctor_missing_dsn_message_stays_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    monkeypatch.delenv("DATAGRANT_SNOWFLAKE_DSN", raising=False)
+    out: list[str] = []
+    assert main(["doctor"], out.append) == EXIT_FAILED
+    blob = "\n".join(out)
+    assert "pass --dsn or set $DATAGRANT_DSN" in blob
+    assert "pass --dsn <redacted>" not in blob
+
+
+def test_redact_widens_secret_kv_keys() -> None:
+    blob = "private_key_file_pwd=KeyPw999 passcode=123456 passphrase=Phs1 secret=Tok9"
+    cleaned = redact(blob)
+    for secret in ("KeyPw999", "123456", "Phs1", "Tok9"):
+        assert secret not in cleaned
+
+
+def test_err_and_warn_strip_snowflake_dsn_and_kv(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+
+    monkeypatch.setenv("DATAGRANT_SNOWFLAKE_DSN", "snowflake://admin:S3cretPw@acct/db")
+    args = argparse.Namespace(json=False, dsn=None, snowflake_dsn=None)
+    ctx = cli.Ctx(args, lambda s: None)
+    leak = (
+        "fail snowflake://admin:S3cretPw@acct/db password=Pw9999 "
+        "token=TOKVALUE123 private_key=PKSECRET99"
+    )
+    cli._err(ctx, leak, EXIT_USAGE)
+    cli._warn(ctx, leak)
+    err = capsys.readouterr().err
+    for secret in ("S3cretPw", "Pw9999", "TOKVALUE123", "PKSECRET99"):
+        assert secret not in err
