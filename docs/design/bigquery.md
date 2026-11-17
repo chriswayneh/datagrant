@@ -1,6 +1,6 @@
 # Design: BigQuery (v0.7.0+ / M5)
 
-Status: M5 construction in progress (PR 3b of 7). Design approved 2026-11-14 4:51 PM CT (Chris: "Approve all 11 revised BigQuery picks"; picks 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B). Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../../aidlc-docs/audit.md).
+Status: M5 construction in progress (PR 4 of 7). Design approved 2026-11-14 4:51 PM CT (Chris: "Approve all 11 revised BigQuery picks"; picks 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B). Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../../aidlc-docs/audit.md).
 
 M4 (v0.6.0) shipped Snowflake. ROADMAP next item is **the same request, mask, expire, revoke, sweep and receipt model on BigQuery** (IAM / authorized views, not a password user). Target **v0.7.0+**. Rate limits, `max_rows`, and break-glass stay out.
 
@@ -164,6 +164,12 @@ On **any failure** after step 2: drop the view and remove **this grant's** IAM b
 
 **Sweep garbage.** Sweep reads `datagrant.grants` in BigQuery. It skips `issuing` / `enabling` rows younger than **10 minutes**. After that grace, drop leftover views and **that grant's** IAM binds (dataset bind and `jobUser` title `G_<id>`), set `failed`, write a failure receipt. Pending TTL expiry marks the request expired and does not call BigQuery DDL.
 
+**PR 4 construction contract (mocked).** `bq/revoke.py` provides `revoke`, `sweep`, `get_grant`, `list_grants`, and `expire_pending` against a `RevokeClient` protocol. There is still no live client and no CLI wiring; those belong to PR 5. Revoke results distinguish cleanup failure (`outcome=failed`, future CLI exit 4), receipt failure after cleanup (`receipt_error`, future exit 3), and best-effort job cancellation (`cancel_error`, no revoke failure).
+
+The PR 5 state adapter must store a monotonically increasing `revision`, `cleanup_reason`, `claimed_at`, and `cleanup_complete` with each grant. `claim_revoke` conditionally matches both the snapshot's status and revision, sets `revoking`, advances the revision once, and records the original reason and claim time. `finish_revoke` and `release_revoke` match only the claimed revision and must not overwrite another writer. Issuance must not advance `revoking` back to `active`, and issuance failure recording must preserve another writer's revoke ownership. Failed cleanup releases the claim for immediate retry; a crashed process leaves a ten-minute lease before another writer can take over. Cleanup is idempotent if both writers eventually run. Completed stale-issue cleanup remains `failed` with `cleanup_complete=true`, so subsequent sweeps do not repeatedly write receipts. Failed issuance without that marker is still swept for leftover IAM. Persist only resource/receipt facts, never `GrantPlan.hash_key`.
+
+Sweep re-reads the row and rechecks expiry/grace before claiming, so a stale list cannot clean a newly active or younger issuance. Pending expiry is a separate conditional transition of a still-pending request whose stored TTL is due; an approval that wins the claim prevents expiry. This path writes `request_expired` but never invokes view, IAM, or job methods. The CLI adapter must call both grant sweep and pending expiry.
+
 **Revoke / sweep of a live grant (Decision 9).** Fail closed:
 
 1. **Drop the view first.** A lingering IAM bind then fails on a missing table.
@@ -297,7 +303,7 @@ Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-
 - Live (optional): if `DATAGRANT_TEST_BIGQUERY` is set (project + ADC), issue, SELECT as a throwaway principal, revoke, confirm the view is gone. Fictional data only. CI default is unset (skip). That live test **asserts both**: (a) the grantee can query the view **without** `bigquery.tables.get`; (b) the grantee can `SELECT` a view that calls `datagrant.hash_hmac` **without** IAM on the UDF dataset. After bind/unbind, wait: IAM changes typically take 2 minutes and can take 7 minutes or longer; do not treat a still-denied or still-allowed query as a product bug until that window has passed.
 - No real IdP, no real PHI/PII. Fictional names only.
 
-## Follow-up PRs (construction in progress, PR 3b of 7)
+## Follow-up PRs (construction in progress, PR 4 of 7)
 
 Same shape as M4: one concern per PR, tests in each, docs last. No rate-limit PR. No `max_rows` PR. No break-glass PR. No policy-tag PR.
 
@@ -401,4 +407,4 @@ Checked against Google docs (not inferred from SDK types):
 3. **`max_rows` stays out.**
 4. **No break-glass.** Emergency path is a reviewed policy edit to `approval: auto`.
 5. **M4 shipped in v0.6.0** (PRs #47 to #53, tag `v0.6.0` at `6581ab8`).
-6. **M5 design approved 2026-11-14 4:51 PM CT.** Chris: "Approve all 11 revised BigQuery picks". Picks: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Status: construction in progress (PR 3b of 7).
+6. **M5 design approved 2026-11-14 4:51 PM CT.** Chris: "Approve all 11 revised BigQuery picks". Picks: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Status: construction in progress (PR 4 of 7).
