@@ -63,6 +63,6 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 
 | Item | Why | Target |
 | --- | --- | :---: |
-| BigQuery | The same model on BigQuery (IAM / authorized views, not a password user). Design: [docs/design/bigquery.md](docs/design/bigquery.md) (**design approved** 2026-11-14; picks 1B through 11B). **construction in progress (PR 4 of 7).** Two-person stores principal only is PR 5; restricted hash table plus authorized SQL UDF (`hash_hmac`) is PR 6. | v0.7.0+ |
+| BigQuery | IAM and authorized views. [Step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with mocked revoke and sweep; [step 5 of 7](https://github.com/chriswayneh/datagrant/pull/63) is in draft with adapter and approval work. CLI `--apply` remains disabled. See the [approved design](docs/design/bigquery.md). | v0.7.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.
