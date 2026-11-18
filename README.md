@@ -18,6 +18,8 @@ An open source command line tool that gives developers short, limited access to 
 
 **BigQuery progress (unreleased):** [Step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with revoke, sweep, and pending-request expiry tested against mocks. [Draft step 5](https://github.com/chriswayneh/datagrant/pull/63) adds the Google Cloud adapter, grant state, and approval quorum. BigQuery `--apply` remains disabled while CLI integration and scratch-project verification are pending.
 
+![DataGrant progress: Postgres and Snowflake shipped; BigQuery is in development.](docs/assets/datagrant-progress.svg)
+
 ## Demo
 
 <p align="center"><img src="docs/assets/demo.gif" alt="datagrant demo output: masked rows with a hidden filter column, per-dataset hashes, two-person approval, revoke, sweep, receipt verification and an external receipt sink catching a deleted receipt even after the local cursor is deleted, ending in DEMO OK" width="100%"></p>
