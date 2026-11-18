@@ -2,6 +2,8 @@
 
 Fictional names only. Never put real PHI, PII, credentials, or keys here.
 
+These examples cover released engines. For unreleased BigQuery work, see the [design](../docs/design/bigquery.md) and [adapter draft](https://github.com/chriswayneh/datagrant/pull/63). BigQuery `--apply` remains disabled.
+
 | File | Identity | Engine |
 | --- | --- | --- |
 | [policy.yaml](policy.yaml) | local (OS user / `--as-user`) | Postgres (omit `engine`) |
