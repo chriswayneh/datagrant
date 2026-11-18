@@ -168,7 +168,37 @@ On **any failure** after step 2: drop the view and remove **this grant's** IAM b
 
 The PR 5 state adapter must store a monotonically increasing `revision`, `cleanup_reason`, `claimed_at`, and `cleanup_complete` with each grant. `claim_revoke` conditionally matches both the snapshot's status and revision, sets `revoking`, advances the revision once, and records the original reason and claim time. `finish_revoke` and `release_revoke` match only the claimed revision and must not overwrite another writer. Issuance must not advance `revoking` back to `active`, and issuance failure recording must preserve another writer's revoke ownership. Failed cleanup releases the claim for immediate retry; a crashed process leaves a ten-minute lease before another writer can take over. Cleanup is idempotent if both writers eventually run. Completed stale-issue cleanup remains `failed` with `cleanup_complete=true`, so subsequent sweeps do not repeatedly write receipts. Failed issuance without that marker is still swept for leftover IAM. Persist only resource/receipt facts, never `GrantPlan.hash_key`.
 
+The grant store expects this state table in the operator project, in a dataset accessible only to trusted operators:
+
+```sql
+CREATE TABLE datagrant.grants (
+  grant_id STRING NOT NULL, status STRING NOT NULL, started_at TIMESTAMP NOT NULL,
+  revision INT64 NOT NULL, cleanup_complete BOOL NOT NULL, principal STRING NOT NULL,
+  expires_at TIMESTAMP NOT NULL, source_dataset STRING NOT NULL, source_table STRING NOT NULL,
+  view_id STRING NOT NULL, location STRING, facts_json STRING, request_id STRING,
+  cleanup_reason STRING, claimed_at TIMESTAMP
+);
+```
+
+Grant ID reservation acquires the documented [BigQuery transaction write lock](https://cloud.google.com/bigquery/docs/transactions) before checking for duplicates and inserting. All issuing writers must use this path; the table does not enforce unique IDs by schema. A failed reservation stops before view creation. Standalone conditional updates advance the revision and check the affected row count. Query values are parameters, and stored records omit view SQL and key bytes. The table schema and concurrent reservation behavior still need scratch-project verification.
+
 Sweep re-reads the row and rechecks expiry/grace before claiming, so a stale list cannot clean a newly active or younger issuance. Pending expiry is a separate conditional transition of a still-pending request whose stored TTL is due; an approval that wins the claim prevents expiry. This path writes `request_expired` but never invokes view, IAM, or job methods. The CLI adapter must call both grant sweep and pending expiry.
+
+Pending requests use a separate operator-only table:
+
+```sql
+CREATE TABLE datagrant.requests (
+  request_id STRING NOT NULL, principal STRING NOT NULL, expires_at TIMESTAMP NOT NULL,
+  facts_json STRING NOT NULL, votes_json STRING NOT NULL, status STRING NOT NULL,
+  revision INT64 NOT NULL, grant_id STRING
+);
+```
+
+Each vote and expiry compares the pending revision and stored TTL. Approval needs a future expiry according to the database clock; expiry needs a due one. Votes below quorum leave the request pending. The final vote records the quorum, proposed grant ID, and approving state in one update. Only the writer whose update affects one row receives a claim; a stale writer must reload. Finalization matches the claim revision and grant ID. If a process stops after claiming approval, the request stays `approving` with that grant ID for reconciliation. Do not enable apply until recovery and CLI routing are wired and verified.
+
+The approval evaluator rechecks the requester, table, masks, expiry, and separation of duties against current policy. It counts only eligible votes stamped with the current policy hash and deduplicates by case-folded username and OIDC issuer/subject. It expects already verified identities and trusted stored votes. The request store evaluates the snapshot before persisting votes and the final claim; neither operation grants access.
+
+The issuance service accepts a freshly won claim and uses its stored principal, proposed grant ID, and counted approvers. The grant row stores the originating request ID. Recovery matches both IDs and only updates request state: an active grant can finalize approval, and a failed grant can finalize failure once cleanup is complete. Unknown or ambiguous outcomes stay unresolved; recovery never creates a view, changes IAM, or retries issuance. CLI integration and recovery for otherwise unresolved states still need verification.
 
 **Revoke / sweep of a live grant (Decision 9).** Fail closed:
 
@@ -210,7 +240,17 @@ Construction:
 3. `datasets.update` / `setIamPolicy` with the **same etag** and `accessPolicyVersion=3`.
 4. On conflict (HTTP 409 / `ABORTED`): retry from a fresh get, bounded times, then exit 4. Do not retry forever inside `--apply`.
 
-The live `--apply` client (PR 5) must preserve non-IAM dataset `access` entries (authorized datasets, views, and routines) on `datasets.update`, and must use the default `updateMask` so an IAM or ACL write does not wipe those entries.
+Dataset writes must preserve existing `access` entries, including authorized datasets, views, and routines. The PR 5 source authorization helper reads the source ACL with `accessPolicyVersion=3` and sends only the updated `access` field using [`datasets.patch`](https://cloud.google.com/bigquery/docs/reference/rest/v2/datasets/patch). `If-Match` uses the etag of that read. HTTP 409 and 412 trigger one fresh read and retry; if the other writer already added the authorization, no second write is needed. Missing ACL data or etag prevents a write.
+
+The eventual CLI supplies the policy's `database` as the SQL source project and the operator locator as the grant project. The source, preprovisioned `datagrant_views` dataset, and optional requested location must agree. Restrict view creation and updates in the authorized dataset to the operator: the authorization covers all views in that dataset. The helper has HTTP contract tests with simulated responses; scratch GCP verification and CLI integration are still required.
+
+The project IAM transport uses Resource Manager v3 on the configured grant project only. It requests policy version 3, accepts version 1 for a policy without conditions, and writes version 3 with the read etag and the `bindings,etag` update mask. That mask leaves audit settings alone. The engine retries HTTP 409 or 412 from a fresh read. The eventual operator session must include a Resource Manager OAuth scope as well as BigQuery access; the existing BigQuery-only ADC probe is insufficient for these calls. See [Resource Manager setIamPolicy](https://cloud.google.com/resource-manager/reference/rest/v3/projects/setIamPolicy).
+
+Dataset IAM uses the same version 3 BigQuery dataset ACL transport as source authorization. Edit the conditional custom-role bindings on the configured grant project's `datagrant_views` only. Keep other ACL entries in their original representation, including direct grants and authorized resources. A policy snapshot is scoped to its dataset and etag. Test principal serialization and revoke with actual user, group, and service account identities in a scratch project before enabling apply.
+
+The assembled client opens both the SDK and REST transport with the same ADC credentials, requesting BigQuery and Resource Manager scopes. State queries use the state dataset location separately from the grant view's location. Job cancellation reports unavailable until it can identify jobs for the exact grant: cancelling by principal alone could interrupt a different grant for that principal. Revoke still drops the view and removes the IAM bindings.
+
+View operations run GoogleSQL in the configured grant project and wait for the job result before allowing the next lifecycle step. The client accepts only the plan's exact `datagrant_views.G_<id>` target in that project. Creation sets the view expiration and does not replace an existing object. Cleanup uses [`DROP VIEW IF EXISTS`](https://cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#drop_view_statement) so it cannot delete a base table. The state store must reserve a unique ID before submitting DDL. A client timeout is not proof that BigQuery stopped executing a submitted job; test recovery after ambiguous job outcomes before enabling apply.
 
 Unit test (construction PR 3): stub get returns etag `W/"1"`; first update returns 409; second get returns `W/"2"`; second update with `W/"2"` succeeds. A second writer that omits etag is treated as a test failure (the client always sends etag).
 
