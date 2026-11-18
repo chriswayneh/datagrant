@@ -8,7 +8,7 @@
 
 **Temporary, masked access to PHI and PII in Postgres and Snowflake, with signed access receipts.**
 
-[Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md) · [Releases](https://github.com/chriswayneh/datagrant/releases)
+[Watch the demo](#demo) · [Quick start](#quick-start) · [Examples](examples/README.md) · [Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
 
 </div>
 
@@ -18,7 +18,7 @@ An open source command line tool that gives developers short, limited access to 
 
 **BigQuery progress (unreleased):** [Step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with revoke, sweep, and pending-request expiry tested against mocks. [Draft step 5](https://github.com/chriswayneh/datagrant/pull/63) adds the Google Cloud adapter, grant state, and approval quorum. BigQuery `--apply` remains disabled while CLI integration and scratch-project verification are pending.
 
-![DataGrant progress: Postgres and Snowflake shipped; BigQuery is in development.](docs/assets/datagrant-progress.svg)
+![A request passes through policy or approval, opens a masked view with a temporary login, and ends at expiry or revocation. Signed receipts record grant events.](docs/assets/grant-lifecycle.svg)
 
 ## Demo
 
@@ -74,7 +74,7 @@ Only features that ship in v0.6.0 (verified against the CLI and source):
 
 ## Architecture
 
-Flow of a grant: **request -> policy -> masked view + expiring role -> receipt log -> revoke/sweep**.
+The diagram above shows the grant lifecycle for the released engines. The Postgres path below shows where approval, receipt verification, and cleanup happen.
 
 ```mermaid
 flowchart LR

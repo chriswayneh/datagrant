@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="356" viewBox="0 0 400 356" role="img" aria-labelledby="title desc">
+  <title id="title">How a DataGrant grant works</title>
+  <desc id="desc">A developer requests specific columns, rows, and a duration. Policy denies, allows, or requires approval. An allowed grant opens a masked view with a temporary login. Expiry or revocation ends access. Signed receipts record grant events.</desc>
+  <rect width="400" height="356" rx="12" fill="#eff5fa"/>
+  <g fill="#fff" stroke="#526982" stroke-width="1.5">
+    <rect x="24" y="18" width="352" height="55" rx="5"/>
+    <rect x="24" y="96" width="352" height="55" rx="5"/>
+    <rect x="24" y="174" width="352" height="55" rx="5" stroke="#216a83" stroke-width="2.5"/>
+    <rect x="24" y="252" width="352" height="55" rx="5"/>
+  </g>
+  <g fill="none" stroke="#216a83" stroke-width="2">
+    <path d="M48 73V93m-4-5 4 5 4-5M48 151V171m-4-5 4 5 4-5M48 229V249m-4-5 4 5 4-5"/>
+  </g>
+  <g font-family="Verdana, sans-serif" fill="#15263a">
+    <g font-size="21" font-weight="700">
+      <text x="40" y="42">Request access</text>
+      <text x="40" y="120">Check policy</text>
+      <text x="40" y="198">Open a masked view</text>
+      <text x="40" y="276">Close access</text>
+    </g>
+    <g font-size="17">
+      <text x="40" y="63">Columns, rows, and duration</text>
+      <text x="40" y="141">Deny, allow, or require approval</text>
+      <text x="40" y="219">Use a temporary login</text>
+      <text x="40" y="297">Expire or revoke the grant</text>
+      <text x="40" y="336">Signed receipts record grant events.</text>
+      <text x="65" y="91">checks</text>
+      <text x="65" y="169">allows</text>
+      <text x="65" y="247">ends</text>
+    </g>
+  </g>
+</svg>
