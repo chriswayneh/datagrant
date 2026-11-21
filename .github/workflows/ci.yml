@@ -35,9 +35,17 @@ jobs:
       - run: pip-audit
   integration:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: "16"
+            image: postgres:16@sha256:5db6dac2ef5dcff512f4f00a009c3c332b9f2f28f24277175bf3e4a3d02ef83a  # postgres:16 index digest, pinned 2026-11-02
+          - postgres: "18"
+            image: postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81  # postgres:18 index digest, same pin as scripts/demo-compose.yml
     services:
       postgres:
-        image: postgres:16@sha256:5db6dac2ef5dcff512f4f00a009c3c332b9f2f28f24277175bf3e4a3d02ef83a  # postgres:16 index digest, pinned 2026-11-02
+        image: ${{ matrix.image }}
         env:
           POSTGRES_PASSWORD: postgres
         ports: ["5432:5432"]
@@ -58,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16@sha256:5db6dac2ef5dcff512f4f00a009c3c332b9f2f28f24277175bf3e4a3d02ef83a  # postgres:16 index digest, pinned 2026-11-02
+        image: postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81  # postgres:18 index digest, same pin as scripts/demo-compose.yml
         env:
           POSTGRES_PASSWORD: postgres
         ports: ["5432:5432"]

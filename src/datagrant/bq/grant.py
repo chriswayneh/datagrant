@@ -65,6 +65,7 @@ class GrantPlan:
     location: str | None = None
     facts: GrantFacts | None = None
     hash_key: HashKey | None = field(default=None, repr=False)
+    request_id: str | None = None
 
 
 @dataclass
@@ -303,11 +304,13 @@ def view_select_sql(
     project: str,
     source_dataset: str,
     hash_scope: str,
+    source_project: str | None = None,
 ) -> str:
     """SELECT for G_<id>. Calls project.datagrant.hash_hmac; never embeds key bytes."""
     cols = ", ".join(_col_expr(c, masks[c], hash_scope, project=project) for c in req.columns)
     ds, table = _split_table(req.table, source_dataset)
-    from_tbl = f"{q_project(project)}.{q(ds)}.{q(table)}"
+    from_project = project if source_project is None else source_project
+    from_tbl = f"{q_project(from_project)}.{q(ds)}.{q(table)}"
     select = f"SELECT {cols} FROM {from_tbl} AS {q(SRC_ALIAS)}"  # nosec B608
     if req.row_filter is not None:
         try:
@@ -325,6 +328,7 @@ def build_plan(
     project: str,
     principal: str,
     source_dataset: str | None = None,
+    source_project: str | None = None,
     location: str | None = None,
     grant_id: str | None = None,
     now: datetime | None = None,
@@ -347,13 +351,20 @@ def build_plan(
     if now.tzinfo is None:
         raise GrantError("now must be timezone-aware")
     expires = now + req.duration
+    q_project(project)
+    from_project = project if source_project is None else source_project
     ds, _table = _split_table(req.table, source_dataset)
     needs_hash = any(decision.masks[c] == "hash" for c in req.columns)
     if needs_hash and hash_key is None:
         raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
     scope = decision.hash_scope or req.dataset
     view_sql = view_select_sql(
-        req, decision.masks, project=project, source_dataset=ds, hash_scope=scope
+        req,
+        decision.masks,
+        project=project,
+        source_dataset=ds,
+        hash_scope=scope,
+        source_project=from_project,
     )
     if hash_key is not None and hash_key.derived.hex() in view_sql + gid + principal:
         raise GrantError("hash key leaked into view SQL")
@@ -381,7 +392,7 @@ def build_plan(
         view_id,
         view_sql,
         project,
-        f"{project}.{ds}",
+        f"{from_project}.{ds}",
         req.table,
         principal,
         expires,

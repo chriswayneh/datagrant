@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="400" height="356" viewBox="0 0 400 356" role="img" aria-labelledby="title desc">
-  <title id="title">How a DataGrant grant works</title>
+  <title id="title">How a datagrant grant works</title>
   <desc id="desc">A developer requests specific columns, rows, and a duration. Policy denies, allows, or requires approval. An allowed grant opens a masked view with a temporary login. Expiry or revocation ends access. Signed receipts record grant events.</desc>
   <rect width="400" height="356" rx="12" fill="#eff5fa"/>
   <g fill="#fff" stroke="#526982" stroke-width="1.5">

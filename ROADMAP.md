@@ -1,20 +1,91 @@
 # Roadmap
 
-datagrant grows in small, reviewed units. Each unit is one pull request with tests and docs. This page is the summary; the planning history is in [roadmap/](roadmap/) and [aidlc-docs/](aidlc-docs/).
+datagrant gives people short-lived, masked, receipted access to sensitive data, with approval, and takes it away on its own. It grows in small, reviewed pull requests with tests and docs. The planning history is in [roadmap/](roadmap/) and [aidlc-docs/](aidlc-docs/).
 
-## Milestones
+**Where we are:** alpha. The core flow works on Postgres and Snowflake, and BigQuery is being built. The policy file and receipt format can still change before 1.0.
 
-| Version | Theme | Status |
+## At a glance
+
+| Stage | Version | Theme | Status |
+| --- | --- | --- | :---: |
+| Alpha: core | v0.1.0 to v0.6.0 | Expiring, masked, receipted access on Postgres and Snowflake, real identity, two-person approval, ops hardening | ✅ Released |
+| Alpha: core | v0.6.1 | Patch: Snowflake setup fix | Next |
+| Alpha: core | v0.7.0 | BigQuery | In progress |
+| Alpha: compliance | v0.8.0 | PCI pack | Planned |
+| Beta | v0.9.0 | Ready for outside teams | Planned |
+| Stable | v1.0.0 | Stable formats and a compatibility promise | Planned |
+
+## Alpha: building the core
+
+### v0.6.1: Snowflake patch
+
+| Item | What |
+| --- | --- |
+| Setup fix | v0.6.0 Snowflake setup calls a hash function Snowflake does not provide, so `CREATE FUNCTION HASH_HMAC` can fail. The fix is on `main` ([#61](https://github.com/chriswayneh/datagrant/pull/61)). Until v0.6.1 ships, use `main` for Snowflake or stay on Postgres. |
+| Known-issue note | README and v0.6.0 release notes call out the issue and the workaround. |
+
+### v0.7.0: BigQuery
+
+The same request, mask, expire and receipt flow on Google BigQuery: a per-grant authorized view plus an expiring IAM permission on the requester's own Google login, Google default credentials only (key files refused), and revoke that fails closed. Design: [docs/design/bigquery.md](docs/design/bigquery.md).
+
+| Step | What | Status |
 | --- | --- | :---: |
-| v0.1.0 | Expiring, masked, receipted Postgres access from the CLI | ✅ Released |
-| v0.2.0 | Tighter privacy controls and off-host evidence | ✅ Released |
-| v0.3.0 | Real identity | ✅ Released |
-| v0.4.0 | Approvals and policy limits | ✅ Released |
-| v0.5.0 | Ops hardening | ✅ Released |
-| v0.6.0 | Warehouses | ✅ Released |
-| v0.7.0+ | More warehouses (BigQuery) | Planned |
+| 1 | Design (11 approved picks) | ✅ |
+| 2 | Policy engine and credential routing | ✅ |
+| 3 | View SQL, grant order, IAM bind and unbind | ✅ |
+| 4 | Revoke and sweep | ✅ |
+| 5 | Adapter and approval groundwork ([#63](https://github.com/chriswayneh/datagrant/pull/63)) | In review |
+| 6 | CLI request and approval routing, concurrent-grant caps, recovery | Planned |
+| 7 | Turn on `--apply` for BigQuery, live acceptance test, release | Planned |
 
-## v0.1.0: done
+## Alpha: compliance
+
+### v0.8.0: PCI pack
+
+Help teams that hold card data show that access to it is limited, approved, masked and recorded. datagrant **supports** PCI DSS controls. It does not make anyone PCI compliant on its own, and an assessor still decides.
+
+| Item | What | PCI DSS v4.0 |
+| --- | --- | --- |
+| Card-number mask | A built-in mask that shows at most the first 6 and last 4 digits of a card number (PAN). | Req. 3 (protect stored account data, mask PAN when displayed) |
+| Sample cardholder-data policy | A ready-to-copy policy for a cardholder-data table: deny by default, least columns, short expiry, two-person approval. | Req. 7 (restrict access by need to know) |
+| Identity and approval mapping | Docs showing how signed-in requesters and approvers, and distinct approvers, map to unique IDs and approval. | Req. 8 (identify users and authenticate access) |
+| Evidence report | Turn signed receipts into a readable report of who asked, who approved, what they saw, and when access ended. | Req. 10 (log and monitor access), access reviews |
+| Mapping doc | `docs/compliance/pci.md`: each datagrant feature, the requirement it supports, and what stays the customer's job. | All of the above |
+
+## Beta: ready for outside teams
+
+### v0.9.0
+
+| Item | What |
+| --- | --- |
+| Feature freeze | No new engines or major features; bugs, docs and hardening only. |
+| Live acceptance tests | Run the full flow against real Snowflake and BigQuery test accounts, not only mocks. |
+| Easy install | Publish to PyPI and a container image. |
+| Operator guide | Setup, day-two operations, backups, key rotation, troubleshooting. |
+| Upgrade path | Tested upgrades between versions, with migration notes for any policy or state change. |
+| Access review report | A periodic report of every grant in a window for reviewers and auditors. |
+
+## Stable
+
+### v1.0.0
+
+| Item | What |
+| --- | --- |
+| Stable formats | The policy file and receipt format are locked. No breaking changes without a major version. |
+| External security review | An independent review of the grant, revoke and receipt paths, with findings fixed. |
+| Complete docs | Every command, policy field and engine documented and tested. |
+
+## Later ideas
+
+No dates yet. Open an issue to discuss one.
+
+- More warehouses, such as Databricks and Redshift.
+- Approvals in Slack or a ticketing tool.
+- More compliance packs, such as SOC 2.
+
+## Shipped history
+
+### v0.1.0: done
 
 | Unit | What | Status |
 | --- | --- | :---: |
@@ -27,7 +98,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | U7 | One-command demo, run in CI | ✅ |
 | U8 | Docs and release prep | ✅ |
 
-## v0.2.0: done
+### v0.2.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
@@ -35,34 +106,28 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | `filter_columns` | Let a row filter use a column without exposing it in the view. | ✅ |
 | External receipt sink | Webhook and `file://` sinks, outbox, `receipts push`, `receipts verify --sink`. Design: [docs/design/receipt-sink.md](docs/design/receipt-sink.md). | ✅ |
 
-## v0.3.0: done
+### v0.3.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
 | OIDC identity | Authenticate requesters and approvers so two-person approval is enforced, not just recorded. `policy.identity`, `--oidc-token-file` / `$DATAGRANT_OIDC_TOKEN`, mode parity and `(iss, sub)` checks. Design: [docs/design/oidc-identity.md](docs/design/oidc-identity.md). Demo: [docs/demo-oidc.md](docs/demo-oidc.md). | ✅ |
 
-## v0.4.0: done
+### v0.4.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
 | Approvals and policy limits | Policy-wide N-of-M quorum (cap 8); `distinct-groups` refuses when (requester groups ∩ approver groups ∩ table `allowed_groups`) is non-empty; policy-capped pending TTL, `max_columns`, max concurrent grants, denial/expiry receipts on `--apply`. No break-glass (emergency path is a reviewed policy edit to `auto`). Design: [docs/design/approvals-policy-limits.md](docs/design/approvals-policy-limits.md). | ✅ |
 
-## v0.5.0: done
+### v0.5.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
 | Ops hardening | Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). | ✅ |
 
-## v0.6.0: done
+### v0.6.0: done
 
 | Item | What | Status |
 | --- | --- | :---: |
 | Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PRs #48 to #52: policy `engine` and Snowflake `--apply` routing; grant engine; revoke and sweep (atomic claims, 10-minute issuing/enabling grace); grant/approve `--apply` and concurrent cap across Snowflake datasets; masks and catalog (five mask names, type inspect, `"SRC"`-qualified filters so `IS NULL` on a `null`-masked column uses the base column). Hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Design: [docs/design/warehouses.md](docs/design/warehouses.md). | ✅ |
-
-## Next
-
-| Item | Why | Target |
-| --- | --- | :---: |
-| BigQuery | IAM and authorized views. [Step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with mocked revoke and sweep; [step 5 of 7](https://github.com/chriswayneh/datagrant/pull/63) is in draft with adapter and approval work. CLI `--apply` remains disabled. See the [approved design](docs/design/bigquery.md). | v0.7.0+ |
 
 Ideas and priorities may change. Open an issue to discuss one.

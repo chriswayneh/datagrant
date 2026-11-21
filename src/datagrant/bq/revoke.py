@@ -36,9 +36,18 @@ class PendingRequest:
     request_id: str
     expires_at: datetime
     facts: GrantFacts
+    revision: int = 0
 
 
-class RevokeClient(GrantClient, Protocol):
+class PendingExpiryStore(Protocol):
+    def list_due_requests(self, now: datetime) -> Sequence[PendingRequest]: ...
+
+    def claim_expired_request(self, row: PendingRequest, now: datetime) -> int:
+        """Claim a pending request only if its stored expiry matches and is due."""
+        ...
+
+
+class RevokeClient(GrantClient, PendingExpiryStore, Protocol):
     def get_grant(self, grant_id: str) -> GrantRecord | None: ...
 
     def list_grants(self) -> Sequence[GrantRecord]: ...
@@ -65,15 +74,6 @@ class RevokeClient(GrantClient, Protocol):
 
     def cancel_jobs(self, plan: GrantPlan) -> int:
         """Best-effort cancellation for this principal in this grant project."""
-        ...
-
-    def list_due_requests(self, now: datetime) -> Sequence[PendingRequest]: ...
-
-    def claim_expired_request(self, row: PendingRequest, now: datetime) -> int:
-        """CAS a still-pending request with the same expiry, due at now, to expired.
-
-        Return 0 if approval or another expiry claim won; never touch grants.
-        """
         ...
 
 
@@ -255,7 +255,7 @@ def sweep(
 
 
 def expire_pending(
-    client: RevokeClient, receipts: ReceiptSink | None = None, *, now: datetime | None = None
+    client: PendingExpiryStore, receipts: ReceiptSink | None = None, *, now: datetime | None = None
 ) -> list[RequestExpiryResult]:
     """Expire pending requests without any view, IAM, or job operations."""
     current = _now(now)

@@ -204,12 +204,12 @@ def _metadata_request() -> Any:
         return None
 
 
-def _call_google_auth_default(google_auth: Any, request: Any) -> Any:
+def _call_google_auth_default(google_auth: Any, request: Any, scopes: list[str]) -> Any:
     default = google_auth.default
     try:
         if request is None:
-            return default(scopes=ADC_SCOPES)
-        return default(scopes=ADC_SCOPES, request=request)
+            return default(scopes=scopes)
+        return default(scopes=scopes, request=request)
     except TypeError:
         if request is None:
             return default()
@@ -219,8 +219,8 @@ def _call_google_auth_default(google_auth: Any, request: Any) -> Any:
             return default()
 
 
-def adc_available() -> bool:
-    """True when Application Default Credentials can be loaded.
+def load_adc(scopes: list[str] | None = None) -> Any:
+    """Load ADC, or return None when it is unavailable.
 
     May contact the GCP metadata server. Call only on ``--apply``.
     Refuses a service-account JSON key loaded via ADC (exit 2 at the CLI).
@@ -231,21 +231,28 @@ def adc_available() -> bool:
         google_auth = importlib.import_module("google.auth")
         auth_exceptions = importlib.import_module("google.auth.exceptions")
     except ImportError:
-        return False
+        return None
     request = _metadata_request()
     previous_timeout = os.environ.get(_GCE_METADATA_TIMEOUT_ENV)
     os.environ[_GCE_METADATA_TIMEOUT_ENV] = _ADC_METADATA_TIMEOUT_SEC
     try:
-        creds, _project = _call_google_auth_default(google_auth, request)
+        creds, _project = _call_google_auth_default(
+            google_auth, request, ADC_SCOPES if scopes is None else scopes
+        )
     except (auth_exceptions.GoogleAuthError, OSError, AttributeError):
-        return False
+        return None
     finally:
         if previous_timeout is None:
             os.environ.pop(_GCE_METADATA_TIMEOUT_ENV, None)
         else:
             os.environ[_GCE_METADATA_TIMEOUT_ENV] = previous_timeout
     _refuse_service_account_json_key(creds)
-    return True
+    return creds
+
+
+def adc_available() -> bool:
+    """True when permitted Application Default Credentials can be loaded."""
+    return load_adc() is not None
 
 
 def require_adc() -> None:
