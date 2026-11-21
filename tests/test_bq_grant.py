@@ -939,6 +939,29 @@ def test_principal_allowlist() -> None:
             )
 
 
+def test_principal_rejects_unicode_casefold_homoglyphs() -> None:
+    kwargs = {
+        "project": PROJECT,
+        "source_dataset": "clinic",
+        "now": NOW,
+    }
+    with pytest.raises(GrantError, match="email is invalid"):
+        build_plan(
+            dec(masks={"patient_id": "passthrough"}),
+            req(columns=("patient_id",)),
+            principal="user:\u212aelvin@example.com",
+            **kwargs,
+        )
+    plan = build_plan(
+        dec(masks={"patient_id": "passthrough"}),
+        req(columns=("patient_id",)),
+        principal="user:Kelvin@example.com",
+        grant_id=GID,
+        **kwargs,
+    )
+    assert plan.principal == "user:kelvin@example.com"
+
+
 def test_mixed_case_iam_members_bind_and_unbind() -> None:
     plan = _plan()
     client = FakeClient()

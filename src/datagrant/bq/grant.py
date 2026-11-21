@@ -34,7 +34,8 @@ _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 REDACTED = "[REDACTED]"
 _PRINCIPAL_PREFIXES = ("user:", "serviceAccount:", "group:")
 _REFUSED_PRINCIPALS = frozenset({"allusers", "allauthenticatedusers"})
-_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+$")
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_EMAIL_RE = re.compile(r"^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+$")
 ACCESS_POLICY_VERSION = 3
 ETAG_MAX_TRIES = 2
 JOB_USER_ROLE = "roles/bigquery.jobUser"
@@ -181,13 +182,13 @@ def _parse_principal(raw: str) -> str:
     if not principal:
         raise GrantError("google principal is required")
     _reject_controls("google principal", principal)
-    lowered = principal.lower()
-    if lowered in _REFUSED_PRINCIPALS or lowered.startswith("domain:"):
+    folded = principal.translate(_ASCII_LOWER)
+    if folded in _REFUSED_PRINCIPALS or folded.startswith("domain:"):
         raise GrantError(f"refused google principal {principal!r}")
-    prefix = next((p for p in _PRINCIPAL_PREFIXES if lowered.startswith(p.lower())), None)
+    prefix = next((p for p in _PRINCIPAL_PREFIXES if folded.startswith(p.lower())), None)
     if prefix is None:
         raise GrantError("google principal must be user:, serviceAccount:, or group:")
-    rest = lowered.split(":", 1)[1]
+    rest = folded.split(":", 1)[1]
     if not _EMAIL_RE.fullmatch(rest):
         raise GrantError("google principal email is invalid")
     return prefix + rest
