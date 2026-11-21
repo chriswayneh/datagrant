@@ -1,12 +1,14 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="datagrant: Temporary, masked access to PHI and PII in Postgres and Snowflake, with signed access receipts" width="100%">
+<img src="docs/assets/banner.svg" alt="datagrant: Temporary, masked access to PHI and PII in Postgres and Snowflake, with signed access receipts. BigQuery coming in v0.7.0." width="100%">
 
 [![release](https://img.shields.io/github/v/release/chriswayneh/datagrant?style=flat&label=release)](https://github.com/chriswayneh/datagrant/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/chriswayneh/datagrant/actions/workflows/ci.yml/badge.svg)](https://github.com/chriswayneh/datagrant/actions/workflows/ci.yml)
 
-**Temporary, masked access to PHI and PII in Postgres and Snowflake, with signed access receipts.**
+**Temporary, masked access to PHI and PII in Postgres and Snowflake today, with signed access receipts. BigQuery is coming in v0.7.0.**
+
+Coming in [v0.8.0](ROADMAP.md): PCI DSS support pack (PAN masking, cardholder-data policy, evidence report).
 
 [Watch the demo](#demo) · [Quick start](#quick-start) · [Examples](examples/README.md) · [Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
 
@@ -16,9 +18,11 @@ An open source command line tool that gives developers short, limited access to 
 
 **Status:** [v0.6.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.0) is released ([release notes](docs/release-notes/v0.6.0.md)). v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
-**BigQuery progress (unreleased):** [Step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with revoke, sweep, and pending-request expiry tested against mocks. [Draft step 5](https://github.com/chriswayneh/datagrant/pull/63) adds the Google Cloud adapter, grant state, and approval quorum. BigQuery `--apply` remains disabled while CLI integration and scratch-project verification are pending.
+**BigQuery progress (unreleased):** [Steps 4](https://github.com/chriswayneh/datagrant/pull/62) and [5](https://github.com/chriswayneh/datagrant/pull/63) of 7 are merged. Step 6 is next (CLI request and approval routing). BigQuery `--apply` remains disabled while CLI integration and scratch-project verification are pending.
 
-![A request passes through policy or approval, opens a masked view with a temporary login, and ends at expiry or revocation. Signed receipts record grant events.](docs/assets/grant-lifecycle.svg)
+![Released Postgres and Snowflake at v0.6.x, BigQuery in progress for v0.7.0, PCI DSS support pack next.](docs/assets/datagrant-progress.svg)
+
+![A request passes through policy or approval, opens a masked view with a temporary login or key pair, and ends at expiry or revocation. Signed receipts record grant events.](docs/assets/grant-lifecycle.svg)
 
 ## Demo
 

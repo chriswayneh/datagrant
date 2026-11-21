@@ -4,7 +4,7 @@ The [roadmap overview](../ROADMAP.md) is the readable plan and the summary of wh
 
 **v0.6.0 is released** (tag `v0.6.0`, 2026-11-14). M4 Snowflake warehouses shipped: grant, approve, revoke, sweep, masks, row filters, catalog inspect, key-pair-only DSN. Notes: [docs/release-notes/v0.6.0.md](../docs/release-notes/v0.6.0.md). Product README: [../README.md](../README.md).
 
-**Next:** v0.6.1 (Snowflake setup patch), then BigQuery in v0.7.0, the PCI pack in v0.8.0, beta in v0.9.0 and 1.0. See the [roadmap overview](../ROADMAP.md). BigQuery `--apply` remains disabled until its last step.
+**Next:** v0.6.1 (Snowflake setup patch), then BigQuery in v0.7.0, the PCI pack in v0.8.0, beta in v0.9.0 and 1.0. See the [roadmap overview](../ROADMAP.md). [Steps 4](https://github.com/chriswayneh/datagrant/pull/62) and [5](https://github.com/chriswayneh/datagrant/pull/63) of 7 are merged. Step 6 is next. BigQuery `--apply` remains disabled until its last step.
 
 Update task status in `issues.yml` and the overview in the same PR as the work. Mark a version released only after the maintainer publishes it.
 

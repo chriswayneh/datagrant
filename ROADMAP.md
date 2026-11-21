@@ -34,8 +34,8 @@ The same request, mask, expire and receipt flow on Google BigQuery: a per-grant 
 | 2 | Policy engine and credential routing | ✅ |
 | 3 | View SQL, grant order, IAM bind and unbind | ✅ |
 | 4 | Revoke and sweep | ✅ |
-| 5 | Adapter and approval groundwork ([#63](https://github.com/chriswayneh/datagrant/pull/63)) | In review |
-| 6 | CLI request and approval routing, concurrent-grant caps, recovery | Planned |
+| 5 | Adapter and approval groundwork ([#63](https://github.com/chriswayneh/datagrant/pull/63)) | ✅ |
+| 6 | CLI request and approval routing, concurrent-grant caps, recovery | Next |
 | 7 | Turn on `--apply` for BigQuery, live acceptance test, release | Planned |
 
 ## Alpha: compliance

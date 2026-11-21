@@ -2,7 +2,7 @@
 
 Fictional names only. Never put real PHI, PII, credentials, or keys here.
 
-These examples cover released engines. For unreleased BigQuery work, see the [design](../docs/design/bigquery.md) and [adapter draft](https://github.com/chriswayneh/datagrant/pull/63). BigQuery `--apply` remains disabled.
+These examples cover released engines. For unreleased BigQuery work, see the [design](../docs/design/bigquery.md). [Steps 4](https://github.com/chriswayneh/datagrant/pull/62) and [5](https://github.com/chriswayneh/datagrant/pull/63) of 7 are merged. Step 6 is next. BigQuery `--apply` remains disabled.
 
 | File | Identity | Engine |
 | --- | --- | --- |
