@@ -420,3 +420,19 @@ def test_sweep_skips_bad_claimed_at_or_revision_and_revokes_valid(fields: dict) 
     assert by_id[other_id].outcome == "failed"
     assert by_id[other_id].error == "invalid grant record"
     assert client.rows[other_id].status == "active"
+
+
+def test_sweep_revoke_exception_uses_class_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = Store()
+    client.add()
+
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("token=sekrit-token")
+
+    monkeypatch.setattr("datagrant.bq.revoke.revoke", boom)
+    results = sweep(client, now=NOW + timedelta(hours=2))
+    assert len(results) == 1
+    assert results[0].grant_id == GID
+    assert results[0].outcome == "failed"
+    assert results[0].error == "revoke error: TypeError"
+    assert client.rows[GID].status == "active"

@@ -2513,9 +2513,7 @@ def _bigquery_sweep(ctx: Ctx) -> int:
             except GrantError as exc:
                 raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
             except Exception:  # noqa: BLE001 - never print a sweep traceback
-                raise CliError(
-                    "BigQuery sweep skipped an invalid grant record", EXIT_FAILED
-                ) from None
+                raise CliError("BigQuery sweep failed", EXIT_FAILED) from None
         ctx.emit(
             {
                 "dry_run": True,
@@ -2540,7 +2538,7 @@ def _bigquery_sweep(ctx: Ctx) -> int:
         except GrantError as exc:
             raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
         except Exception:  # noqa: BLE001 - never print a sweep traceback
-            raise CliError("BigQuery sweep skipped an invalid grant record", EXIT_FAILED) from None
+            raise CliError("BigQuery sweep failed", EXIT_FAILED) from None
     expired_requests = [item.request_id for item in expired]
     request_receipt_error = next(
         (item.receipt_error for item in expired if item.receipt_error), None

@@ -336,9 +336,14 @@ def sweep(
         # Re-read and CAS each record so a stale list cannot take another writer's claim.
         try:
             results.append(revoke(client, row.plan.grant_id, reason, receipts, now=current))
-        except Exception:  # noqa: BLE001 - one bad row must not abort the sweep
+        except Exception as exc:  # noqa: BLE001 - one bad row must not abort the sweep
             results.append(
-                RevokeResult(_row_id(row), "failed", reason, error="invalid grant record")
+                RevokeResult(
+                    _row_id(row),
+                    "failed",
+                    reason,
+                    error=f"revoke error: {type(exc).__name__}",
+                )
             )
     return results
 

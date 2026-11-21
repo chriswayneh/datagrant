@@ -632,3 +632,54 @@ def test_grant_list_and_status_warn_invalid_count(
     )
     status_err = capsys.readouterr().err
     assert "skipped 1 invalid grant record" in status_err
+
+
+def test_sweep_revoke_exception_labels_class_on_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = SweepClient()
+    client.add()
+    _ready(tmp_path, monkeypatch, client)
+
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("token=sekrit-token")
+
+    monkeypatch.setattr("datagrant.bq.revoke.revoke", boom)
+    out: list[str] = []
+    code = cli.main(
+        ["sweep", "--apply", "--json", "--bigquery-location", "US"],
+        out.append,
+    )
+    err = capsys.readouterr().err
+    assert code == EXIT_REVOKE_FAILED
+    assert "Traceback" not in err
+    assert "sekrit-token" not in err
+    body = json.loads(out[0])
+    assert body["results"][0]["error"] == "revoke error: TypeError"
+    assert client.rows[GID].status == "active"
+
+
+def test_sweep_non_row_error_says_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Boom(SweepClient):
+        def list_grants(self) -> list[GrantRecord]:
+            raise RuntimeError("token=sekrit-token")
+
+    client = Boom()
+    _ready(tmp_path, monkeypatch, client)
+    dry_code = cli.main(["sweep", "--bigquery-location", "US"])
+    dry_err = capsys.readouterr().err
+    assert dry_code == EXIT_FAILED
+    assert "BigQuery sweep failed" in dry_err
+    assert "Traceback" not in dry_err
+    assert "sekrit-token" not in dry_err
+    assert "RuntimeError" not in dry_err
+
+    code = cli.main(["sweep", "--apply", "--bigquery-location", "US"])
+    err = capsys.readouterr().err
+    assert code == EXIT_FAILED
+    assert "BigQuery sweep failed" in err
+    assert "Traceback" not in err
+    assert "sekrit-token" not in err
+    assert "RuntimeError" not in err
