@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" role="img" aria-labelledby="title description">
   <title id="title">datagrant: released engines, BigQuery in progress, PCI pack next</title>
-  <desc id="description">Postgres and Snowflake are released at v0.6.x. BigQuery is in progress for v0.7.0. A PCI DSS support pack is next in v0.8.0. BigQuery CLI apply remains disabled.</desc>
+  <desc id="description">Postgres and Snowflake are released at v0.6.1. BigQuery is in progress for v0.7.0. A PCI DSS support pack is next in v0.8.0. BigQuery CLI apply remains disabled.</desc>
   <rect width="760" height="320" rx="12" fill="#f0f5fa"/>
   <g font-family="sans-serif" fill="#15263a">
     <text x="28" y="36" font-size="22" font-weight="700">Temporary, masked grants</text>
     <rect x="28" y="52" width="704" height="70" rx="5" fill="#fff" stroke="#526982"/>
-    <text x="45" y="78" font-size="17" font-weight="700">Released · Postgres and Snowflake (v0.6.x)</text>
+    <text x="45" y="78" font-size="17" font-weight="700">Released · Postgres and Snowflake (v0.6.1)</text>
     <text x="45" y="102" font-size="15">Limit rows and columns, mask values, expire grants, and sign receipts.</text>
     <rect x="28" y="134" width="704" height="84" rx="5" fill="#fff" stroke="#526982" stroke-dasharray="6 4"/>
     <text x="45" y="158" font-size="17" font-weight="700">In progress · BigQuery (v0.7.0)</text>

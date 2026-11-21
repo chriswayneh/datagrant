@@ -16,11 +16,13 @@ Coming in [v0.8.0](ROADMAP.md): PCI DSS support pack (PAN masking, cardholder-da
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres and Snowflake. Each grant covers only the columns and rows they need, masks sensitive values, and expires. Signed receipts record who was granted access, what the grant allowed, and when it expired or was revoked.
 
-**Status:** [v0.6.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.0) is released ([release notes](docs/release-notes/v0.6.0.md)). v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Status:** [v0.6.1](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.1) is released ([release notes](docs/release-notes/v0.6.1.md)). v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+
+**Known issue:** v0.6.0 Snowflake setup calls `SHA2_HMAC`, which Snowflake lacks, so ensure-state/hash fails. Fixed in [v0.6.1](docs/release-notes/v0.6.1.md) ([#61](https://github.com/chriswayneh/datagrant/pull/61)). That patch is verified by CI and SQL checks only; there is no live Snowflake smoke test.
 
 **BigQuery progress (unreleased):** [Steps 4](https://github.com/chriswayneh/datagrant/pull/62) and [5](https://github.com/chriswayneh/datagrant/pull/63) of 7 are merged. Step 6 is next (CLI request and approval routing). BigQuery `--apply` remains disabled while CLI integration and scratch-project verification are pending.
 
-![Released Postgres and Snowflake at v0.6.x, BigQuery in progress for v0.7.0, PCI DSS support pack next.](docs/assets/datagrant-progress.svg)
+![Released Postgres and Snowflake at v0.6.1, BigQuery in progress for v0.7.0, PCI DSS support pack next.](docs/assets/datagrant-progress.svg)
 
 ![A request passes through policy or approval, opens a masked view with a temporary login or key pair, and ends at expiry or revocation. Signed receipts record grant events.](docs/assets/grant-lifecycle.svg)
 
@@ -53,7 +55,7 @@ Snowflake without an account: `python3 scripts/demo_snowflake.py` prints the dry
 
 ## Features
 
-Only features that ship in v0.6.0 (verified against the CLI and source):
+Only features that ship in v0.6.1 (verified against the CLI and source):
 
 - [x] **Deny-by-default policy.** One YAML file decides who can request what, and for how long. Unknown keys are errors; evaluation refuses anything not allowed explicitly.
 - [x] **Narrow grants.**
@@ -100,11 +102,11 @@ Every mutating command is a **dry run unless you add `--apply`**. On issue, if t
 
 ## Quick start
 
-Requires Python 3.11 or later. Postgres grants need Postgres (tested on version 16) and `pgcrypto` for the `hash` mask. Snowflake grants need the optional extra below. datagrant isn't on PyPI yet. Install the [v0.6.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.0) tag from GitHub:
+Requires Python 3.11 or later. Postgres grants need Postgres (tested on version 16) and `pgcrypto` for the `hash` mask. Snowflake grants need the optional extra below. datagrant isn't on PyPI yet. Install the [v0.6.1](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.1) tag from GitHub:
 
 ```bash
-pip install git+https://github.com/chriswayneh/datagrant.git@v0.6.0
-datagrant --version    # prints: datagrant 0.6.0
+pip install git+https://github.com/chriswayneh/datagrant.git@v0.6.1
+datagrant --version    # prints: datagrant 0.6.1
 ```
 
 **Postgres**
@@ -124,7 +126,7 @@ datagrant sweep --apply                # run every minute from cron/systemd
 datagrant receipts verify
 ```
 
-**Snowflake** (v0.6.0). From a clone of the v0.6.0 tag, `pip install '.[snowflake]'` (`snowflake-connector-python>=4.7.3,<6`). A Snowflake `--apply` without that extra is exit 2. Prefer `$DATAGRANT_SNOWFLAKE_DSN` over `--snowflake-dsn` (`ps` / shell history). The DSN must be a service user with `private_key_file` (mode 0600, owned by the caller). Password auth is refused. `--apply` inspects column types, builds a secure view `FROM db.s.t AS "SRC"`, and prints the one-time private key. `make demo` stays Postgres.
+**Snowflake** (v0.6.1). From a clone of the v0.6.1 tag, `pip install '.[snowflake]'` (`snowflake-connector-python>=4.7.3,<6`). A Snowflake `--apply` without that extra is exit 2. Prefer `$DATAGRANT_SNOWFLAKE_DSN` over `--snowflake-dsn` (`ps` / shell history). The DSN must be a service user with `private_key_file` (mode 0600, owned by the caller). Password auth is refused. `--apply` inspects column types, builds a secure view `FROM db.s.t AS "SRC"`, and prints the one-time private key. `make demo` stays Postgres.
 
 ```bash
 export DATAGRANT_SNOWFLAKE_DSN='snowflake://svc@org-acct/CLINIC_DB?warehouse=WH&private_key_file=/path/to/key.p8'
@@ -179,7 +181,7 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 - [Security model](docs/security.md) and [operations](docs/operations.md) (including [Snowflake](docs/operations.md#warehouses-v060))
 - [Demo](docs/demo.md) and [OIDC request and approve demo](docs/demo-oidc.md)
 - [Example policies](examples/)
-- [v0.6.0 release notes](docs/release-notes/v0.6.0.md), [changelog](CHANGELOG.md), [roadmap](ROADMAP.md) and [security policy](SECURITY.md)
+- [v0.6.1 release notes](docs/release-notes/v0.6.1.md), [v0.6.0 release notes](docs/release-notes/v0.6.0.md), [changelog](CHANGELOG.md), [roadmap](ROADMAP.md) and [security policy](SECURITY.md)
 
 ## Contributing
 
