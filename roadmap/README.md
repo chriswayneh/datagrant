@@ -2,9 +2,9 @@
 
 The [roadmap overview](../ROADMAP.md) is the readable plan and the summary of what has shipped. [Task definitions](issues.yml) hold early planning (why, files, acceptance, size, dependencies). Treat `ROADMAP.md` as current; `issues.yml` is historical and does not list M4.
 
-**v0.6.1 is released** (tag `v0.6.1`, 2026-11-21). Snowflake HMAC patch on top of v0.6.0 warehouses. Notes: [docs/release-notes/v0.6.1.md](../docs/release-notes/v0.6.1.md). Product README: [../README.md](../README.md).
+**v0.7.0 is shipped pending tag** (2026-11-21). BigQuery warehouse support on top of v0.6.1. Notes: [docs/release-notes/v0.7.0.md](../docs/release-notes/v0.7.0.md). Product README: [../README.md](../README.md). Mock- and CI-tested; a live GCP test was not run.
 
-**Next:** BigQuery in v0.7.0, the PCI pack in v0.8.0, beta in v0.9.0 and 1.0. See the [roadmap overview](../ROADMAP.md). [Steps 4](https://github.com/chriswayneh/datagrant/pull/62) and [5](https://github.com/chriswayneh/datagrant/pull/63) of 7 are merged. Step 6 is next. BigQuery `--apply` remains disabled until its last step.
+**Next:** the PCI pack in v0.8.0, beta in v0.9.0 and 1.0. See the [roadmap overview](../ROADMAP.md).
 
 Update task status in `issues.yml` and the overview in the same PR as the work. Mark a version released only after the maintainer publishes it.
 

@@ -735,7 +735,55 @@ def test_setup_refuses_project_readers_and_mismatch(
     rotate_err = capsys.readouterr().err
     assert code == EXIT_OK
     assert "changes every pseudonym" in rotate_err
+    assert "0 live hash grant(s)" in rotate_err
     assert rotated.hash_loads
+
+
+def test_rotate_refuses_live_hash_grants_unless_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocked = ApplyClient()
+    blocked.live_hash_grants = 2
+    _ready(tmp_path / "blocked", monkeypatch, blocked)
+    code = cli.main(["setup", "bigquery", "--rotate-hash-key", "--apply"])
+    err = capsys.readouterr().err
+    assert code == EXIT_FAILED
+    assert "2 live hash grant(s)" in err
+    assert "pass --force" in err
+    assert blocked.hash_loads == []
+
+    forced = ApplyClient()
+    forced.live_hash_grants = 2
+    _ready(tmp_path / "forced", monkeypatch, forced)
+    out: list[str] = []
+    code = cli.main(
+        ["setup", "bigquery", "--rotate-hash-key", "--force", "--apply", "--json"],
+        out.append,
+    )
+    force_err = capsys.readouterr().err
+    assert code == EXIT_OK
+    assert "2 live hash grant(s)" in force_err
+    assert json.loads(out[0])["live_hash_grants"] == 2
+    assert forced.hash_loads
+
+
+def test_cli_inspect_uses_source_project_not_grant_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = MIXED.replace(
+        "  - name: bq_clinic\n    engine: bigquery\n    database: clinic-proj",
+        "  - name: bq_clinic\n    engine: bigquery\n    database: source-proj",
+    )
+    path = tmp_path / "cross.yaml"
+    path.write_text(yaml)
+    path.chmod(0o600)
+    client = ApplyClient()
+    _ready(tmp_path, monkeypatch, client)
+    code = cli.main([*BQ_REQ, "--policy", str(path), "--apply"])
+    assert code == EXIT_OK
+    assert "inspect_table" in client.calls
+    assert client.inspect_project == "source-proj"
+    assert client.inspect_project != "clinic-proj"
 
 
 def test_cli_inspect_types_null_mask_case_insensitive(

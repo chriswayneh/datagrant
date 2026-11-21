@@ -2,7 +2,7 @@
 
 datagrant gives people short-lived, masked, receipted access to sensitive data, with approval, and takes it away on its own. It grows in small, reviewed pull requests with tests and docs. The planning history is in [roadmap/](roadmap/) and [aidlc-docs/](aidlc-docs/).
 
-**Where we are:** alpha. The core flow works on Postgres and Snowflake, and BigQuery is being built. The policy file and receipt format can still change before 1.0.
+**Where we are:** alpha. The core flow works on Postgres, Snowflake, and BigQuery. v0.7.0 is shipped pending tag. The policy file and receipt format can still change before 1.0.
 
 ## At a glance
 
@@ -10,7 +10,7 @@ datagrant gives people short-lived, masked, receipted access to sensitive data, 
 | --- | --- | --- | :---: |
 | Alpha: core | v0.1.0 to v0.6.0 | Expiring, masked, receipted access on Postgres and Snowflake, real identity, two-person approval, ops hardening | ✅ Released |
 | Alpha: core | v0.6.1 | Patch: Snowflake setup fix | ✅ Released |
-| Alpha: core | v0.7.0 | BigQuery | In progress |
+| Alpha: core | v0.7.0 | BigQuery | Shipped pending tag |
 | Alpha: compliance | v0.8.0 | PCI pack | Planned |
 | Beta | v0.9.0 | Ready for outside teams | Planned |
 | Stable | v1.0.0 | Stable formats and a compatibility promise | Planned |
@@ -24,9 +24,9 @@ datagrant gives people short-lived, masked, receipted access to sensitive data, 
 | Setup fix | v0.6.0 Snowflake setup called `SHA2_HMAC`, which Snowflake does not provide, so `CREATE FUNCTION HASH_HMAC` could fail. [v0.6.1](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.1) ships the Python HMAC UDF ([#61](https://github.com/chriswayneh/datagrant/pull/61)). Use v0.6.1 or later for Snowflake. |
 | Known-issue note | README and [v0.6.0 notes](docs/release-notes/v0.6.0.md) point to v0.6.1 as the fix. |
 
-### v0.7.0: BigQuery
+### v0.7.0: BigQuery (shipped pending tag)
 
-The same request, mask, expire and receipt flow on Google BigQuery: a per-grant authorized view plus an expiring IAM permission on the requester's own Google login, Google default credentials only (key files refused), and revoke that fails closed. Design: [docs/design/bigquery.md](docs/design/bigquery.md).
+The same request, mask, expire and receipt flow on Google BigQuery: a per-grant authorized view plus an expiring IAM permission on the requester's own Google login, Google default credentials only (key files refused), and revoke that fails closed. Design: [docs/design/bigquery.md](docs/design/bigquery.md). Notes: [docs/release-notes/v0.7.0.md](docs/release-notes/v0.7.0.md). Mock- and CI-tested; a live GCP test was not run.
 
 | Step | What | Status |
 | --- | --- | :---: |
@@ -35,8 +35,8 @@ The same request, mask, expire and receipt flow on Google BigQuery: a per-grant 
 | 3 | View SQL, grant order, IAM bind and unbind | ✅ |
 | 4 | Revoke and sweep | ✅ |
 | 5 | Adapter and approval groundwork ([#63](https://github.com/chriswayneh/datagrant/pull/63)) | ✅ |
-| 6 | CLI request and approval routing, concurrent-grant caps, recovery | Next |
-| 7 | Turn on `--apply` for BigQuery, live acceptance test, release | Planned |
+| 6 | CLI request and approval routing, concurrent-grant caps, recovery | ✅ |
+| 7 | Turn on `--apply` for BigQuery, hash setup, docs and 0.7.0 prep | ✅ |
 
 ## Alpha: compliance
 
@@ -128,12 +128,18 @@ No dates yet. Open an issue to discuss one.
 
 | Item | What | Status |
 | --- | --- | :---: |
-| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PRs #48 to #52: policy `engine` and Snowflake `--apply` routing; grant engine; revoke and sweep (atomic claims, 10-minute issuing/enabling grace); grant/approve `--apply` and concurrent cap across Snowflake datasets; masks and catalog (five mask names, type inspect, `"SRC"`-qualified filters so `IS NULL` on a `null`-masked column uses the base column). Hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Design: [docs/design/warehouses.md](docs/design/warehouses.md). | ✅ |
+| Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PRs #48 to #52: policy `engine` and Snowflake `--apply` routing; grant engine; revoke and sweep (atomic claims, 10-minute issuing/enabling grace); grant/approve `--apply` and concurrent cap across Snowflake datasets; masks and catalog (five mask names, type inspect, `"SRC"`-qualified filters so `IS NULL` on a `null`-masked column uses the base column). BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link. Design: [docs/design/warehouses.md](docs/design/warehouses.md). | ✅ |
 
 ### v0.6.1: done
 
 | Item | What | Status |
 | --- | --- | :---: |
 | Snowflake HMAC patch | Replace the v0.6.0 `SHA2_HMAC` setup call with a secure Python 3.12 UDF. Tag `v0.6.1` on `release/0.6.x`. Notes: [docs/release-notes/v0.6.1.md](docs/release-notes/v0.6.1.md). | ✅ |
+
+### v0.7.0: shipped pending tag
+
+| Item | What | Status |
+| --- | --- | :---: |
+| BigQuery | Same request, mask, expire and receipt model on BigQuery (authorized view, IAM bind to a Google principal, ADC only). `datagrant setup bigquery`, hash-master load job, source-project catalog inspect. Notes: [docs/release-notes/v0.7.0.md](docs/release-notes/v0.7.0.md). | ✅ |
 
 Ideas and priorities may change. Open an issue to discuss one.

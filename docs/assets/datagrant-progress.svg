@@ -1,18 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" role="img" aria-labelledby="title description">
-  <title id="title">datagrant: released engines, BigQuery in progress, PCI pack next</title>
-  <desc id="description">Postgres and Snowflake are released at v0.6.1. BigQuery is in progress for v0.7.0. A PCI DSS support pack is next in v0.8.0. BigQuery CLI apply remains disabled.</desc>
+  <title id="title">datagrant: released engines including BigQuery, PCI pack next</title>
+  <desc id="description">Postgres, Snowflake, and BigQuery are released at v0.7.0. M5 is complete. A PCI DSS support pack is next in v0.8.0.</desc>
   <rect width="760" height="320" rx="12" fill="#f0f5fa"/>
   <g font-family="sans-serif" fill="#15263a">
     <text x="28" y="36" font-size="22" font-weight="700">Temporary, masked grants</text>
     <rect x="28" y="52" width="704" height="70" rx="5" fill="#fff" stroke="#526982"/>
-    <text x="45" y="78" font-size="17" font-weight="700">Released · Postgres and Snowflake (v0.6.1)</text>
+    <text x="45" y="78" font-size="17" font-weight="700">Released · Postgres, Snowflake, and BigQuery (v0.7.0)</text>
     <text x="45" y="102" font-size="15">Limit rows and columns, mask values, expire grants, and sign receipts.</text>
-    <rect x="28" y="134" width="704" height="84" rx="5" fill="#fff" stroke="#526982" stroke-dasharray="6 4"/>
-    <text x="45" y="158" font-size="17" font-weight="700">In progress · BigQuery (v0.7.0)</text>
-    <text x="45" y="180" font-size="15">Steps 4 and 5 of 7 are merged. Step 6 is next.</text>
-    <text x="45" y="202" font-size="15" font-weight="700">CLI apply remains disabled.</text>
-    <rect x="28" y="230" width="704" height="70" rx="5" fill="#fff" stroke="#526982" stroke-dasharray="6 4"/>
-    <text x="45" y="256" font-size="17" font-weight="700">Next · PCI DSS support pack (v0.8.0)</text>
-    <text x="45" y="280" font-size="15">PAN masking, cardholder-data policy, and an evidence report.</text>
+    <rect x="28" y="134" width="704" height="70" rx="5" fill="#fff" stroke="#526982"/>
+    <text x="45" y="158" font-size="17" font-weight="700">Complete · M5 BigQuery</text>
+    <text x="45" y="182" font-size="15">request, approve, issue --apply, revoke, sweep, masks including hash.</text>
+    <rect x="28" y="216" width="704" height="70" rx="5" fill="#fff" stroke="#526982" stroke-dasharray="6 4"/>
+    <text x="45" y="242" font-size="17" font-weight="700">Next · PCI DSS support pack (v0.8.0)</text>
+    <text x="45" y="266" font-size="15">PAN masking, cardholder-data policy, and an evidence report.</text>
   </g>
 </svg>

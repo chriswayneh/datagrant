@@ -201,8 +201,8 @@ class HashStore:
         try:
             config = self._sdk.LoadJobConfig(
                 schema=[
-                    self._sdk.SchemaField("id", "STRING"),
-                    self._sdk.SchemaField("key", "BYTES"),
+                    self._sdk.SchemaField("id", "STRING", mode="REQUIRED"),
+                    self._sdk.SchemaField("key", "BYTES", mode="REQUIRED"),
                 ],
                 source_format=self._sdk.SourceFormat.NEWLINE_DELIMITED_JSON,
                 write_disposition=self._sdk.WriteDisposition.WRITE_TRUNCATE,

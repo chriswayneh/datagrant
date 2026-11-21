@@ -393,6 +393,7 @@ class DatasetAccessClient:
         except Exception:  # noqa: BLE001 - transport errors can include URLs
             raise GrantError("BigQuery hash IAM request failed") from None
         if response.status_code in {404, 501}:
+            # getIamPolicy 404 or 501 means the object has no IAM policy.
             return None
         if response.status_code != 200:
             raise GrantError("BigQuery hash IAM request failed")

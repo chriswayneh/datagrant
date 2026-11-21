@@ -65,14 +65,17 @@ class BigQueryGrantClient:
         self.list_due_requests = self.requests.list_due_requests
         self.claim_expired_request = self.requests.claim_expired_request
         self.count_live_grants = grants.count_live_grants
+        self.count_live_hash_grants = grants.count_live_hash_grants
 
-    def inspect_table(self, dataset: str, table: str, *, location: str | None = None) -> Any:
+    def inspect_table(
+        self, dataset: str, table: str, *, project: str, location: str | None = None
+    ) -> Any:
         from datagrant.bq.mask import inspect_table as inspect
 
         return inspect(
             self._bq,
             self._sdk,
-            project=self._project,
+            project=project,
             dataset=dataset,
             table=table,
             location=location if location is not None else self._state_location,
@@ -89,7 +92,7 @@ class BigQueryGrantClient:
         self._hashes.ensure_udf()
         self._dataset.require_hash_object_iam_absent(self._project)
         n, matched = self._hashes.master_state(key)
-        if n > 1:
+        if n > 1 and not rotate:
             raise GrantError("BigQuery hash-master has duplicate rows")
         if rotate or n == 0:
             self._hashes.load_key(key)
