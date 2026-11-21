@@ -308,3 +308,104 @@ def test_mixed_case_conditional_grantee_bind_and_unbind(plan: GrantPlan) -> None
     ]
     assert len(emails) == 1
     assert emails[0].lower() == "alice@example.com"
+
+
+STATE_URL = f"{BASE}/{PROJECT}/datasets/datagrant"
+ROUTINE = {"projectId": PROJECT, "datasetId": "datagrant", "routineId": "hash_hmac"}
+ROUTINE_ACL = {"routine": ROUTINE}
+
+
+def test_hash_routine_acl_is_routine_only_and_preserves_access(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source(EXISTING),
+        Response(),
+        source(EXISTING),
+        Response(),
+    )
+    client = DatasetAccessClient(session, grant_project=PROJECT)
+    assert client.authorize_hash_routine_if_missing(plan)
+    urls = [url for _, url, _ in session.calls]
+    assert urls == [VIEWS_URL, STATE_URL, VIEWS_URL, VIEWS_URL, STATE_URL, STATE_URL]
+    methods = [method for method, _, _ in session.calls]
+    assert methods == ["GET", "GET", "GET", "PATCH", "GET", "PATCH"]
+    views_patch = session.calls[3][2]["json"]["access"]
+    state_patch = session.calls[5][2]["json"]["access"]
+    assert views_patch == [*EXISTING, ROUTINE_ACL]
+    assert state_patch == [*EXISTING, ROUTINE_ACL]
+    for access in (views_patch, state_patch):
+        added = access[-1]
+        assert list(added) == ["routine"]
+        assert added["routine"] == ROUTINE
+        assert PRINCIPAL not in repr(added)
+        assert "userByEmail" not in added
+        assert not any(
+            entry.get("userByEmail") == PRINCIPAL.split(":", 1)[1]
+            or entry.get("iamMember") == PRINCIPAL
+            for entry in access
+        )
+
+
+def test_hash_routine_acl_skips_write_when_present(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source([*EXISTING, ROUTINE_ACL]),
+        source([*EXISTING, ROUTINE_ACL]),
+    )
+    client = DatasetAccessClient(session, grant_project=PROJECT)
+    assert not client.authorize_hash_routine_if_missing(plan)
+    assert [method for method, _, _ in session.calls] == ["GET", "GET", "GET", "GET"]
+    assert not any(method == "PATCH" for method, _, _ in session.calls)
+
+
+def test_hash_routine_acl_retries_etag_conflict(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source(EXISTING),
+        Response(412),
+        source(EXISTING, 'W/"2"'),
+        Response(),
+        source(EXISTING),
+        Response(),
+    )
+    client = DatasetAccessClient(session, grant_project=PROJECT)
+    assert client.authorize_hash_routine_if_missing(plan)
+    assert session.calls[5][2]["headers"] == {"If-Match": 'W/"2"'}
+    assert session.calls[5][2]["json"] == {"access": [*EXISTING, ROUTINE_ACL]}
+
+
+def test_hash_routine_acl_refuses_location_mismatch_and_wrong_project(plan: GrantPlan) -> None:
+    mismatched = Session(Response(body={"location": "US"}), Response(body={"location": "EU"}))
+    with pytest.raises(GrantError, match="locations must match"):
+        DatasetAccessClient(mismatched, grant_project=PROJECT).authorize_hash_routine_if_missing(
+            plan
+        )
+    empty = Session()
+    with pytest.raises(GrantError, match="configured grant project"):
+        DatasetAccessClient(empty, grant_project=PROJECT).authorize_hash_routine_if_missing(
+            replace(plan, project="other-proj")
+        )
+    assert not empty.calls
+
+
+def test_hash_routine_acl_does_not_grant_grantee_datagrant_access(plan: GrantPlan) -> None:
+    owners = [{"role": "OWNER", "specialGroup": "projectOwners"}]
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source(owners),
+        Response(),
+        source(owners),
+        Response(),
+    )
+    DatasetAccessClient(session, grant_project=PROJECT).authorize_hash_routine_if_missing(plan)
+    state_access = session.calls[-1][2]["json"]["access"]
+    assert session.calls[-1][1] == STATE_URL
+    assert state_access == [*owners, ROUTINE_ACL]
+    assert PRINCIPAL not in repr(state_access)
+    assert all("userByEmail" not in entry for entry in state_access)
+    assert all("groupByEmail" not in entry for entry in state_access)
+    assert all("iamMember" not in entry for entry in state_access)

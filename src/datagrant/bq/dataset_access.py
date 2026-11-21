@@ -255,3 +255,45 @@ class DatasetAccessClient:
             except ConflictError:
                 continue
         raise GrantError(f"BigQuery dataset etag conflict after {ETAG_MAX_TRIES} attempts")
+
+    def _authorize_routine(self, project: str, dataset: str, entry: dict[str, Any]) -> bool:
+        url = _dataset_url(project, dataset)
+        for _attempt in range(ETAG_MAX_TRIES):
+            body = self._read(url)
+            access = _access_list(body)
+            if any(item.get("routine") == entry and not item.get("condition") for item in access):
+                return False
+            try:
+                self._write(url, _etag(body), [*access, {"routine": entry}])
+                return True
+            except ConflictError:
+                continue
+        raise GrantError(f"BigQuery dataset etag conflict after {ETAG_MAX_TRIES} attempts")
+
+    def authorize_hash_routine_if_missing(self, plan: GrantPlan) -> bool:
+        """Authorize hash_hmac on datagrant_views. Do not grant the grantee datagrant access.
+
+        Also authorize the routine on the hash-master dataset so the UDF can
+        read `_hash_master` without giving invokers table access.
+        """
+        from datagrant.bq.hash import hash_routine_entry
+
+        if self._grant_project is not None and plan.project != self._grant_project:
+            raise GrantError("hash routine authorization requires the configured grant project")
+        entry = hash_routine_entry(plan.project)
+        views_url = _dataset_url(plan.project, VIEW_DATASET)
+        state_url = _dataset_url(plan.project, STATE_DATASET)
+        views_location = self._read(views_url, metadata_only=True).get("location")
+        state = self._read(state_url, metadata_only=True)
+        state_location = state.get("location")
+        if (
+            not isinstance(views_location, str)
+            or not views_location
+            or not isinstance(state_location, str)
+            or views_location.casefold() != state_location.casefold()
+            or (plan.location is not None and views_location.casefold() != plan.location.casefold())
+        ):
+            raise GrantError("BigQuery hash-master, views, and requested locations must match")
+        added_views = self._authorize_routine(plan.project, VIEW_DATASET, entry)
+        added_state = self._authorize_routine(plan.project, STATE_DATASET, entry)
+        return added_views or added_state

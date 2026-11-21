@@ -1,10 +1,10 @@
 """BigQuery per-grant engine: authorized view, issuing-row fail-safe (PR 3b).
 
-Order: issuing row, view in shared datagrant_views, authorize dataset only if
-missing, names-row update, issued receipt, enabling, IAM last, active.
-IAM bind JSON: dataset resource.name of G_<id>, per-grant jobUser title G_<id>,
-accessPolicyVersion=3, etag 409 retry. Reverse-drop unbinds this grant only.
-CLI --apply stays refused.
+Order: hash-master and hash_hmac, issuing row, view in shared datagrant_views,
+authorize dataset only if missing, names-row update, issued receipt, enabling,
+IAM last, active. IAM bind JSON: dataset resource.name of G_<id>, per-grant
+jobUser title G_<id>, accessPolicyVersion=3, etag 409 retry. Reverse-drop
+unbinds this grant only. CLI --apply stays refused.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from datagrant import receipt
+from datagrant.bq.mask import TableCatalog, sql_type
 from datagrant.keys import HashKey
 from datagrant.pg.grant import ReceiptSink
 from datagrant.policy import Decision, Request
@@ -111,6 +112,9 @@ class GrantClient(Protocol):
 
     def mark_failed(self, plan: GrantPlan) -> None: ...
     def count_live_grants(self, requester: str, principal: str | None = None) -> int: ...
+    def ensure_hash(self, plan: GrantPlan) -> None:
+        """Idempotent hash-master table, UDF, key bind, and routine ACL."""
+        ...
 
 
 def q(name: str) -> str:
@@ -266,13 +270,26 @@ def _canonical_member(raw: object) -> str | None:
         return None
 
 
-def _col_expr(col: str, mask: str, hash_scope: str, *, project: str) -> str:
+def _col_expr(
+    col: str,
+    mask: str,
+    hash_scope: str,
+    *,
+    project: str,
+    catalog: TableCatalog | None = None,
+) -> str:
     ident = q(col)
     src = _src_col(col)
     if mask == "passthrough":
         return f"{src} AS {ident}"
     if mask == "null":
-        return f"CAST(NULL AS STRING) AS {ident}"
+        dtype = "STRING"
+        if catalog is not None:
+            mapped = catalog.columns.get(col)
+            if mapped is None:
+                raise GrantError(f"column {col!r} does not exist in the table")
+            dtype = sql_type(mapped)
+        return f"CAST(NULL AS {dtype}) AS {ident}"
     if mask == "redact":
         return f"{lit(REDACTED)} AS {ident}"
     if mask == "partial":
@@ -378,18 +395,25 @@ def view_select_sql(
     source_dataset: str,
     hash_scope: str,
     source_project: str | None = None,
+    catalog: TableCatalog | None = None,
 ) -> str:
     """SELECT for G_<id>. Calls project.datagrant.hash_hmac; never embeds key bytes."""
-    cols = ", ".join(_col_expr(c, masks[c], hash_scope, project=project) for c in req.columns)
+    cols = ", ".join(
+        _col_expr(c, masks[c], hash_scope, project=project, catalog=catalog) for c in req.columns
+    )
     ds, table = _split_table(req.table, source_dataset)
     from_project = project if source_project is None else source_project
     from_tbl = f"{q_project(from_project)}.{q(ds)}.{q(table)}"
     select = f"SELECT {cols} FROM {from_tbl} AS {q(SRC_ALIAS)}"  # nosec B608
     if req.row_filter is not None:
         try:
-            cond, _used = render_row_filter(req.row_filter)
+            cond, used = render_row_filter(req.row_filter)
         except RowFilterError as exc:
             raise GrantError(str(exc)) from None
+        if catalog is not None:
+            missing = sorted(c for c in used if c not in catalog.columns)
+            if missing:
+                raise GrantError(f"row filter columns not in table: {', '.join(missing)}")
         select = f"{select} WHERE {cond}"  # nosec B608
     return select
 
@@ -409,6 +433,7 @@ def build_plan(
     hash_key: HashKey | None = None,
     requester_identity: Mapping[str, Any] | None = None,
     approver_identities: Sequence[Mapping[str, Any]] | None = None,
+    catalog: TableCatalog | None = None,
 ) -> GrantPlan:
     """Pure plan, including IAM condition titles and resource.name for G_<id>."""
     if not decision.allowed:
@@ -431,6 +456,10 @@ def build_plan(
     if needs_hash and hash_key is None:
         raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
     scope = decision.hash_scope or req.dataset
+    if catalog is not None:
+        missing = [c for c in req.columns if c not in catalog.columns]
+        if missing:
+            raise GrantError(f"column {missing[0]!r} does not exist in the table")
     view_sql = view_select_sql(
         req,
         decision.masks,
@@ -438,6 +467,7 @@ def build_plan(
         source_dataset=ds,
         hash_scope=scope,
         source_project=from_project,
+        catalog=catalog,
     )
     if hash_key is not None and hash_key.derived.hex() in view_sql + gid + principal:
         raise GrantError("hash key leaked into view SQL")
@@ -767,11 +797,12 @@ def apply_plan(
     *,
     max_concurrent: int | None = None,
 ) -> None:
-    """Fail-safe apply. IAM last: dataset bind + project jobUser, etag RMW.
+    """Fail-safe apply. Hash infra first, IAM last (dataset bind + jobUser).
 
     Cleanup calls ``drop_view`` at most once. ``mark_failed`` always runs.
     A post-issued failure still writes ``revoked`` if cleanup fails.
     Re-checks ``max_concurrent_grants`` inside the issuing claim (by requester).
+    Standing hash objects are not reverse-dropped.
     """
     if not plan.principal:
         raise GrantError("google principal is required")
@@ -782,6 +813,7 @@ def apply_plan(
     iam_attempted = False
     revoked_reason = "apply_failed"
     try:
+        client.ensure_hash(plan)
         client.insert_issuing(plan)
         created = True
         if max_concurrent is not None:

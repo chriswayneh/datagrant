@@ -110,11 +110,40 @@ class FakeClient:
         self.iam_versions: list[int] = []
         self.iam_etags: list[str] = []
         self.extra_live = extra_live
+        self.hash_sqls: list[str] = []
+        self.hash_params: list[bytes] = []
+        self.views_access: list[dict[str, Any]] = []
+        self.state_access: list[dict[str, Any]] = []
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
         if self.fail_on == name:
             raise RuntimeError(f"stub:{name}")
+
+    def ensure_hash(self, plan: GrantPlan) -> None:
+        from datagrant.bq.hash import (
+            bind_hash_key_sql,
+            create_hash_hmac_sql,
+            create_hash_table_sql,
+            create_hmac_helpers_sql,
+            hash_routine_entry,
+        )
+
+        self._step("ensure_hash")
+        self.hash_sqls.append(create_hash_table_sql(plan.project))
+        self.hash_sqls.extend(create_hmac_helpers_sql(plan.project))
+        self.hash_sqls.append(create_hash_hmac_sql(plan.project))
+        if plan.hash_key is not None:
+            sql = bind_hash_key_sql(plan.project)
+            self.hash_sqls.append(sql)
+            self.hash_params.append(plan.hash_key.derived)
+            if plan.hash_key.derived.hex() in "\n".join(self.hash_sqls):
+                raise GrantError("hash key leaked into SQL text")
+        entry = {"routine": hash_routine_entry(plan.project)}
+        if entry not in self.views_access:
+            self.views_access.append(dict(entry))
+        if entry not in self.state_access:
+            self.state_access.append(dict(entry))
 
     def insert_issuing(self, plan: GrantPlan) -> None:
         self._step("insert_issuing")
@@ -457,6 +486,7 @@ def test_apply_order_iam_last_before_active(tmp_path: Path) -> None:
     client = FakeClient()
     apply_plan(client, _plan(), _sink(tmp_path))
     assert client.calls == [
+        "ensure_hash",
         "insert_issuing",
         "create_view",
         "authorize",
@@ -1282,7 +1312,7 @@ def test_apply_plan_rechecks_concurrent_cap_by_requester(tmp_path: Path) -> None
     client = FakeClient(extra_live=1)
     with pytest.raises(GrantError, match="concurrent grant cap exceeded"):
         apply_plan(client, _plan(), _sink(tmp_path), max_concurrent=1)
-    assert client.calls[0] == "insert_issuing"
+    assert client.calls[:2] == ["ensure_hash", "insert_issuing"]
     assert "drop_view" in client.calls
     assert "bind_iam" not in client.calls
     ok = FakeClient()

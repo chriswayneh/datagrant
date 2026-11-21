@@ -17,6 +17,7 @@ from datagrant.bigquery_support import (
 )
 from datagrant.bq.dataset_access import DatasetAccessClient
 from datagrant.bq.grant import GrantError, GrantPlan, apply_bind, apply_unbind
+from datagrant.bq.hash import HashStore
 from datagrant.bq.project_iam import ProjectIamClient
 from datagrant.bq.rest import Session
 from datagrant.bq.state import GrantStore, RequestStore
@@ -35,7 +36,10 @@ class BigQueryGrantClient:
         views = ViewClient(client, project)
         dataset = DatasetAccessClient(session, grant_project=project)
         iam = ProjectIamClient(session, project)
+        hashes = HashStore(client, sdk, project, state_location)
         self.requests = RequestStore(client, sdk, project, state_location)
+        self._hashes = hashes
+        self._dataset = dataset
         self.insert_issuing = grants.insert_issuing
         self.update_names = grants.update_names
         self.claim_enabling = grants.claim_enabling
@@ -56,6 +60,13 @@ class BigQueryGrantClient:
         self.list_due_requests = self.requests.list_due_requests
         self.claim_expired_request = self.requests.claim_expired_request
         self.count_live_grants = grants.count_live_grants
+
+    def ensure_hash(self, plan: GrantPlan) -> None:
+        self._hashes.ensure_table()
+        self._hashes.ensure_udf()
+        if plan.hash_key is not None:
+            self._hashes.bind_key(plan.hash_key)
+        self._dataset.authorize_hash_routine_if_missing(plan)
 
     def bind_iam(self, plan: GrantPlan) -> None:
         apply_bind(self, plan)
