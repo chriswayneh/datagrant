@@ -15,7 +15,7 @@ Validate it offline with `datagrant policy check FILE` (exit 0 valid, 1 invalid)
 | `separation_of_duties` | no | Policy-wide only. `none` (default, including when omitted) or `distinct-groups`. `distinct-groups` refuses approve when (requester groups ∩ approver groups ∩ that table's `allowed_groups`) is non-empty. Groups come from static `policy.groups` plus OIDC `group_map` extras. Sharing a group that is not in `allowed_groups` is allowed. It does not replace distinct-person / `(iss, sub)`. Unknown strings are errors. A dataset- or table-level key is an unknown-key error. |
 | `max_duration` | yes | Policy-wide cap on any grant. |
 | `pending_ttl` | no | Cap on an explicit `request --pending-ttl` in `two-person` mode (`1m`..`7d`, same duration grammar as grants). Omit it for v0.3.0 behavior. When set, a longer **explicit** `--pending-ttl` is a usage error (exit 2) before any database write. If the flag is omitted, the pending lifetime is `min(24h, policy.pending_ttl)`. The cap is not applied when `approval` is `auto`. |
-| `max_concurrent_grants` | no | Positive integer. Cap on how many live grants one requester may hold. Counted **per engine**: Postgres grants in the Postgres store (`status = 'active' AND expires_at > now()`, all datasets), Snowflake grants in that account's `DATAGRANT.GRANTS` (`STATUS IN ('issuing','enabling','active') AND EXPIRES_AT > CURRENT_TIMESTAMP()`, all Snowflake datasets; in-flight issue rows count because there is no advisory lock). A live Postgres grant does not count against the Snowflake cap, and a live Snowflake grant does not count against the Postgres cap. Revoked grants and grants past `expires_at` (swept or not) do not count. Omit it for no cap. The effective cap for a request is the minimum of this value and the dataset's `max_concurrent_grants` among those that are set. |
+| `max_concurrent_grants` | no | Positive integer. Cap on how many live grants one requester may hold. Counted **per engine**: Postgres grants in the Postgres store (`status = 'active' AND expires_at > now()`, all datasets), Snowflake grants in that account's `DATAGRANT.GRANTS` (`STATUS IN ('issuing','enabling','active') AND EXPIRES_AT > CURRENT_TIMESTAMP()`, all Snowflake datasets; in-flight issue rows count because there is no advisory lock), BigQuery grants in that project's `datagrant.grants` (`status IN ('issuing','enabling','active') AND expires_at > CURRENT_TIMESTAMP()`, counted by requester in `facts_json`, all BigQuery datasets of that store; optional extra filter by Google principal). A live Postgres grant does not count against the Snowflake or BigQuery cap, and the reverse. Revoked grants and grants past `expires_at` (swept or not) do not count. Omit it for no cap. The effective cap for a request is the minimum of this value and the dataset's `max_concurrent_grants` among those that are set. |
 | `groups` | yes | Map of group name to a list of user names (1 to 256 printable ASCII characters without spaces). Email-style names (containing `@`) fold ASCII `A-Z` to `a-z`; duplicate members in a group or conflicting spellings across groups are policy errors. Empty lists are allowed: in `identity.mode: oidc`, membership can come only from `identity.group_map`. |
 | `datasets` | yes | List of datasets (see below). |
 | `identity` | no | How `request` and `approve` name the caller. Omit it, or set `mode: local`, for OS/`--as-user` names. Set `mode: oidc` to require a verified ID token. See [Identity](#identity). |
@@ -90,7 +90,7 @@ See [`examples/policy.yaml`](../examples/policy.yaml) for a complete local-mode 
 
 ## Identity
 
-Optional. When omitted, datagrant behaves as v0.2.0: the caller is the OS user, or `--as-user`. That records a name; it does not prove one.
+Optional. When omitted, datagrant behaves as v0.2.0: the caller is the OS user, or `--as-user`. That records a name; it does not prove one. Local-mode identity is self-asserted.
 
 `datagrant policy check FILE` validates the block offline (no IdP, no database). Unknown keys under `identity` are errors, matching the rest of the file.
 
@@ -107,8 +107,9 @@ Optional. When omitted, datagrant behaves as v0.2.0: the caller is the OS user, 
 | `max_token_age` | no | Max age of `iat`, `1m`..`24h`. Default `15m`. These identity durations accept `s`/`m`/`h`/`d` (unlike grant `--duration`, which has no seconds). |
 | `clock_skew` | no | `0s`..`5m`. Default `60s`. |
 | `jwks_cache_ttl` | no | JWKS disk cache TTL, `0s`..`24h`. Default `5m`. `0s` fetches every time. |
+| `google_principals` | no | Map of `{caller-name: IAM member}`. Values are `user:`, `group:`, or `serviceAccount:` plus an email. This is the bound Google principal for BigQuery. In local mode the caller name is self-asserted (`--as-user` or OS user). |
 
-In `local` mode, any other `identity.*` key is a policy error, so a half-written OIDC block cannot silently fall back.
+In `local` mode, any other `identity.*` key is a policy error, so a half-written OIDC block cannot silently fall back. `google_principals` is allowed in local mode.
 
 Effective policy groups for a verified caller are:
 

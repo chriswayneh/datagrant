@@ -49,7 +49,7 @@ class _Store:
                 timeout=TIMEOUT,
                 job_retry=None,
             )
-            rows = job.result(timeout=_JOB_TIMEOUT, job_retry=None)
+            rows = list(job.result(timeout=_JOB_TIMEOUT, job_retry=None))
         except Exception:  # noqa: BLE001 - provider errors may contain query parameters
             raise GrantError("BigQuery state query failed") from None
         return job, rows
@@ -146,6 +146,34 @@ WHERE grant_id = @grant_id AND {predicate}
             "status IN ('issuing', 'enabling')",
             grant_id=self._id(plan),
         )
+
+    def count_live_grants(self, requester: str, principal: str | None = None) -> int:
+        """Count issuing/enabling/active rows for this requester.
+
+        Optional ``principal`` further restricts the count. Postgres and
+        Snowflake stores are not included. The cap is per engine.
+        """
+        if not isinstance(requester, str) or not requester.strip():
+            raise GrantError("requester is required")
+        values: dict[str, tuple[str, Any]] = {"requester": ("STRING", requester)}
+        extra = ""
+        if principal is not None:
+            extra = " AND principal = @principal"
+            values["principal"] = ("STRING", _parse_principal(principal))
+        _, rows = self._query(
+            f"SELECT COUNT(*) AS n FROM {self._table} "  # nosec B608
+            "WHERE JSON_VALUE(facts_json, '$.requester') = @requester "
+            "AND status IN ('issuing', 'enabling', 'active') "
+            "AND expires_at > CURRENT_TIMESTAMP()"
+            f"{extra}",
+            values,
+        )
+        if len(rows) != 1:
+            raise GrantError("BigQuery concurrent-grant count failed")
+        n = rows[0]["n"]
+        if type(n) is not int or n < 0:
+            raise GrantError("BigQuery concurrent-grant count failed")
+        return n
 
     def claim_revoke(self, row: GrantRecord, reason: Reason, now: datetime) -> int:
         if row.status not in {"issuing", "enabling", "active", "failed", "revoking"}:
@@ -370,6 +398,7 @@ UPDATE {self._table}
 SET votes_json = @votes, status = @status, grant_id = @grant_id, revision = revision + 1
 WHERE request_id = @request_id AND status = 'pending' AND revision = @revision
   AND expires_at = @expires_at AND expires_at > CURRENT_TIMESTAMP()
+  AND principal = @principal
 """  # nosec B608
         count = self._affected(
             sql,
@@ -377,6 +406,7 @@ WHERE request_id = @request_id AND status = 'pending' AND revision = @revision
                 "request_id": _grant_id(request_id),
                 "expires_at": ("TIMESTAMP", row.expires_at),
                 "revision": ("INT64", row.revision),
+                "principal": ("STRING", snapshot.principal),
                 "votes": ("STRING", _encode_votes(approval.votes)),
                 "status": ("STRING", "approving" if approval.is_final else "pending"),
                 "grant_id": grant_param if approval.is_final else ("STRING", None),

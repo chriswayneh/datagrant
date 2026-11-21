@@ -100,3 +100,21 @@ def test_failed_grant_only_settles_after_cleanup(
     assert reconcile_approval(client, claim) == "pending"
     client.row = replace(client.row, cleanup_complete=True)
     assert reconcile_approval(client, claim) == "failed"
+
+
+def test_issue_approved_refuses_missing_principal(
+    case: tuple[Policy, PendingRequest], tmp_path: Path
+) -> None:
+    policy, row = case
+    snapshot = RequestSnapshot(row, "", (Vote(BOB, policy.sha256), Vote(CAROL, policy.sha256)))
+    approval = evaluate_approval(policy, row, CAROL, (Vote(BOB, policy.sha256),), now=NOW)
+    claim = ApprovalClaim(row.request_id, 2, "abcdef012346", snapshot, approval)
+    with pytest.raises(GrantError, match="missing a google principal"):
+        issue_approved(
+            Client(),
+            claim,
+            project=PROJECT,
+            dataset=policy.datasets[row.facts.dataset],
+            receipts=_sink(tmp_path),
+            now=NOW,
+        )

@@ -133,9 +133,9 @@ Sequence:
 5. Bind the principal on **`datagrant_views`** with the custom grantee role and the table `resource.name` + `request.time` condition above, plus **one** `roles/bigquery.jobUser` binding on the grant project for this grant (condition title `G_<id>`, expression `request.time` only). That bind is the ENABLE step.
 6. Flip `datagrant.grants` to `active` only after the bind succeeds.
 
-**Where the principal comes from.** OIDC: a configured claim (default `email`) turned into `user:<email>` unless the claim is already an IAM member string. Local mode: `--google-principal` (full IAM member string). A local `request` / `approve` without `--google-principal` is exit 2. `--as-user` still records the CLI name on the receipt; it is not a Google identity.
+**Where the principal comes from.** The bound principal is identity-only: `policy.identity.google_principals` for the caller, then a verified OIDC email when `username_claim` is `email` (always `user:{email}`; a value that contains `:` is refused). `--google-principal` may only confirm that bound value (exit 2 if it differs). OIDC with no bound principal is refused. A free-form flag is allowed only in local mode with no mapping, and only as `user:`; `group:` and `serviceAccount:` must come from the mapping. Local-mode identity (`--as-user` / OS user) is self-asserted: it is not authentication. `--as-user` still records the CLI name on the receipt; it is not a Google identity.
 
-**Two-person.** `request --apply` stores the principal plus the pending row. It creates no view and no IAM bind. The final `approve --apply` runs the fail-safe sequence. Pending rows past `pending_ttl` expire in place; there is nothing in BigQuery to drop.
+**Two-person.** `request --apply` stores the canonical principal on the pending row (and in receipt identity). It creates no view and no IAM bind. Approve shows that stored value and does not take `--google-principal`. The final `approve --apply` binds only the stored principal. Pending rows past `pending_ttl` expire in place; there is nothing in BigQuery to drop.
 
 **Not in M5:** minting a per-grant service account key, showing a JSON key, or asking the developer to `gcloud auth` as a throwaway SA.
 
@@ -285,7 +285,7 @@ Hashes are not designed to be joinable with Postgres or Snowflake (different HMA
 - **In-flight jobs.** IAM deny and view drop do not always stop a job that already started. `jobs.cancel` is best-effort. Residual: bytes already scanned are billed.
 - **View SQL.** Snowflake secure views hide definition from the grantee. BigQuery `dataViewer` does not. Use the custom grantee role without `bigquery.tables.get` unless the live test forces the fallback (SQL visible, key not). Residual: project owners and the operator see DDL.
 - **Authorized view / dataset / routine to source.** Those ACL entries are unconditional ([IAM conditions](https://cloud.google.com/bigquery/docs/conditions)). Isolation is the IAM `resource.name` on the grantee bind, not the source ACL. The view owner (operator) can always read source columns used in the view. Least-privilege the operator SA. Any view the operator puts in `datagrant_views` can read an authorized source; only the operator can create those views.
-- **Principal mapping.** A wrong `--google-principal` grants a different Google identity. OIDC `email` must be the Google account that will run jobs. Local mode is not authentication.
+- **Principal mapping.** `--google-principal` cannot override identity. A mismatched flag is exit 2. OIDC `email` must be the Google account that will run jobs. Local-mode identity is self-asserted.
 - **Hashes are not designed to be joinable** with Postgres or Snowflake.
 - **No BigQuery in CI.** A missing `DATAGRANT_TEST_BIGQUERY` skips live tests. Recorded RPC still runs.
 - **`make demo` stays Postgres.** Operators try BigQuery against a throwaway project they already have, after `policy check`.
@@ -315,7 +315,7 @@ Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-
 - **Authorized view, routine, and dataset grants cannot carry IAM Conditions.** They are unconditional ACL entries ([IAM conditions](https://cloud.google.com/bigquery/docs/conditions)).
 - **Same-location only.** Source dataset and grant views must share a BigQuery location.
 - **`issuing` / `enabling` grace is 10 minutes.** Same crash window as Snowflake. This is not a GCP lock.
-- **Local mode needs `--google-principal`.** `--as-user alice` is not an IAM member.
+- **Local-mode identity is self-asserted.** `--as-user alice` is not an IAM member and is not authentication. A free-form `--google-principal` is `user:` only, and only when there is no mapping.
 - **Operator `projects.setIamPolicy` on the grant project can grant anything there.** Dedicated grant project only.
 
 ## Compatibility with v0.6.0
@@ -330,7 +330,7 @@ Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-
 
 - Policy: omit `engine` = postgres; `engine: bigquery` accepted; unknown engine is a parse error; table-level `engine` is an unknown-key error; `schema` / `location` refused on postgres; `policy check` covers a mixed postgres/snowflake/bigquery file; `filter_columns` required when a BigQuery `row_filters` entry names a column not in `columns`.
 - Routing: a postgres or snowflake dataset never opens GCP; a bigquery dataset `--apply` without ADC / project / extra is exit 2; missing extra names `datagrant[bigquery]`; a locator with a JSON key or `credentials_path` is exit 2; dry run does not require ADC.
-- Principal: OIDC email maps to `user:<email>`; local without `--google-principal` is exit 2; receipts store the IAM member string, not a token.
+- Principal: mapping then verified OIDC email (`user:{email}`); `--google-principal` confirms or, in local mode with no mapping, supplies `user:` only; receipts store the IAM member string, not a token. Local-mode identity is self-asserted.
 - Grant RPC (unit, no network): plan inserts `issuing` before `CREATE VIEW`, authorizes `datagrant_views` on the source **only when missing**, receipt, `issuing` to `enabling`, IAM bind last, then `active` from `enabling`. A stub receipt failure must not bind IAM. A stub that flips the row away from `issuing` / `enabling` reverse-drops the view (not the standing authorized dataset) and does not bind. View SQL aliases `` `SRC` ``, qualifies filters, calls `datagrant.hash_hmac`, and contains no key bytes. Dry run prints the plan and creates nothing.
 - IAM JSON (unit): the dataset binding condition names **exactly one** view, `projects/<P>/datasets/datagrant_views/tables/G_<id>`, plus `resource.type == "bigquery.googleapis.com/Table"` and `request.time < timestamp("...")`. It does not name another grant's table. The grant-project `jobUser` JSON is **one binding per grant**: condition title is `G_<id>`, expression is `request.time` only (no table `resource.name`). Custom grantee role does not include `bigquery.tables.get`. Two grants for one principal produce two `jobUser` bindings with different titles.
 - Etag RMW (unit): `datasets.update` and `setIamPolicy` send the etag from the prior get; a stub 409 retries once with a fresh etag and succeeds; both get and update pass `accessPolicyVersion=3`. Add this assertion in construction PR 3 or 4.

@@ -55,6 +55,7 @@ class BigQueryGrantClient:
         self.set_project_iam = iam.set_project_iam
         self.list_due_requests = self.requests.list_due_requests
         self.claim_expired_request = self.requests.claim_expired_request
+        self.count_live_grants = grants.count_live_grants
 
     def bind_iam(self, plan: GrantPlan) -> None:
         apply_bind(self, plan)

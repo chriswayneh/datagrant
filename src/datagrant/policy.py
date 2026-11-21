@@ -365,6 +365,30 @@ def _parse_seconds_duration(
     return td
 
 
+def _parse_google_principals(raw: object, where: str) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise PolicyError(f"{where}.google_principals: expected a mapping")
+    from datagrant.bq.grant import GrantError, _parse_principal
+
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key or not isinstance(value, str) or not value:
+            raise PolicyError(
+                f"{where}.google_principals: keys and values must be non-empty strings"
+            )
+        name = normalize_principal(key)
+        try:
+            principal = _parse_principal(value)
+        except GrantError as exc:
+            raise PolicyError(f"{where}.google_principals[{key!r}]: {exc}") from None
+        if name in out:
+            raise PolicyError(f"{where}.google_principals: duplicate name {name!r}")
+        out[name] = principal
+    return out
+
+
 def _parse_identity(
     raw: object, groups: set[str], env: Mapping[str, str] | None = None
 ) -> IdentityConfig:
@@ -387,17 +411,19 @@ def _parse_identity(
             "max_token_age",
             "clock_skew",
             "jwks_cache_ttl",
+            "google_principals",
         },
         where,
     )
     mode = raw.get("mode", "local")
     if not isinstance(mode, str) or mode not in IDENTITY_MODES:
         raise PolicyError(f"{where}.mode: must be one of {sorted(IDENTITY_MODES)}")
+    principals = _parse_google_principals(raw.get("google_principals"), where)
     if mode == "local":
-        extra = sorted(set(raw) - {"mode"})
+        extra = sorted(set(raw) - {"mode", "google_principals"})
         if extra:
             raise PolicyError(f"{where}: OIDC keys {extra} are not allowed when mode is 'local'")
-        return IdentityConfig(mode="local")
+        return IdentityConfig(mode="local", google_principals=principals)
     issuer = _req(raw, "issuer", str, where)
     try:
         validate_oidc_url(
@@ -485,6 +511,7 @@ def _parse_identity(
         max_token_age=max_age,
         clock_skew=skew,
         jwks_cache_ttl=ttl,
+        google_principals=principals,
     )
 
 
