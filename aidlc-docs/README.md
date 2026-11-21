@@ -15,7 +15,7 @@ The product is [v0.6.0](https://github.com/chriswayneh/datagrant/releases/tag/v0
 - M2 / v0.4.0 (approvals and policy limits): released 2026-11-10. Design: [docs/design/approvals-policy-limits.md](../docs/design/approvals-policy-limits.md).
 - M3 / v0.5.0 (ops hardening): released 2026-11-11. Design: [docs/design/ops-hardening.md](../docs/design/ops-hardening.md).
 - M4 / v0.6.0 (warehouses): released 2026-11-14. Snowflake: `engine: snowflake`, key-pair-only `$DATAGRANT_SNOWFLAKE_DSN`, per-grant `TYPE=SERVICE` user, secure view, `request` / `approve` / `revoke` / `sweep`, five masks, `INFORMATION_SCHEMA` catalog inspect, `"SRC"`-qualified row filters. Design: [docs/design/warehouses.md](../docs/design/warehouses.md). Authoritative pages: [CLI](../docs/cli.md), [policy](../docs/policy.md), [operations](../docs/operations.md#warehouses-v060).
-- M5 / v0.7.0+ (BigQuery): [step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with mocked revoke and sweep; [step 5 of 7](https://github.com/chriswayneh/datagrant/pull/63) is in draft with adapter and approval work. BigQuery `--apply` remains disabled. [Design](../docs/design/bigquery.md) approved 2026-11-14 4:51 PM CT (picks 1B through 11B).
+- M5 / v0.7.0+ (BigQuery): [step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with mocked revoke and sweep; [step 5 of 7](https://github.com/chriswayneh/datagrant/pull/63) is in review with adapter and approval work. BigQuery `--apply` remains disabled. [Design](../docs/design/bigquery.md) approved 2026-11-14 4:51 PM CT (picks 1B through 11B).
 
 Working rules: see [AGENTS.md](../AGENTS.md).
 
