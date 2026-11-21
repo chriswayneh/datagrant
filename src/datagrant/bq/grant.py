@@ -113,7 +113,11 @@ class GrantClient(Protocol):
     def mark_failed(self, plan: GrantPlan) -> None: ...
     def count_live_grants(self, requester: str, principal: str | None = None) -> int: ...
     def ensure_hash(self, plan: GrantPlan) -> None:
-        """Idempotent hash-master table, UDF, key bind, and routine ACL."""
+        """Idempotent hash-master table, UDF, key bind, preflight GET, and routine ACL.
+
+        When the plan uses the hash mask, fail closed if ``hash_hmac`` or
+        ``_hash_master`` is missing, before ``insert_issuing``.
+        """
         ...
 
 
@@ -802,7 +806,8 @@ def apply_plan(
     Cleanup calls ``drop_view`` at most once. ``mark_failed`` always runs.
     A post-issued failure still writes ``revoked`` if cleanup fails.
     Re-checks ``max_concurrent_grants`` inside the issuing claim (by requester).
-    Standing hash objects are not reverse-dropped.
+    Standing hash objects are not reverse-dropped. Hash-mask grants preflight
+    ``hash_hmac`` and ``_hash_master`` before ``insert_issuing``.
     """
     if not plan.principal:
         raise GrantError("google principal is required")

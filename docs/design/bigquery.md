@@ -260,6 +260,8 @@ The local hash key file stays as today. It must **not** appear in view SQL. BigQ
 
 **Default:** a **restricted table** (`datagrant._hash_master`) in an operator-only dataset, filled with a **query parameter** (never a SQL literal), plus an **authorized SQL UDF** (`datagrant.hash_hmac(hash_scope, value)`) that reads the table and derives the per-scope HMAC key (same idea as Postgres and Snowflake). Grant views in `datagrant_views` call the UDF. Authorize that routine (or the UDF dataset) on the hash-master dataset. That authorization is an unconditional ACL entry; authorized routines cannot carry IAM Conditions ([IAM conditions, limitations](https://cloud.google.com/bigquery/docs/conditions)).
 
+When the grant uses the `hash` mask, apply does `routines.get` for `datagrant.hash_hmac` and checks that `_hash_master` exists **before** `insert_issuing`, and fails closed if either is missing. The authorized-routine ACL is not part of that check. If that ACL is missing, the grant can still become `active`, but the view is unusable (the owner cannot invoke the UDF against `_hash_master`).
+
 The grantee role does **not** include IAM on the UDF dataset or the master table. Google: after you authorize a routine, users can invoke it without access to the underlying tables ([authorized routines](https://cloud.google.com/bigquery/docs/authorized-routines)). For a view that calls the UDF, the view owner runs the routine; the grantee only needs `getData` on that view.
 
 Invariant: **key never in view text, never in IAM JSON, never in receipts.**
@@ -287,6 +289,7 @@ Hashes are not designed to be joinable with Postgres or Snowflake (different HMA
 - **Authorized view / dataset / routine to source.** Those ACL entries are unconditional ([IAM conditions](https://cloud.google.com/bigquery/docs/conditions)). Isolation is the IAM `resource.name` on the grantee bind, not the source ACL. The view owner (operator) can always read source columns used in the view. Least-privilege the operator SA. Any view the operator puts in `datagrant_views` can read an authorized source; only the operator can create those views.
 - **Principal mapping.** `--google-principal` cannot override identity. A mismatched flag is exit 2. OIDC `email` must be the Google account that will run jobs. Local-mode identity is self-asserted.
 - **Hashes are not designed to be joinable** with Postgres or Snowflake.
+- **Missing hash routine ACL.** `routines.get` / `_hash_master` existence is fail-closed for a `hash` mask. A missing authorized-routine ACL is not: the grant can be `active` and the view unusable.
 - **No BigQuery in CI.** A missing `DATAGRANT_TEST_BIGQUERY` skips live tests. Recorded RPC still runs.
 - **`make demo` stays Postgres.** Operators try BigQuery against a throwaway project they already have, after `policy check`.
 - **ADC holders and GCP project owners are trusted.** Same as today's DSN holders.
@@ -317,6 +320,7 @@ Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-
 - **`issuing` / `enabling` grace is 10 minutes.** Same crash window as Snowflake. This is not a GCP lock.
 - **Local-mode identity is self-asserted.** `--as-user alice` is not an IAM member and is not authentication. A free-form `--google-principal` is `user:` only, and only when there is no mapping.
 - **Operator `projects.setIamPolicy` on the grant project can grant anything there.** Dedicated grant project only.
+- **Missing authorized-routine ACL.** A `hash` grant fails closed only when `hash_hmac` or `_hash_master` is missing. If the routine ACL is missing, the grant can still be `active` and the view unusable.
 
 ## Compatibility with v0.6.0
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from datagrant.bq.grant import HASH_UDF, STATE_DATASET, GrantError, lit, q, q_project
+from datagrant.bq.grant import HASH_UDF, STATE_DATASET, GrantError, GrantPlan, lit, q, q_project
 from datagrant.bq.rest import TIMEOUT
 from datagrant.keys import HashKey
 
@@ -26,6 +26,14 @@ def _qual(project: str, dataset: str, name: str) -> str:
 def hash_routine_entry(project: str) -> dict[str, str]:
     q_project(project)
     return {"projectId": project, "datasetId": STATE_DATASET, "routineId": HASH_UDF}
+
+
+def uses_hash_mask(plan: GrantPlan) -> bool:
+    """True when the grant view will call hash_hmac."""
+    facts = plan.facts
+    if facts is not None:
+        return any(mask == "hash" for mask in facts.masks.values())
+    return HASH_UDF in plan.view_sql
 
 
 def create_hash_table_sql(project: str) -> str:

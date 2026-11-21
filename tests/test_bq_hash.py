@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_bq_grant import KEY, PRINCIPAL, PROJECT, FakeClient, _plan, _sink
+from test_bq_grant import GID, KEY, NOW, PRINCIPAL, PROJECT, FakeClient, _plan, _sink, dec, req
 from test_bq_state import SDK, Client
 
-from datagrant.bq.grant import GrantError, apply_plan
+from datagrant.bq.grant import GrantError, apply_plan, build_plan
 from datagrant.bq.hash import (
     HASH_MASTER_ID,
     HASH_TABLE,
@@ -130,6 +130,35 @@ def test_apply_plan_acl_is_routine_only_and_key_stays_out_of_sql(tmp_path: Path)
     assert hex_key not in repr(client.calls)
     assert client.hash_params == [KEY.derived]
     assert "@key" in bind_hash_key_sql(PROJECT)
+
+
+def test_hash_preflight_fails_closed_before_issuing(tmp_path: Path) -> None:
+    client = FakeClient(missing_hash_objects=True)
+    sink = _sink(tmp_path)
+    with pytest.raises(GrantError, match="hash_hmac routine is unavailable"):
+        apply_plan(client, _plan(), sink)
+    assert client.calls == ["ensure_hash"]
+    assert "insert_issuing" not in client.calls
+    assert client.status == {}
+    assert client.views == set()
+    assert not client.dataset_policy.bindings
+    assert not client.project_policy.bindings
+    assert not sink.log.exists()
+
+
+def test_passthrough_skips_hash_object_preflight(tmp_path: Path) -> None:
+    client = FakeClient(missing_hash_objects=True)
+    plan = build_plan(
+        dec({"patient_id": "passthrough", "ssn": "redact"}),
+        req(),
+        project=PROJECT,
+        principal=PRINCIPAL,
+        grant_id=GID,
+        now=NOW,
+    )
+    apply_plan(client, plan, _sink(tmp_path))
+    assert client.status[GID] == "active"
+    assert "insert_issuing" in client.calls
 
 
 def test_ensure_hash_failure_creates_nothing(tmp_path: Path) -> None:

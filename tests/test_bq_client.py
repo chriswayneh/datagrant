@@ -40,6 +40,8 @@ def test_issue_and_revoke_through_assembled_client(tmp_path: Path) -> None:
         "condition": binding["condition"],
     }
     session = Session(
+        Response(body={"routineReference": {"routineId": "hash_hmac"}}),
+        Response(body={"tableReference": {"tableId": "_hash_master"}}),
         Response(body={"location": "US"}),
         Response(body={"location": "US"}),
         source([]),
@@ -76,10 +78,18 @@ def test_issue_and_revoke_through_assembled_client(tmp_path: Path) -> None:
     merge_params = next(cfg for sql, cfg in sdk.calls if sql.startswith("MERGE "))
     assert merge_params["key"] == ("BYTES", KEY.derived)
     assert sdk.calls[-1][1]["target"] == ("STRING", "active")
-    assert len(session.calls) == 12
+    assert len(session.calls) == 14
+    assert session.calls[0][0:2] == (
+        "GET",
+        f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/datasets/datagrant/routines/hash_hmac",
+    )
+    assert session.calls[1][0:2] == (
+        "GET",
+        f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/datasets/datagrant/tables/_hash_master",
+    )
     routine = {"projectId": PROJECT, "datasetId": "datagrant", "routineId": "hash_hmac"}
-    views_acl = session.calls[3][2]["json"]["access"]
-    state_acl = session.calls[5][2]["json"]["access"]
+    views_acl = session.calls[5][2]["json"]["access"]
+    state_acl = session.calls[7][2]["json"]["access"]
     assert views_acl == [{"routine": routine}]
     assert state_acl == [{"routine": routine}]
     assert PRINCIPAL not in repr(state_acl)

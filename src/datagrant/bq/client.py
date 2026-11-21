@@ -62,10 +62,14 @@ class BigQueryGrantClient:
         self.count_live_grants = grants.count_live_grants
 
     def ensure_hash(self, plan: GrantPlan) -> None:
+        from datagrant.bq.hash import uses_hash_mask
+
         self._hashes.ensure_table()
         self._hashes.ensure_udf()
         if plan.hash_key is not None:
             self._hashes.bind_key(plan.hash_key)
+        if uses_hash_mask(plan):
+            self._dataset.require_hash_objects(plan.project)
         self._dataset.authorize_hash_routine_if_missing(plan)
 
     def bind_iam(self, plan: GrantPlan) -> None:

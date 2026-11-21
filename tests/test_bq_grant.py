@@ -90,6 +90,7 @@ class FakeClient:
         conflict_dataset: int = 0,
         conflict_project: int = 0,
         extra_live: int = 0,
+        missing_hash_objects: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.fail_on = fail_on
@@ -114,6 +115,7 @@ class FakeClient:
         self.hash_params: list[bytes] = []
         self.views_access: list[dict[str, Any]] = []
         self.state_access: list[dict[str, Any]] = []
+        self.missing_hash_objects = missing_hash_objects
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -127,6 +129,7 @@ class FakeClient:
             create_hash_table_sql,
             create_hmac_helpers_sql,
             hash_routine_entry,
+            uses_hash_mask,
         )
 
         self._step("ensure_hash")
@@ -139,6 +142,8 @@ class FakeClient:
             self.hash_params.append(plan.hash_key.derived)
             if plan.hash_key.derived.hex() in "\n".join(self.hash_sqls):
                 raise GrantError("hash key leaked into SQL text")
+        if uses_hash_mask(plan) and self.missing_hash_objects:
+            raise GrantError("BigQuery hash_hmac routine is unavailable")
         entry = {"routine": hash_routine_entry(plan.project)}
         if entry not in self.views_access:
             self.views_access.append(dict(entry))

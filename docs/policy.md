@@ -61,7 +61,7 @@ v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_c
 | `redact` | The constant `[REDACTED]`. |
 | `null` | NULL, cast to the column's type. |
 | `partial` | Asterisks plus the last 4 characters. Values shorter than 8 characters are fully masked. |
-| `hash` | A hex HMAC-SHA256 of the value under a key derived from the local hash key and the dataset's `hash_scope`. Postgres needs `pgcrypto` and fails closed without it or without the key. Snowflake calls `datagrant.hash_hmac` (key not in view SQL). Equal inputs give equal outputs within one hash scope on the same engine (see [linkability](security.md#known-limits)). Snowflake hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). |
+| `hash` | A hex HMAC-SHA256 of the value under a key derived from the local hash key and the dataset's `hash_scope`. Postgres needs `pgcrypto` and fails closed without it or without the key. Snowflake calls `datagrant.hash_hmac` (key not in view SQL). BigQuery calls `datagrant.hash_hmac` (key not in view SQL) and, before issuing, fails closed if `routines.get` cannot find that UDF or `_hash_master` is missing. A missing authorized-routine ACL is not that check: the grant can still become active, but the view is unusable. Equal inputs give equal outputs within one hash scope on the same engine (see [linkability](security.md#known-limits)). Snowflake hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). |
 
 Column types are read from the catalog when the grant is created (Postgres `pg_attribute`; Snowflake `INFORMATION_SCHEMA.COLUMNS`). The five mask names are the same on both engines.
 

@@ -311,8 +311,42 @@ def test_mixed_case_conditional_grantee_bind_and_unbind(plan: GrantPlan) -> None
 
 
 STATE_URL = f"{BASE}/{PROJECT}/datasets/datagrant"
+ROUTINE_URL = f"{BASE}/{PROJECT}/datasets/datagrant/routines/hash_hmac"
+TABLE_URL = f"{BASE}/{PROJECT}/datasets/datagrant/tables/_hash_master"
 ROUTINE = {"projectId": PROJECT, "datasetId": "datagrant", "routineId": "hash_hmac"}
 ROUTINE_ACL = {"routine": ROUTINE}
+
+
+def test_hash_preflight_gets_routine_then_hash_master(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"routineReference": {"routineId": "hash_hmac"}}),
+        Response(body={"tableReference": {"tableId": "_hash_master"}}),
+    )
+    DatasetAccessClient(session, grant_project=PROJECT).require_hash_objects(PROJECT)
+    assert [(method, url) for method, url, _ in session.calls] == [
+        ("GET", ROUTINE_URL),
+        ("GET", TABLE_URL),
+    ]
+    for _, _, kwargs in session.calls:
+        assert kwargs.get("params") is None
+        assert kwargs.get("allow_redirects") is False
+
+
+def test_hash_preflight_fails_closed_when_routine_missing() -> None:
+    session = Session(Response(status_code=404, body={}))
+    with pytest.raises(GrantError, match="hash_hmac routine is unavailable"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_objects(PROJECT)
+    assert session.calls[0][1] == ROUTINE_URL
+
+
+def test_hash_preflight_fails_closed_when_table_missing() -> None:
+    session = Session(
+        Response(body={"routineReference": {"routineId": "hash_hmac"}}),
+        Response(status_code=404, body={}),
+    )
+    with pytest.raises(GrantError, match="hash-master table is unavailable"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_objects(PROJECT)
+    assert session.calls[1][1] == TABLE_URL
 
 
 def test_hash_routine_acl_is_routine_only_and_preserves_access(plan: GrantPlan) -> None:

@@ -74,6 +74,20 @@ def _dataset_url(project: str, dataset: str) -> str:
     return f"{_ROOT}/{project}/datasets/{dataset}"
 
 
+def _routine_url(project: str, dataset: str, routine: str) -> str:
+    q_project(project)
+    q(dataset)
+    q(routine)
+    return f"{_ROOT}/{project}/datasets/{dataset}/routines/{routine}"
+
+
+def _table_url(project: str, dataset: str, table: str) -> str:
+    q_project(project)
+    q(dataset)
+    q(table)
+    return f"{_ROOT}/{project}/datasets/{dataset}/tables/{table}"
+
+
 class DatasetAccessClient:
     """Uses an operator-authenticated session supplied by the eventual live client."""
 
@@ -269,6 +283,42 @@ class DatasetAccessClient:
             except ConflictError:
                 continue
         raise GrantError(f"BigQuery dataset etag conflict after {ETAG_MAX_TRIES} attempts")
+
+    def _get_object(self, url: str, missing: str) -> dict[str, Any]:
+        try:
+            response = self._session.request("GET", url, timeout=TIMEOUT, allow_redirects=False)
+        except Exception:  # noqa: BLE001 - transport errors can include URLs
+            raise GrantError("BigQuery hash preflight request failed") from None
+        if response.status_code == 404:
+            raise GrantError(missing)
+        if response.status_code != 200:
+            raise GrantError("BigQuery hash preflight request failed")
+        try:
+            body = response.json()
+        except ValueError:
+            raise GrantError("BigQuery hash preflight returned invalid JSON") from None
+        if not isinstance(body, dict):
+            raise GrantError("BigQuery hash preflight returned an invalid resource")
+        return body
+
+    def require_hash_objects(self, project: str) -> None:
+        """routines.get hash_hmac and tables.get _hash_master. Fail closed if missing.
+
+        Does not inspect the authorized-routine ACL. A missing ACL can still
+        leave an issued grant active but unusable.
+        """
+        from datagrant.bq.hash import HASH_TABLE, HASH_UDF
+
+        if self._grant_project is not None and project != self._grant_project:
+            raise GrantError("hash preflight requires the configured grant project")
+        self._get_object(
+            _routine_url(project, STATE_DATASET, HASH_UDF),
+            "BigQuery hash_hmac routine is unavailable",
+        )
+        self._get_object(
+            _table_url(project, STATE_DATASET, HASH_TABLE),
+            "BigQuery hash-master table is unavailable",
+        )
 
     def authorize_hash_routine_if_missing(self, plan: GrantPlan) -> bool:
         """Authorize hash_hmac on datagrant_views. Do not grant the grantee datagrant access.
