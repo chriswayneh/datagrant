@@ -34,6 +34,7 @@ STATE_SCHEMA = "DATAGRANT"
 VIEW_SCHEMA = "DATAGRANT_VIEWS"
 HASH_TABLE = "_HASH_MASTER"
 HASH_UDF = "HASH_HMAC"
+HMAC_UDF = "_HMAC_SHA256"
 HASH_MASTER_ID = "master"
 SRC_ALIAS = "SRC"
 _GRANT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -179,14 +180,33 @@ def _reject_controls(label: str, value: str) -> None:
         raise GrantError(f"{label} contains NUL or control characters")
 
 
+def _hmac_udf_sql() -> str:
+    """Provision the keyed primitive using Snowflake's standard Python runtime."""
+    fn = f"{q(STATE_SCHEMA)}.{q(HMAC_UDF)}"
+    return (
+        f"CREATE OR REPLACE SECURE FUNCTION {fn}(KEY_BYTES BINARY, VAL VARCHAR) "
+        "RETURNS BINARY LANGUAGE PYTHON RUNTIME_VERSION = '3.12' "
+        "HANDLER = 'hmac_sha256' AS $$\n"
+        "import hmac\n\n"
+        "def hmac_sha256(key_bytes, val):\n"
+        "    if val is None:\n"
+        "        return None\n"
+        "    if key_bytes is None:\n"
+        "        raise ValueError('datagrant hash key is unavailable')\n"
+        "    return hmac.digest(key_bytes, val.encode('utf-8'), 'sha256')\n"
+        "$$"
+    )
+
+
 def _hash_udf_sql() -> str:
     """SQL secure UDF: reads the master table; no key literal in the body."""
     table = f"{q(STATE_SCHEMA)}.{q(HASH_TABLE)}"
     fn = f"{q(STATE_SCHEMA)}.{q(HASH_UDF)}"
+    hmac_fn = f"{q(STATE_SCHEMA)}.{q(HMAC_UDF)}"
     body = (
-        f"SELECT HEX_ENCODE(SHA2_HMAC(COALESCE(VAL, ''), SHA2_HMAC("  # nosec B608
-        f"CONCAT({lit(_SCOPE_LABEL)}, COALESCE(HASH_SCOPE, '')),"
-        f"(SELECT KEY FROM {table} WHERE ID = {lit(HASH_MASTER_ID)} LIMIT 1), 256), 256))"
+        f"SELECT CASE WHEN VAL IS NULL THEN NULL ELSE HEX_ENCODE({hmac_fn}("  # nosec B608
+        f"{hmac_fn}((SELECT KEY FROM {table} WHERE ID = {lit(HASH_MASTER_ID)} LIMIT 1),"
+        f"CONCAT({lit(_SCOPE_LABEL)}, COALESCE(HASH_SCOPE, ''))), VAL)) END"
     )
     return (
         f"CREATE OR REPLACE SECURE FUNCTION {fn}"
@@ -218,6 +238,7 @@ def ensure_state_sql() -> tuple[str, ...]:
             " CREATED_AT TIMESTAMP_TZ, EXPIRES_AT TIMESTAMP_TZ, STATUS VARCHAR,"
             " APPROVER VARCHAR, GRANT_ID VARCHAR, REQUESTER_IDENTITY VARCHAR)"
         ),
+        _hmac_udf_sql(),
         _hash_udf_sql(),
     )
 

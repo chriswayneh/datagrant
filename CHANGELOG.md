@@ -4,6 +4,11 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.6.1] - TBD
+
+### Fixed
+- Snowflake setup called `SHA2_HMAC`, which Snowflake lacks. Setup now creates a secure Python 3.12 UDF that uses the standard-library `hmac`. NULL stays NULL. The hash key column is BINARY. Verified by CI and SQL checks only; there is no live Snowflake smoke test. ([#61](https://github.com/chriswayneh/datagrant/pull/61))
+
 ## [0.6.0] - 2026-11-13
 
 Snowflake warehouse support.
