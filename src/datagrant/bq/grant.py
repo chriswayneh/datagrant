@@ -1,6 +1,6 @@
 """BigQuery per-grant engine: authorized view, issuing-row fail-safe (PR 3b).
 
-Order: hash-master and hash_hmac, issuing row, view in shared datagrant_views,
+Order: read-only hash preflight, issuing row, view in shared datagrant_views,
 authorize dataset only if missing, names-row update, issued receipt, enabling,
 IAM last, active. IAM bind JSON: dataset resource.name of G_<id>, per-grant
 jobUser title G_<id>, accessPolicyVersion=3, etag 409 retry. Reverse-drop
@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from datagrant import receipt
-from datagrant.bq.mask import TableCatalog, sql_type
+from datagrant.bq.mask import TableCatalog, column_type, sql_type
 from datagrant.keys import HashKey
 from datagrant.pg.grant import ReceiptSink
 from datagrant.policy import Decision, Request
@@ -113,10 +113,12 @@ class GrantClient(Protocol):
     def mark_failed(self, plan: GrantPlan) -> None: ...
     def count_live_grants(self, requester: str, principal: str | None = None) -> int: ...
     def ensure_hash(self, plan: GrantPlan) -> None:
-        """Idempotent hash-master table, UDF, key bind, preflight GET, and routine ACL.
+        """Read-only hash preflight before ``insert_issuing``.
 
-        When the plan uses the hash mask, fail closed if ``hash_hmac`` or
-        ``_hash_master`` is missing, before ``insert_issuing``.
+        Hash-mask grants check the datagrant dataset ACL, that ``hash_hmac``
+        and ``_hash_master`` exist, that object IAM is absent, and that the
+        master fingerprint matches. No DDL and no key write. Passthrough-only
+        grants skip this.
         """
         ...
 
@@ -293,7 +295,7 @@ def _col_expr(
     if mask == "null":
         dtype = "STRING"
         if catalog is not None:
-            mapped = catalog.columns.get(col)
+            mapped = column_type(catalog, col)
             if mapped is None:
                 raise GrantError(f"column {col!r} does not exist in the table")
             dtype = sql_type(mapped)
@@ -419,7 +421,7 @@ def view_select_sql(
         except RowFilterError as exc:
             raise GrantError(str(exc)) from None
         if catalog is not None:
-            missing = sorted(c for c in used if c not in catalog.columns)
+            missing = sorted(c for c in used if column_type(catalog, c) is None)
             if missing:
                 raise GrantError(f"row filter columns not in table: {', '.join(missing)}")
         select = f"{select} WHERE {cond}"  # nosec B608
@@ -465,7 +467,7 @@ def build_plan(
         raise GrantError("hash masking requires a hash key file (see keys.hash_key_path)")
     scope = decision.hash_scope or req.dataset
     if catalog is not None:
-        missing = [c for c in req.columns if c not in catalog.columns]
+        missing = [c for c in req.columns if column_type(catalog, c) is None]
         if missing:
             raise GrantError(f"column {missing[0]!r} does not exist in the table")
     view_sql = view_select_sql(
@@ -805,13 +807,12 @@ def apply_plan(
     *,
     max_concurrent: int | None = None,
 ) -> None:
-    """Fail-safe apply. Hash infra first, IAM last (dataset bind + jobUser).
+    """Fail-safe apply. Hash preflight first, IAM last (dataset bind + jobUser).
 
     Cleanup calls ``drop_view`` at most once. ``mark_failed`` always runs.
     A post-issued failure still writes ``revoked`` if cleanup fails.
     Re-checks ``max_concurrent_grants`` inside the issuing claim (by requester).
-    Standing hash objects are not reverse-dropped. Hash-mask grants preflight
-    ``hash_hmac`` and ``_hash_master`` before ``insert_issuing``.
+    Hash-mask grants do a read-only preflight before ``insert_issuing``.
     """
     if not plan.principal:
         raise GrantError("google principal is required")

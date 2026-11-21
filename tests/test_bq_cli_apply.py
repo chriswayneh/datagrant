@@ -683,3 +683,88 @@ def test_sweep_non_row_error_says_failed(
     assert "Traceback" not in err
     assert "sekrit-token" not in err
     assert "RuntimeError" not in err
+
+
+def test_setup_bigquery_dry_run_and_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = ApplyClient()
+    _ready(tmp_path, monkeypatch, client)
+    out: list[str] = []
+    dry = cli.main(["setup", "bigquery", "--json"], out.append)
+    assert dry == EXIT_OK
+    assert json.loads(out[0])["dry_run"] is True
+    assert "setup_hash" not in client.calls
+    applied: list[str] = []
+    code = cli.main(["setup", "bigquery", "--apply", "--json"], applied.append)
+    assert code == EXIT_OK
+    assert json.loads(applied[0])["status"] == "ready"
+    assert client.calls.count("setup_hash") == 1
+    assert client.hash_loads
+
+
+def test_setup_refuses_project_readers_and_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_bq_hash import DEFAULT_READERS
+
+    blocked = ApplyClient()
+    blocked.hash_access = DEFAULT_READERS
+    _ready(tmp_path / "blocked", monkeypatch, blocked)
+    code = cli.main(["setup", "bigquery", "--apply"])
+    err = capsys.readouterr().err
+    assert code == EXIT_FAILED
+    assert "operator-only" in err
+    assert blocked.hash_loads == []
+
+    mismatch = ApplyClient(hash_mismatch=True)
+    _ready(tmp_path / "mismatch", monkeypatch, mismatch)
+    code = cli.main(["setup", "bigquery", "--apply"])
+    err = capsys.readouterr().err
+    assert code == EXIT_FAILED
+    assert "rotate explicitly" in err
+    assert mismatch.hash_loads == []
+
+    rotated = ApplyClient(hash_mismatch=True)
+    _ready(tmp_path / "rotated", monkeypatch, rotated)
+    out: list[str] = []
+    code = cli.main(
+        ["setup", "bigquery", "--rotate-hash-key", "--apply", "--json"],
+        out.append,
+    )
+    rotate_err = capsys.readouterr().err
+    assert code == EXIT_OK
+    assert "changes every pseudonym" in rotate_err
+    assert rotated.hash_loads
+
+
+def test_cli_inspect_types_null_mask_case_insensitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant.bq.mask import TableCatalog
+
+    yaml = MIXED.replace(
+        "columns: {patient_id: passthrough, ssn: hash}",
+        'columns: {patient_id: passthrough, ssn: hash, email: "null"}',
+    )
+    path = tmp_path / "null.yaml"
+    path.write_text(yaml)
+    path.chmod(0o600)
+    client = ApplyClient()
+    client.catalog = TableCatalog({"Patient_ID": "INT64", "ssn": "STRING", "Email": "DATE"})
+    _ready(tmp_path, monkeypatch, client)
+    code = cli.main(
+        [
+            *BQ_REQ,
+            "--columns",
+            "patient_id,email",
+            "--policy",
+            str(path),
+            "--apply",
+        ]
+    )
+    assert code == EXIT_OK
+    assert "inspect_table" in client.calls
+    assert client.view_sql is not None
+    assert "CAST(NULL AS DATE) AS `email`" in client.view_sql
+    assert "CAST(NULL AS STRING) AS `email`" not in client.view_sql

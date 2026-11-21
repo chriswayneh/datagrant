@@ -35,6 +35,20 @@ class TableCatalog:
     columns: dict[str, str]
 
 
+def column_type(catalog: TableCatalog, col: str) -> str | None:
+    """Look up a column type. Matching is case-insensitive when unique."""
+    from datagrant.bq.grant import GrantError
+
+    if col in catalog.columns:
+        return catalog.columns[col]
+    hits = [name for name in catalog.columns if name.casefold() == col.casefold()]
+    if len(hits) == 1:
+        return catalog.columns[hits[0]]
+    if len(hits) > 1:
+        raise GrantError(f"column {col!r} is ambiguous in the table")
+    return None
+
+
 def sql_type(raw: object) -> str:
     """Return a safe GoogleSQL type name, or raise. Never interpolates unchecked text."""
     from datagrant.bq.grant import GrantError

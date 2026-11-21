@@ -1,7 +1,11 @@
-"""Restricted hash-master table, SQL HMAC UDF, and key bind via query parameters."""
+"""Restricted hash-master table, SQL HMAC UDF, and load-job key writes."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import io
+import json
 from typing import Any
 
 from datagrant.bq.grant import HASH_UDF, STATE_DATASET, GrantError, GrantPlan, lit, q, q_project
@@ -34,6 +38,11 @@ def uses_hash_mask(plan: GrantPlan) -> bool:
     if facts is not None:
         return any(mask == "hash" for mask in facts.masks.values())
     return HASH_UDF in plan.view_sql
+
+
+def key_fingerprint(key: HashKey) -> str:
+    """SHA-256 hex of the derived key. Matches TO_HEX(SHA256(key)) in GoogleSQL."""
+    return hashlib.sha256(key.derived).hexdigest()
 
 
 def create_hash_table_sql(project: str) -> str:
@@ -82,17 +91,28 @@ def create_hash_hmac_sql(project: str) -> str:
     )
 
 
-def bind_hash_key_sql(project: str) -> str:
+def fingerprint_sql(project: str) -> str:
     table = _qual(project, STATE_DATASET, HASH_TABLE)
     return (
-        f"MERGE {table} T USING (SELECT @id AS id, @key AS key) S ON T.id = S.id "  # nosec B608
-        "WHEN MATCHED THEN UPDATE SET key = S.key "
-        "WHEN NOT MATCHED THEN INSERT (id, key) VALUES (S.id, S.key)"
+        f"SELECT COUNT(*) AS n, COUNTIF(TO_HEX(SHA256(key)) = @fp) AS matched "  # nosec B608
+        f"FROM {table}"
     )
 
 
+def _cell(row: Any, name: str, index: int) -> Any:
+    if isinstance(row, dict):
+        return row[name]
+    getter = getattr(row, "get", None)
+    if callable(getter):
+        return getter(name)
+    try:
+        return row[name]
+    except (KeyError, TypeError, IndexError):
+        return row[index]
+
+
 class HashStore:
-    """Idempotent hash-master DDL and parameterized key bind."""
+    """Idempotent hash-master DDL, fingerprint checks, and load-job key writes."""
 
     def __init__(self, client: Any, sdk: Any, project: str, location: str) -> None:
         q_project(project)
@@ -101,12 +121,12 @@ class HashStore:
         self._project = project
         self._location = location
 
-    def _run(self, sql: str, values: dict[str, tuple[str, Any]] | None = None) -> str:
+    def _run(self, sql: str, values: dict[str, tuple[str, Any]] | None = None) -> Any:
         params = values or {}
         blob = sql
         for _kind, value in params.values():
-            if isinstance(value, (bytes, bytearray)) and value.hex() in blob:
-                raise GrantError("hash key leaked into SQL text")
+            if isinstance(value, (bytes, bytearray)):
+                raise GrantError("hash key must not be a query parameter")
             if isinstance(value, str) and len(value) >= 16 and value in blob:
                 raise GrantError("hash key leaked into SQL text")
         try:
@@ -124,15 +144,16 @@ class HashStore:
                 timeout=TIMEOUT,
                 job_retry=None,
             )
-            job.result(timeout=_JOB_TIMEOUT, job_retry=None)
+            return job.result(timeout=_JOB_TIMEOUT, job_retry=None)
         except GrantError:
             raise
         except Exception:  # noqa: BLE001 - provider errors may include query parameters
             raise GrantError("BigQuery hash-master query failed") from None
-        return sql
 
     def ensure_table(self) -> str:
-        return self._run(create_hash_table_sql(self._project))
+        sql = create_hash_table_sql(self._project)
+        self._run(sql)
+        return sql
 
     def ensure_udf(self) -> tuple[str, ...]:
         helpers = create_hmac_helpers_sql(self._project)
@@ -142,9 +163,59 @@ class HashStore:
         self._run(hmac_sql)
         return (*helpers, hmac_sql)
 
-    def bind_key(self, key: HashKey) -> str:
-        sql = bind_hash_key_sql(self._project)
+    def master_state(self, key: HashKey) -> tuple[int, int]:
+        """Return (row count, fingerprint match count). Sends only SHA-256 hex."""
+        fp = key_fingerprint(key)
+        sql = fingerprint_sql(self._project)
         if key.derived.hex() in sql:
             raise GrantError("hash key leaked into SQL text")
-        self._run(sql, {"id": ("STRING", HASH_MASTER_ID), "key": ("BYTES", key.derived)})
-        return sql
+        rows = list(self._run(sql, {"fp": ("STRING", fp)}) or ())
+        if not rows:
+            return 0, 0
+        if len(rows) != 1:
+            raise GrantError("BigQuery hash-master fingerprint query returned an invalid result")
+        n = _cell(rows[0], "n", 0)
+        matched = _cell(rows[0], "matched", 1)
+        if type(n) is not int or n < 0 or type(matched) is not int or matched < 0:
+            raise GrantError("BigQuery hash-master fingerprint query returned an invalid result")
+        return n, matched
+
+    def require_fingerprint(self, key: HashKey) -> None:
+        n, matched = self.master_state(key)
+        if n == 0:
+            raise GrantError("BigQuery hash-master table is unavailable")
+        if n != 1:
+            raise GrantError("BigQuery hash-master has duplicate rows")
+        if matched != 1:
+            raise GrantError("BigQuery hash-master key does not match; rotate explicitly")
+
+    def load_key(self, key: HashKey) -> None:
+        """Write the master row with a load job. Never a query parameter."""
+        payload = {
+            "id": HASH_MASTER_ID,
+            "key": base64.b64encode(key.derived).decode("ascii"),
+        }
+        blob = (json.dumps(payload) + "\n").encode("ascii")
+        buf = io.BytesIO(blob)
+        table = f"{self._project}.{STATE_DATASET}.{HASH_TABLE}"
+        try:
+            config = self._sdk.LoadJobConfig(
+                schema=[
+                    self._sdk.SchemaField("id", "STRING"),
+                    self._sdk.SchemaField("key", "BYTES"),
+                ],
+                source_format=self._sdk.SourceFormat.NEWLINE_DELIMITED_JSON,
+                write_disposition=self._sdk.WriteDisposition.WRITE_TRUNCATE,
+            )
+            job = self._client.load_table_from_file(
+                buf,
+                table,
+                job_config=config,
+                project=self._project,
+                location=self._location,
+            )
+            job.result(timeout=_JOB_TIMEOUT)
+        except GrantError:
+            raise
+        except Exception:  # noqa: BLE001 - provider errors may include the load body
+            raise GrantError("BigQuery hash-master load failed") from None

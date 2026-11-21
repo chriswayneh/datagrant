@@ -9,7 +9,7 @@ from test_bq_grant import GID, KEY, NOW, PRINCIPAL, PROJECT, dec, req
 from test_bq_state import SDK
 
 from datagrant.bq.grant import GrantError, build_plan, view_select_sql
-from datagrant.bq.mask import TableCatalog, inspect_table, sql_type
+from datagrant.bq.mask import TableCatalog, column_type, inspect_table, sql_type
 
 
 class _InspectClient:
@@ -110,6 +110,23 @@ def test_inspect_provider_error_is_wrapped() -> None:
         )
     assert "patients" not in str(err.value)
     assert err.value.__cause__ is None
+
+
+def test_column_type_is_case_insensitive() -> None:
+    catalog = TableCatalog({"Email": "DATE", "ssn": "STRING"})
+    assert column_type(catalog, "email") == "DATE"
+    assert column_type(catalog, "SSN") == "STRING"
+    sql = view_select_sql(
+        req(columns=("email",)),
+        {"email": "null"},
+        project=PROJECT,
+        source_dataset="clinic",
+        hash_scope="bq_clinic",
+        catalog=catalog,
+    )
+    assert "CAST(NULL AS DATE) AS `email`" in sql
+    with pytest.raises(GrantError, match="ambiguous"):
+        column_type(TableCatalog({"email": "STRING", "Email": "DATE"}), "EMAIL")
 
 
 def test_null_mask_uses_catalog_type() -> None:

@@ -92,6 +92,10 @@ class FakeClient:
         conflict_project: int = 0,
         extra_live: int = 0,
         missing_hash_objects: bool = False,
+        hash_mismatch: bool = False,
+        hash_duplicate: bool = False,
+        table_iam: bool = False,
+        routine_iam: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.fail_on = fail_on
@@ -114,42 +118,69 @@ class FakeClient:
         self.extra_live = extra_live
         self.hash_sqls: list[str] = []
         self.hash_params: list[bytes] = []
+        self.hash_loads: list[bytes] = []
+        self.hash_access: list[dict[str, Any]] = [
+            {"role": "OWNER", "specialGroup": "projectOwners"},
+            {"role": "WRITER", "specialGroup": "projectWriters"},
+        ]
         self.views_access: list[dict[str, Any]] = []
         self.state_access: list[dict[str, Any]] = []
         self.missing_hash_objects = missing_hash_objects
+        self.hash_mismatch = hash_mismatch
+        self.hash_duplicate = hash_duplicate
+        self.table_iam = table_iam
+        self.routine_iam = routine_iam
+        self.catalog: Any = None
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
         if self.fail_on == name:
             raise RuntimeError(f"stub:{name}")
 
+    def inspect_table(self, dataset: str, table: str, *, location: str | None = None) -> Any:
+        from datagrant.bq.mask import TableCatalog
+
+        self.calls.append("inspect_table")
+        if self.catalog is not None:
+            return self.catalog
+        return TableCatalog({"patient_id": "STRING", "ssn": "STRING", "email": "STRING"})
+
+    def setup_hash(self, key: Any, *, rotate: bool = False) -> None:
+        from datagrant.bq.dataset_access import check_hash_dataset_access
+        from datagrant.bq.hash import key_fingerprint
+
+        self.calls.append("setup_hash")
+        check_hash_dataset_access(self.hash_access, PROJECT)
+        if self.table_iam:
+            raise GrantError("BigQuery hash-master table has table-level IAM")
+        if self.routine_iam:
+            raise GrantError("BigQuery hash_hmac routine has routine-level IAM")
+        if self.hash_duplicate:
+            raise GrantError("BigQuery hash-master has duplicate rows")
+        if self.hash_mismatch and not rotate:
+            raise GrantError("BigQuery hash-master key does not match; rotate explicitly")
+        self.hash_loads.append(key.derived)
+        self.hash_mismatch = False
+        _ = key_fingerprint(key)
+
     def ensure_hash(self, plan: GrantPlan) -> None:
-        from datagrant.bq.hash import (
-            bind_hash_key_sql,
-            create_hash_hmac_sql,
-            create_hash_table_sql,
-            create_hmac_helpers_sql,
-            hash_routine_entry,
-            uses_hash_mask,
-        )
+        from datagrant.bq.dataset_access import check_hash_dataset_access
+        from datagrant.bq.hash import uses_hash_mask
 
         self._step("ensure_hash")
-        self.hash_sqls.append(create_hash_table_sql(plan.project))
-        self.hash_sqls.extend(create_hmac_helpers_sql(plan.project))
-        self.hash_sqls.append(create_hash_hmac_sql(plan.project))
-        if plan.hash_key is not None:
-            sql = bind_hash_key_sql(plan.project)
-            self.hash_sqls.append(sql)
-            self.hash_params.append(plan.hash_key.derived)
-            if plan.hash_key.derived.hex() in "\n".join(self.hash_sqls):
-                raise GrantError("hash key leaked into SQL text")
-        if uses_hash_mask(plan) and self.missing_hash_objects:
+        if not uses_hash_mask(plan):
+            return
+        check_hash_dataset_access(self.hash_access, plan.project)
+        if self.table_iam:
+            raise GrantError("BigQuery hash-master table has table-level IAM")
+        if self.routine_iam:
+            raise GrantError("BigQuery hash_hmac routine has routine-level IAM")
+        if self.missing_hash_objects:
             raise GrantError("BigQuery hash_hmac routine is unavailable")
-        entry = {"routine": hash_routine_entry(plan.project)}
-        if entry not in self.views_access:
-            self.views_access.append(dict(entry))
-        if entry not in self.state_access:
-            self.state_access.append(dict(entry))
+        if self.hash_duplicate:
+            raise GrantError("BigQuery hash-master has duplicate rows")
+        if self.hash_mismatch:
+            raise GrantError("BigQuery hash-master key does not match; rotate explicitly")
 
     def insert_issuing(self, plan: GrantPlan) -> None:
         self._step("insert_issuing")

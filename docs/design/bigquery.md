@@ -211,7 +211,7 @@ If the view drop fails and the view still exists, exit 4 (`revoke_failed`) even 
 
 **Expiry.** IAM condition `request.time < expires_at` is a **backstop** (new API calls deny after that instant). It does not drop the view, does not cancel jobs, and does not write a receipt. **Sub-condition expiry is not enough.** Run `datagrant sweep --apply` every 1 minute (`* * * * *`). Worst case if sweep is missed: the view remains until the next successful sweep; the IAM condition should already deny new queries after `expires_at`. If IAM propagation lags, the missing view after sweep is the close. In-flight jobs started before expiry can finish; cancel is best-effort.
 
-**Catalog.** Column types come from `INFORMATION_SCHEMA.COLUMNS` at `--apply` (parameterized project/dataset/table). Dry run may skip inspect and emit untyped `NULL` the way Snowflake dry-run does.
+**Catalog.** Column types come from `INFORMATION_SCHEMA.COLUMNS` at `--apply` (parameterized project/dataset/table, case-insensitive column matching). Dry run may skip inspect and emit untyped `NULL` the way Snowflake dry-run does. `null` is `CAST(NULL AS <type>)` when a catalog is present.
 
 **Masks (BigQuery SQL, same names):**
 
@@ -258,9 +258,13 @@ Unit test (construction PR 3): stub get returns etag `W/"1"`; first update retur
 
 The local hash key file stays as today. It must **not** appear in view SQL. BigQuery keeps view DDL and job history.
 
-**Default:** a **restricted table** (`datagrant._hash_master`) in an operator-only dataset, filled with a **query parameter** (never a SQL literal), plus an **authorized SQL UDF** (`datagrant.hash_hmac(hash_scope, value)`) that reads the table and derives the per-scope HMAC key (same idea as Postgres and Snowflake). Grant views in `datagrant_views` call the UDF. Authorize that routine (or the UDF dataset) on the hash-master dataset. That authorization is an unconditional ACL entry; authorized routines cannot carry IAM Conditions ([IAM conditions, limitations](https://cloud.google.com/bigquery/docs/conditions)).
+**Default:** a **restricted table** (`datagrant._hash_master`) in an operator-only dataset, plus an **authorized SQL UDF** (`datagrant.hash_hmac(hash_scope, value)`) that reads the table and derives the per-scope HMAC key (same idea as Postgres and Snowflake). Provision once with `datagrant setup bigquery --apply`. That command inserts the master row only if none exists. A load job (`load_table_from_file`, `WRITE_TRUNCATE`, in-memory NDJSON) writes the key; it is never a query parameter (query jobs copy parameters into job metadata). If a row already exists, setup compares `TO_HEX(SHA256(key)) = @fp` (sending only the hash) and refuses a mismatch with `rotate explicitly`. Rotation is `datagrant setup bigquery --rotate-hash-key --apply` and changes every BigQuery pseudonym.
 
-When the grant uses the `hash` mask, apply does `routines.get` for `datagrant.hash_hmac` and checks that `_hash_master` exists **before** `insert_issuing`, and fails closed if either is missing. The authorized-routine ACL is not part of that check. If that ACL is missing, the grant can still become `active`, but the view is unusable (the owner cannot invoke the UDF against `_hash_master`).
+Before any table create or key write, setup reads the `datagrant` dataset access list and refuses it unless it is operator-only: no `READER` entry, no `projectReaders`, no `allAuthenticatedUsers`, no `allUsers`, no domain entry, no dataset or view authorization, and no routine other than `datagrant.hash_hmac`. OWNER and WRITER are allowed for `projectOwners`, `projectWriters`, and explicit operator principals. Table-level IAM on `_hash_master` and routine-level IAM on `hash_hmac` are refused. Default BigQuery datasets include `projectReaders` READER; remove that before setup. Project-level BigQuery data roles (`roles/bigquery.dataViewer`, `dataEditor`, `dataOwner`, and project IAM that grants those) are **key-equivalent**: anyone with them can read `_hash_master` or call `hash_hmac` as an oracle. Put hash-master in a **dedicated hash project** whose IAM does not include project readers or broad data roles.
+
+Grant views in `datagrant_views` call the UDF. Authorize that routine on the hash-master dataset and on `datagrant_views` during setup. That authorization is an unconditional ACL entry; authorized routines cannot carry IAM Conditions ([IAM conditions, limitations](https://cloud.google.com/bigquery/docs/conditions)).
+
+When the grant uses the `hash` mask, `--apply` does a **read-only** preflight before `insert_issuing`: the same dataset ACL check, `routines.get` for `datagrant.hash_hmac`, exactly one master row whose fingerprint matches the local key, and no table/routine IAM. No DDL and no key write per grant. Passthrough-only grants skip that preflight. If the authorized-routine ACL is missing, the grant can still become `active`, but the view is unusable (the owner cannot invoke the UDF against `_hash_master`).
 
 The grantee role does **not** include IAM on the UDF dataset or the master table. Google: after you authorize a routine, users can invoke it without access to the underlying tables ([authorized routines](https://cloud.google.com/bigquery/docs/authorized-routines)). For a view that calls the UDF, the view owner runs the routine; the grantee only needs `getData` on that view.
 
@@ -289,7 +293,8 @@ Hashes are not designed to be joinable with Postgres or Snowflake (different HMA
 - **Authorized view / dataset / routine to source.** Those ACL entries are unconditional ([IAM conditions](https://cloud.google.com/bigquery/docs/conditions)). Isolation is the IAM `resource.name` on the grantee bind, not the source ACL. The view owner (operator) can always read source columns used in the view. Least-privilege the operator SA. Any view the operator puts in `datagrant_views` can read an authorized source; only the operator can create those views.
 - **Principal mapping.** `--google-principal` cannot override identity. A mismatched flag is exit 2. OIDC `email` must be the Google account that will run jobs. Local-mode identity is self-asserted.
 - **Hashes are not designed to be joinable** with Postgres or Snowflake.
-- **Missing hash routine ACL.** `routines.get` / `_hash_master` existence is fail-closed for a `hash` mask. A missing authorized-routine ACL is not: the grant can be `active` and the view unusable.
+- **Missing hash routine ACL.** A `hash` grant fails closed on an open `datagrant` dataset ACL, missing `hash_hmac` / `_hash_master`, a fingerprint mismatch, duplicate master rows, or table/routine IAM. A missing authorized-routine ACL is not: the grant can be `active` and the view unusable.
+- **Project-level data roles are key-equivalent.** `roles/bigquery.dataViewer` (and stronger) on the hash project can read `_hash_master` or invoke `hash_hmac`. Use a dedicated hash project and keep the `datagrant` dataset operator-only.
 - **No BigQuery in CI.** A missing `DATAGRANT_TEST_BIGQUERY` skips live tests. Recorded RPC still runs.
 - **`make demo` stays Postgres.** Operators try BigQuery against a throwaway project they already have, after `policy check`.
 - **ADC holders and GCP project owners are trusted.** Same as today's DSN holders.
@@ -320,7 +325,8 @@ Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-
 - **`issuing` / `enabling` grace is 10 minutes.** Same crash window as Snowflake. This is not a GCP lock.
 - **Local-mode identity is self-asserted.** `--as-user alice` is not an IAM member and is not authentication. A free-form `--google-principal` is `user:` only, and only when there is no mapping.
 - **Operator `projects.setIamPolicy` on the grant project can grant anything there.** Dedicated grant project only.
-- **Missing authorized-routine ACL.** A `hash` grant fails closed only when `hash_hmac` or `_hash_master` is missing. If the routine ACL is missing, the grant can still be `active` and the view unusable.
+- **Missing authorized-routine ACL.** A `hash` grant fails closed on ACL, object, fingerprint, and IAM checks. If the routine ACL is missing, the grant can still be `active` and the view unusable.
+- **Project-level BigQuery data roles are key-equivalent.** Dedicated hash project; no `projectReaders` on `datagrant`.
 
 ## Compatibility with v0.6.0
 

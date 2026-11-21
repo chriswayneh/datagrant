@@ -443,3 +443,45 @@ def test_hash_routine_acl_does_not_grant_grantee_datagrant_access(plan: GrantPla
     assert all("userByEmail" not in entry for entry in state_access)
     assert all("groupByEmail" not in entry for entry in state_access)
     assert all("iamMember" not in entry for entry in state_access)
+
+
+TABLE_IAM_URL = f"{TABLE_URL}:getIamPolicy"
+ROUTINE_IAM_URL = f"{ROUTINE_URL}:getIamPolicy"
+OPERATOR_ACCESS = [
+    {"role": "OWNER", "specialGroup": "projectOwners"},
+    {"role": "WRITER", "specialGroup": "projectWriters"},
+]
+
+
+def test_hash_acl_refuses_project_readers() -> None:
+    session = Session(
+        source([*OPERATOR_ACCESS, {"role": "READER", "specialGroup": "projectReaders"}])
+    )
+    with pytest.raises(GrantError, match="operator-only"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_dataset_locked(PROJECT)
+    assert session.calls[0][1] == STATE_URL
+    assert session.calls[0][0] == "GET"
+
+
+def test_hash_acl_accepts_operator_only() -> None:
+    session = Session(source(OPERATOR_ACCESS))
+    DatasetAccessClient(session, grant_project=PROJECT).require_hash_dataset_locked(PROJECT)
+
+
+def test_hash_object_iam_is_refused() -> None:
+    session = Session(
+        Response(
+            body={"bindings": [{"role": "roles/bigquery.dataViewer", "members": ["projectViewer"]}]}
+        ),
+        Response(body={"bindings": []}),
+    )
+    with pytest.raises(GrantError, match="table-level IAM"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_object_iam_absent(PROJECT)
+    assert session.calls[0][0] == "POST"
+    assert session.calls[0][1] == TABLE_IAM_URL
+
+
+def test_hash_object_iam_absent_when_404() -> None:
+    session = Session(Response(status_code=404, body={}), Response(status_code=404, body={}))
+    DatasetAccessClient(session, grant_project=PROJECT).require_hash_object_iam_absent(PROJECT)
+    assert [url for _, url, _ in session.calls] == [TABLE_IAM_URL, ROUTINE_IAM_URL]

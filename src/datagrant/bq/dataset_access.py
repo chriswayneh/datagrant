@@ -24,6 +24,15 @@ from datagrant.bq.grant import (
 from datagrant.bq.rest import TIMEOUT, Response, Session
 
 _ROOT = "https://bigquery.googleapis.com/bigquery/v2/projects"
+_ALLOWED_ROLES = frozenset(
+    {"OWNER", "WRITER", "roles/bigquery.dataOwner", "roles/bigquery.dataEditor"}
+)
+_ALLOWED_SPECIAL = frozenset({"projectOwners", "projectWriters"})
+_REFUSED_SPECIAL = frozenset({"projectReaders", "allAuthenticatedUsers"})
+_REFUSED_MEMBERS = frozenset({"allUsers", "allAuthenticatedUsers"})
+_IDENTITY_KEYS = frozenset({"specialGroup", "userByEmail", "groupByEmail", "iamMember"})
+_ACL_KEYS = _IDENTITY_KEYS | {"role", "condition"}
+_ROUTINE_KEYS = frozenset({"routine"})
 
 
 @dataclass
@@ -66,6 +75,69 @@ def _managed_member(entry: dict[str, Any], role: str) -> str | None:
         return _parse_principal(raw)
     except GrantError:
         return None
+
+
+def _hash_acl_refused() -> GrantError:
+    return GrantError("datagrant dataset access list is not operator-only")
+
+
+def check_hash_dataset_access(access: list[dict[str, Any]], project: str) -> None:
+    """Refuse readers, special groups, domains, and extra authorizations.
+
+    Allow OWNER/WRITER for projectOwners, projectWriters, and explicit
+    operator principals, plus an authorized ``datagrant.hash_hmac`` routine.
+    """
+    q_project(project)
+    from datagrant.bq.hash import HASH_UDF, hash_routine_entry
+
+    expected = hash_routine_entry(project)
+    for entry in access:
+        if not isinstance(entry, dict):
+            raise _hash_acl_refused()
+        keys = frozenset(entry)
+        if "dataset" in keys or "view" in keys or "domain" in keys:
+            raise _hash_acl_refused()
+        if "routine" in keys:
+            if keys - _ROUTINE_KEYS:
+                raise _hash_acl_refused()
+            routine = entry.get("routine")
+            if not isinstance(routine, dict) or routine != expected:
+                raise _hash_acl_refused()
+            if routine.get("routineId") != HASH_UDF:
+                raise _hash_acl_refused()
+            continue
+        if keys - _ACL_KEYS:
+            raise _hash_acl_refused()
+        role = entry.get("role")
+        if not isinstance(role, str) or role not in _ALLOWED_ROLES:
+            raise _hash_acl_refused()
+        identities = [name for name in _IDENTITY_KEYS if name in entry]
+        if len(identities) != 1:
+            raise _hash_acl_refused()
+        kind = identities[0]
+        value = entry.get(kind)
+        if not isinstance(value, str) or not value:
+            raise _hash_acl_refused()
+        if kind == "specialGroup":
+            if value in _REFUSED_SPECIAL or value not in _ALLOWED_SPECIAL:
+                raise _hash_acl_refused()
+            continue
+        if kind == "iamMember":
+            lowered = value.casefold()
+            if lowered in _REFUSED_MEMBERS or lowered.startswith("domain:"):
+                raise _hash_acl_refused()
+            raw = value
+        elif kind == "groupByEmail":
+            raw = f"group:{value}"
+        else:
+            prefix = "serviceAccount" if value.lower().endswith(".gserviceaccount.com") else "user"
+            raw = f"{prefix}:{value}"
+        try:
+            parsed = _parse_principal(raw)
+        except GrantError:
+            raise _hash_acl_refused() from None
+        if parsed.split(":", 1)[0] not in {"user", "group", "serviceAccount"}:
+            raise _hash_acl_refused()
 
 
 def _dataset_url(project: str, dataset: str) -> str:
@@ -301,6 +373,55 @@ class DatasetAccessClient:
             raise GrantError("BigQuery hash preflight returned an invalid resource")
         return body
 
+    def require_hash_dataset_locked(self, project: str) -> None:
+        """Read the datagrant dataset ACL. Refuse an open list before any key write."""
+        if self._grant_project is not None and project != self._grant_project:
+            raise GrantError("hash ACL check requires the configured grant project")
+        body = self._read(_dataset_url(project, STATE_DATASET))
+        check_hash_dataset_access(_access_list(body), project)
+
+    def _object_iam_bindings(self, url: str) -> list[Any] | None:
+        iam_url = f"{url}:getIamPolicy"
+        try:
+            response = self._session.request(
+                "POST",
+                iam_url,
+                json={"options": {"requestedPolicyVersion": ACCESS_POLICY_VERSION}},
+                timeout=TIMEOUT,
+                allow_redirects=False,
+            )
+        except Exception:  # noqa: BLE001 - transport errors can include URLs
+            raise GrantError("BigQuery hash IAM request failed") from None
+        if response.status_code in {404, 501}:
+            return None
+        if response.status_code != 200:
+            raise GrantError("BigQuery hash IAM request failed")
+        try:
+            body = response.json()
+        except ValueError:
+            raise GrantError("BigQuery hash IAM request failed") from None
+        if not isinstance(body, dict):
+            raise GrantError("BigQuery hash IAM request failed")
+        bindings = body.get("bindings")
+        if bindings is None:
+            return []
+        if not isinstance(bindings, list):
+            raise GrantError("BigQuery hash IAM request failed")
+        return bindings
+
+    def require_hash_object_iam_absent(self, project: str) -> None:
+        """Refuse table IAM on _hash_master or routine IAM on hash_hmac."""
+        from datagrant.bq.hash import HASH_TABLE, HASH_UDF
+
+        if self._grant_project is not None and project != self._grant_project:
+            raise GrantError("hash IAM check requires the configured grant project")
+        table_bindings = self._object_iam_bindings(_table_url(project, STATE_DATASET, HASH_TABLE))
+        if table_bindings:
+            raise GrantError("BigQuery hash-master table has table-level IAM")
+        routine_bindings = self._object_iam_bindings(_routine_url(project, STATE_DATASET, HASH_UDF))
+        if routine_bindings:
+            raise GrantError("BigQuery hash_hmac routine has routine-level IAM")
+
     def require_hash_objects(self, project: str) -> None:
         """routines.get hash_hmac and tables.get _hash_master. Fail closed if missing.
 
@@ -320,7 +441,13 @@ class DatasetAccessClient:
             "BigQuery hash-master table is unavailable",
         )
 
-    def authorize_hash_routine_if_missing(self, plan: GrantPlan) -> bool:
+    def authorize_hash_routine_if_missing(
+        self,
+        plan: GrantPlan | None = None,
+        *,
+        project: str | None = None,
+        location: str | None = None,
+    ) -> bool:
         """Authorize hash_hmac on datagrant_views. Do not grant the grantee datagrant access.
 
         Also authorize the routine on the hash-master dataset so the UDF can
@@ -328,11 +455,16 @@ class DatasetAccessClient:
         """
         from datagrant.bq.hash import hash_routine_entry
 
-        if self._grant_project is not None and plan.project != self._grant_project:
+        if plan is not None:
+            project = plan.project
+            location = plan.location
+        if project is None:
+            raise GrantError("hash routine authorization requires a grant project")
+        if self._grant_project is not None and project != self._grant_project:
             raise GrantError("hash routine authorization requires the configured grant project")
-        entry = hash_routine_entry(plan.project)
-        views_url = _dataset_url(plan.project, VIEW_DATASET)
-        state_url = _dataset_url(plan.project, STATE_DATASET)
+        entry = hash_routine_entry(project)
+        views_url = _dataset_url(project, VIEW_DATASET)
+        state_url = _dataset_url(project, STATE_DATASET)
         views_location = self._read(views_url, metadata_only=True).get("location")
         state = self._read(state_url, metadata_only=True)
         state_location = state.get("location")
@@ -341,9 +473,9 @@ class DatasetAccessClient:
             or not views_location
             or not isinstance(state_location, str)
             or views_location.casefold() != state_location.casefold()
-            or (plan.location is not None and views_location.casefold() != plan.location.casefold())
+            or (location is not None and views_location.casefold() != location.casefold())
         ):
             raise GrantError("BigQuery hash-master, views, and requested locations must match")
-        added_views = self._authorize_routine(plan.project, VIEW_DATASET, entry)
-        added_state = self._authorize_routine(plan.project, STATE_DATASET, entry)
+        added_views = self._authorize_routine(project, VIEW_DATASET, entry)
+        added_state = self._authorize_routine(project, STATE_DATASET, entry)
         return added_views or added_state

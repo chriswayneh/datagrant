@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_bq_dataset_access import AUTHORIZATION, Response, Session, source
+from test_bq_dataset_access import AUTHORIZATION, OPERATOR_ACCESS, Response, Session, source
 from test_bq_grant import GID, KEY, NOW, PRINCIPAL, PROJECT, _sink, dec, req
 from test_bq_state import SDK, Client
 
@@ -18,6 +18,8 @@ from datagrant.bq.revoke import RevokeClient, revoke
 class QueryClient(Client):
     def query(self, sql: str, **kwargs: Any) -> "QueryClient":
         kwargs.setdefault("job_config", {})
+        if "COUNTIF" in sql:
+            self.rows = [{"n": 1, "matched": 1}]
         super().query(sql, **kwargs)
         return self
 
@@ -40,14 +42,11 @@ def test_issue_and_revoke_through_assembled_client(tmp_path: Path) -> None:
         "condition": binding["condition"],
     }
     session = Session(
+        source(OPERATOR_ACCESS),
         Response(body={"routineReference": {"routineId": "hash_hmac"}}),
         Response(body={"tableReference": {"tableId": "_hash_master"}}),
-        Response(body={"location": "US"}),
-        Response(body={"location": "US"}),
-        source([]),
-        Response(),
-        source([]),
-        Response(),
+        Response(status_code=404, body={}),
+        Response(status_code=404, body={}),
         Response(body={"location": "US"}),
         source([AUTHORIZATION]),
         source([]),
@@ -67,32 +66,36 @@ def test_issue_and_revoke_through_assembled_client(tmp_path: Path) -> None:
     apply_plan(client, plan, sink)
     hex_key = KEY.derived.hex()
     sqls = [sql for sql, _ in sdk.calls]
-    assert any("CREATE TABLE IF NOT EXISTS" in sql and "_hash_master" in sql for sql in sqls)
-    assert any("CREATE OR REPLACE FUNCTION" in sql and "hash_hmac" in sql for sql in sqls)
-    merge = next(sql for sql in sqls if sql.startswith("MERGE "))
-    assert "@key" in merge and hex_key not in merge
+    assert not any("CREATE TABLE IF NOT EXISTS" in sql for sql in sqls)
+    assert not any(sql.startswith("MERGE ") for sql in sqls)
+    assert not any("@key" in sql for sql in sqls)
     assert hex_key not in "\n".join(sqls)
+    assert sdk.loads == []
+    fp = next(sql for sql in sqls if "COUNTIF" in sql)
+    assert "@fp" in fp
     insert = next(i for i, sql in enumerate(sqls) if "INSERT INTO" in sql)
     view = next(i for i, sql in enumerate(sqls) if sql.startswith("CREATE VIEW "))
     assert insert < view
-    merge_params = next(cfg for sql, cfg in sdk.calls if sql.startswith("MERGE "))
-    assert merge_params["key"] == ("BYTES", KEY.derived)
+    fp_params = next(cfg for sql, cfg in sdk.calls if "COUNTIF" in sql)
+    assert list(fp_params) == ["fp"]
+    assert fp_params["fp"][0] == "STRING"
+    assert hex_key not in str(fp_params)
     assert sdk.calls[-1][1]["target"] == ("STRING", "active")
-    assert len(session.calls) == 14
+    assert len(session.calls) == 11
     assert session.calls[0][0:2] == (
         "GET",
-        f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/datasets/datagrant/routines/hash_hmac",
+        f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/datasets/datagrant",
     )
     assert session.calls[1][0:2] == (
         "GET",
+        f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/datasets/datagrant/routines/hash_hmac",
+    )
+    assert session.calls[2][0:2] == (
+        "GET",
         f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/datasets/datagrant/tables/_hash_master",
     )
-    routine = {"projectId": PROJECT, "datasetId": "datagrant", "routineId": "hash_hmac"}
-    views_acl = session.calls[5][2]["json"]["access"]
-    state_acl = session.calls[7][2]["json"]["access"]
-    assert views_acl == [{"routine": routine}]
-    assert state_acl == [{"routine": routine}]
-    assert PRINCIPAL not in repr(state_acl)
+    assert session.calls[3][0] == "POST"
+    assert session.calls[4][0] == "POST"
 
     insert_params = next(cfg for sql, cfg in sdk.calls if "INSERT INTO" in sql)
     row = {name: value for name, (_, value) in insert_params.items()}

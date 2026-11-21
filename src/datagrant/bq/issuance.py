@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from datagrant.bq.grant import GrantClient, GrantError, GrantPlan, apply_plan, build_plan
 from datagrant.bq.revoke import GrantRecord
@@ -35,6 +35,7 @@ def issue_approved(
     now: datetime,
     hash_key: HashKey | None = None,
     max_concurrent: int | None = None,
+    catalog: Any | None = None,
 ) -> GrantPlan:
     """Consume a freshly won claim. On ambiguity, leave it for reconciliation."""
     approval = claim.approval
@@ -62,6 +63,7 @@ def issue_approved(
         requester_identity=pending.facts.identity,
         approver_identities=tuple(vote.identity.approver_receipt_dict() for vote in approval.votes),
         hash_key=hash_key,
+        catalog=catalog,
     )
     plan = replace(plan, request_id=claim.request_id)
     apply_plan(client, plan, receipts, max_concurrent=max_concurrent)
