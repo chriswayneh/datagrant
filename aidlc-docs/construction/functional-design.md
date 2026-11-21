@@ -127,3 +127,15 @@ Implemented (PRs #47 to #53). v0.6.0 released 2026-11-14. Optional dataset `engi
 ## M5 / BigQuery: revoke and sweep (PR 4, mocked)
 
 `src/datagrant/bq/revoke.py` supplies grant revoke/sweep/list/status and pending-request expiry behind a store/client protocol. Drop view first, remove only the grant's IAM bindings using existing etag-aware helpers, then cancel jobs best-effort. Conditional row revisions and expiring ownership prevent overlapping sweep workers from changing another worker's final state. Failed cleanup is retryable; cleaned failed issuance is marked complete. Pending expiry never invokes cloud DDL. The live adapter, CLI wiring, approval eligibility/quorum, and mask/catalog provisioning remain subsequent M5 tasks. BigQuery `--apply` remains disabled. See the PR 4 state contract in `docs/design/bigquery.md`.
+
+## M5 / BigQuery: source dataset authorization (PR 5 groundwork)
+
+`src/datagrant/bq/dataset_access.py` takes an operator session and authorizes the shared views dataset on the source. It verifies location compatibility, requires a complete source ACL, and appends just the views dataset entry with an etag precondition. The planner uses separate source and grant project IDs for source SQL and grant resources. Grant dataset writers must be restricted to the operator. The session factory, IAM and state operations, and CLI approval flow remain to be wired. No BigQuery CLI apply path is enabled by this unit.
+
+`src/datagrant/bq/project_iam.py` provides versioned Resource Manager reads and writes for grant project bindings. A bindings-only update mask with the etag leaves audit configuration untouched. `DatasetAccessClient` now also edits conditional grantee bindings for the configured grant project's views dataset and preserves other ACL entries. Both transports use the existing engine's fresh-read conflict retry. `ViewClient` creates expiring views without replacing existing objects and drops only the view matching the configured project and grant ID.
+
+`GrantStore` adds BigQuery grant reservation, reads, and conditional issuance/revoke transitions against the state table. `RequestStore` persists pending requests separately and claims final approval or expiry using state and TTL predicates. `BigQueryGrantClient` composes state, DDL, and IAM using one ADC identity. Recovery of interrupted approvals, grant-specific job cancellation, and CLI approval wiring remain pending.
+
+`evaluate_approval` rechecks the request under current policy, tests eligible identities and separation of duties, and counts distinct current-policy votes. `RequestStore.record_vote` persists votes against that snapshot's revision and returns an owned claim only after the quorum and grant ID are committed together.
+
+`issue_approved` uses a freshly won claim to build and apply the linked grant. `reconcile_approval` only settles request state from an active or cleaned-up failed linked grant. It does not replay access changes or guess at ambiguous outcomes.
