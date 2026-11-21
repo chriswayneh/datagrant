@@ -193,6 +193,15 @@ def _parse_principal(raw: str) -> str:
     return prefix + rest
 
 
+def _canonical_member(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        return _parse_principal(raw)
+    except GrantError:
+        return None
+
+
 def _col_expr(col: str, mask: str, hash_scope: str, *, project: str) -> str:
     ident = q(col)
     src = _src_col(col)
@@ -510,7 +519,7 @@ def _ours(existing: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
 
 def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
     title = _binding_title(binding)
-    principal = binding["members"][0]
+    principal = _parse_principal(binding["members"][0])
     for existing in policy.bindings:
         if _binding_title(existing) != title:
             continue
@@ -519,17 +528,19 @@ def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
         members = existing.get("members")
         if not isinstance(members, list):
             raise GrantError(f"IAM condition title {title} already in use")
-        if principal in members:
+        if any(_canonical_member(member) == principal for member in members):
             return False
         members.append(principal)
         return True
-    policy.bindings.append(binding)
+    added = dict(binding)
+    added["members"] = [principal]
+    policy.bindings.append(added)
     return True
 
 
 def _remove_grant_bindings(policy: IamPolicy, expected: Mapping[str, Any]) -> bool:
     """Remove plan.principal from the matching binding; drop it if empty."""
-    principal = expected["members"][0]
+    principal = _parse_principal(expected["members"][0])
     title = _binding_title(expected)
     changed = False
     keep: list[dict[str, Any]] = []
@@ -538,11 +549,14 @@ def _remove_grant_bindings(policy: IamPolicy, expected: Mapping[str, Any]) -> bo
             keep.append(existing)
             continue
         members = existing.get("members")
-        if not isinstance(members, list) or principal not in members:
+        if not isinstance(members, list):
+            keep.append(existing)
+            continue
+        remaining = [member for member in members if _canonical_member(member) != principal]
+        if len(remaining) == len(members):
             keep.append(existing)
             continue
         changed = True
-        remaining = [m for m in members if m != principal]
         if remaining:
             updated = dict(existing)
             updated["members"] = remaining

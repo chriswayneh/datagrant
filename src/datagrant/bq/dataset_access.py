@@ -52,17 +52,20 @@ def _etag(body: dict[str, Any]) -> str:
 def _managed_member(entry: dict[str, Any], role: str) -> str | None:
     if entry.get("role") != role or not isinstance(entry.get("condition"), dict):
         return None
+    raw: str | None = None
     if isinstance(email := entry.get("userByEmail"), str):
         prefix = "serviceAccount" if email.lower().endswith(".gserviceaccount.com") else "user"
-        return f"{prefix}:{email}"
-    if isinstance(email := entry.get("groupByEmail"), str):
-        return f"group:{email}"
-    if isinstance(member := entry.get("iamMember"), str):
-        try:
-            return _parse_principal(member)
-        except GrantError:
-            return None
-    return None
+        raw = f"{prefix}:{email}"
+    elif isinstance(email := entry.get("groupByEmail"), str):
+        raw = f"group:{email}"
+    elif isinstance(member := entry.get("iamMember"), str):
+        raw = member
+    if raw is None:
+        return None
+    try:
+        return _parse_principal(raw)
+    except GrantError:
+        return None
 
 
 def _dataset_url(project: str, dataset: str) -> str:

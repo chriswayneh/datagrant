@@ -939,6 +939,23 @@ def test_principal_allowlist() -> None:
             )
 
 
+def test_mixed_case_iam_members_bind_and_unbind() -> None:
+    plan = _plan()
+    client = FakeClient()
+    mixed_ds = dict(dataset_binding(plan))
+    mixed_ds["members"] = ["user:Alice@Example.com"]
+    mixed_job = dict(job_user_binding(plan))
+    mixed_job["members"] = ["user:Alice@Example.com"]
+    client.dataset_policy = IamPolicy(etag='W/"1"', bindings=[mixed_ds])
+    client.project_policy = IamPolicy(etag='W/"1"', bindings=[mixed_job])
+    apply_unbind(client, plan)
+    assert client.dataset_policy.bindings == []
+    assert client.project_policy.bindings == []
+    apply_bind(client, plan)
+    assert client.dataset_policy.bindings[0]["members"] == [plan.principal]
+    assert client.project_policy.bindings[0]["members"] == [plan.principal]
+
+
 def test_unbind_iam_on_bind_attempt(tmp_path: Path) -> None:
     sink = _sink(tmp_path)
     lost = FakeClient(active_rowcount=0)

@@ -264,3 +264,30 @@ def test_dataset_iam_refuses_unconditional_edits_and_wrong_target() -> None:
     with pytest.raises(GrantError, match="conditional grant role"):
         client.set_dataset_iam(PROJECT, "datagrant_views", policy, access_policy_version=3)
     assert [method for method, _, _ in session.calls] == ["GET"]
+
+
+def test_mixed_case_conditional_grantee_bind_and_unbind(plan: GrantPlan) -> None:
+    binding = dataset_binding(plan)
+    mixed = {
+        "role": binding["role"],
+        "userByEmail": "Alice@Example.com",
+        "condition": binding["condition"],
+    }
+    kept = [*EXISTING, AUTHORIZATION]
+    session = Session(
+        source([*kept, mixed]),
+        Response(),
+        source([*kept, mixed]),
+        Response(),
+    )
+    client = IamClient(session)
+    apply_unbind(client, plan)
+    assert session.calls[1][2]["json"] == {"access": kept}
+    apply_bind(client, plan)
+    emails = [
+        entry.get("userByEmail")
+        for entry in session.calls[-1][2]["json"]["access"]
+        if entry.get("condition") == binding["condition"]
+    ]
+    assert len(emails) == 1
+    assert emails[0].lower() == "alice@example.com"
