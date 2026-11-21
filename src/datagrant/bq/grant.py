@@ -4,7 +4,6 @@ Order: issuing row, view in shared datagrant_views, authorize dataset only if
 missing, names-row update, issued receipt, enabling, IAM last, active.
 IAM bind JSON: dataset resource.name of G_<id>, per-grant jobUser title G_<id>,
 accessPolicyVersion=3, etag 409 retry. Reverse-drop unbinds this grant only.
-CLI --apply stays refused.
 """
 
 from __future__ import annotations
@@ -190,7 +189,9 @@ def _email_ok(rest: str) -> bool:
     return True
 
 
-def _parse_principal(raw: str) -> str:
+def _parse_principal(raw: object) -> str:
+    if not isinstance(raw, str):
+        raise GrantError("google principal is required")
     principal = raw.strip()
     if not principal:
         raise GrantError("google principal is required")
@@ -227,6 +228,8 @@ def resolve_google_principal(
     is allowed only in local mode with no mapping, and only as ``user:``.
     ``group:`` and ``serviceAccount:`` must come from the policy mapping.
     """
+    if identity_mode not in {"local", "oidc"}:
+        raise GrantError(f"unsupported identity mode {identity_mode!r}")
     bound: str | None = None
     if mapped is not None and str(mapped).strip():
         bound = _parse_principal(mapped)

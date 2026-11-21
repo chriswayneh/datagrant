@@ -13,7 +13,6 @@ import pytest
 
 from datagrant import cli
 from datagrant.bigquery_support import (
-    ADC_CHECKING_MSG,
     BIGQUERY_CREDENTIALS_ENV,
     BIGQUERY_DSN_ENV,
     BIGQUERY_PROJECT_ENV,
@@ -170,7 +169,7 @@ def _patch_bq_client(
     inserted: list | None = None,
 ) -> None:
     @contextmanager
-    def fake(_args: Any) -> Any:
+    def fake(_args: Any, **_kw: Any) -> Any:
         with _fake_bq_client(snapshot=snapshot, live=live, inserted=inserted) as client:
             yield client
 
@@ -421,20 +420,6 @@ def test_bigquery_apply_credentials_env_refused(
     assert "CRED-CANARY-not-a-dsn" not in err
 
 
-def test_bigquery_apply_ready_is_not_implemented(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr("datagrant.bigquery_support.driver_present", lambda: True)
-    monkeypatch.setattr("datagrant.bigquery_support.adc_available", lambda: True)
-    monkeypatch.setenv(BIGQUERY_PROJECT_ENV, "clinic-proj")
-    _patch_bq_client(monkeypatch)
-    path = _policy(tmp_path)
-    code = cli.main([*BQ_REQ, "--policy", str(path), "--apply"])
-    assert code == EXIT_USAGE
-    err = capsys.readouterr().err
-    assert "not implemented" in err
-
-
 def test_bigquery_apply_refuses_adc_service_account_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -484,53 +469,6 @@ def test_bigquery_apply_refuses_adc_service_account_json(
     err = capsys.readouterr().err
     assert JSON_KEY_ADC_MSG in err
     assert "CANARY-SA-KEY" not in err
-
-
-def test_bigquery_apply_prints_adc_checking(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    class _User:
-        pass
-
-    class _SAMod:
-        class Credentials:
-            pass
-
-    class _Auth:
-        @staticmethod
-        def default(request: Any = None) -> tuple[object, str]:
-            return _User(), "clinic-proj"
-
-    class _Exc:
-        class GoogleAuthError(Exception):
-            pass
-
-    def load(name: str) -> Any:
-        if name == "google.auth":
-            return _Auth
-        if name == "google.auth.exceptions":
-            return _Exc
-        if name == "google.oauth2.service_account":
-            return _SAMod
-        raise ImportError(name)
-
-    monkeypatch.setattr("datagrant.bigquery_support.driver_present", lambda: True)
-    monkeypatch.setenv(BIGQUERY_PROJECT_ENV, "clinic-proj")
-    monkeypatch.delenv(BIGQUERY_DSN_ENV, raising=False)
-    monkeypatch.delenv(BIGQUERY_CREDENTIALS_ENV, raising=False)
-    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
-    monkeypatch.setattr(
-        "datagrant.bigquery_support._well_known_adc_path",
-        lambda: tmp_path / "missing-adc.json",
-    )
-    _patch_bq_client(monkeypatch)
-    monkeypatch.setattr("datagrant.bigquery_support.importlib.import_module", load)
-    path = _policy(tmp_path)
-    code = cli.main([*BQ_REQ, "--policy", str(path), "--apply"])
-    assert code == EXIT_USAGE
-    err = capsys.readouterr().err
-    assert ADC_CHECKING_MSG in err
-    assert "not implemented" in err
 
 
 def test_bigquery_request_canonicalizes_three_part_table(

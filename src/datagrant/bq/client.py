@@ -1,4 +1,4 @@
-"""Compose BigQuery grant operations without exposing a CLI apply path."""
+"""Compose BigQuery grant operations for CLI --apply, revoke, and sweep."""
 
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ class BigQueryGrantClient:
         self.claim_enabling = grants.claim_enabling
         self.claim_active = grants.claim_active
         self.mark_failed = grants.mark_failed
+        self._grants = grants
         self.get_grant = grants.get_grant
         self.list_grants = grants.list_grants
         self.claim_revoke = grants.claim_revoke
@@ -56,6 +57,10 @@ class BigQueryGrantClient:
         self.list_due_requests = self.requests.list_due_requests
         self.claim_expired_request = self.requests.claim_expired_request
         self.count_live_grants = grants.count_live_grants
+
+    @property
+    def invalid_grant_results(self) -> list:
+        return list(getattr(self._grants, "invalid_grant_results", ()))
 
     def bind_iam(self, plan: GrantPlan) -> None:
         apply_bind(self, plan)
