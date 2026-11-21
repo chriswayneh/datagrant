@@ -116,3 +116,5 @@ Append-only. Never edit past entries. Format: date (UTC), stage, actor, action, 
 ## 2026-11-20 11:06 PM CT: Roadmap through 1.0 approved
 
 Maintainer (Chris) approved the alpha, beta and 1.0 roadmap, including a v0.8.0 PCI pack, in chat: "Yes, post the roadmap as outlined". Docs only; ROADMAP.md and roadmap/README.md updated.
+
+| 2026-11-21 CT | Construction | Codex | Verified the published v0.7.0 tag and updated the release status in the README, roadmap, release notes, and AI-DLC state. BigQuery mock and CI coverage is documented; live GCP acceptance was not run. | **documentation refresh** |

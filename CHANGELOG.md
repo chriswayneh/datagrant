@@ -6,7 +6,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [0.7.0] - 2026-11-21
 
-BigQuery warehouse support.
+[Released on GitHub](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0). BigQuery warehouse support was tested in CI with mocks; no live GCP test was run.
 
 ### Added
 - Dataset `engine: bigquery`. `database` is the GCP project id, `schema` is the dataset id, optional `location`. Mixed postgres/snowflake/bigquery policies parse (`datagrant policy check`).

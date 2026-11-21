@@ -2,7 +2,7 @@
 
 datagrant gives people short-lived, masked, receipted access to sensitive data, with approval, and takes it away on its own. It grows in small, reviewed pull requests with tests and docs. The planning history is in [roadmap/](roadmap/) and [aidlc-docs/](aidlc-docs/).
 
-**Where we are:** alpha. The core flow works on Postgres, Snowflake, and BigQuery. v0.7.0 is shipped pending tag. The policy file and receipt format can still change before 1.0.
+**Where we are:** alpha. The core flow works on Postgres, Snowflake, and BigQuery. [v0.7.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0). The policy file and receipt format can still change before 1.0.
 
 ## At a glance
 
@@ -10,7 +10,7 @@ datagrant gives people short-lived, masked, receipted access to sensitive data, 
 | --- | --- | --- | :---: |
 | Alpha: core | v0.1.0 to v0.6.0 | Expiring, masked, receipted access on Postgres and Snowflake, real identity, two-person approval, ops hardening | ✅ Released |
 | Alpha: core | v0.6.1 | Patch: Snowflake setup fix | ✅ Released |
-| Alpha: core | v0.7.0 | BigQuery | Shipped pending tag |
+| Alpha: core | v0.7.0 | BigQuery | ✅ Released |
 | Alpha: compliance | v0.8.0 | PCI pack | Planned |
 | Beta | v0.9.0 | Ready for outside teams | Planned |
 | Stable | v1.0.0 | Stable formats and a compatibility promise | Planned |
@@ -24,7 +24,7 @@ datagrant gives people short-lived, masked, receipted access to sensitive data, 
 | Setup fix | v0.6.0 Snowflake setup called `SHA2_HMAC`, which Snowflake does not provide, so `CREATE FUNCTION HASH_HMAC` could fail. [v0.6.1](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.1) ships the Python HMAC UDF ([#61](https://github.com/chriswayneh/datagrant/pull/61)). Use v0.6.1 or later for Snowflake. |
 | Known-issue note | README and [v0.6.0 notes](docs/release-notes/v0.6.0.md) point to v0.6.1 as the fix. |
 
-### v0.7.0: BigQuery (shipped pending tag)
+### v0.7.0: BigQuery (released)
 
 The same request, mask, expire and receipt flow on Google BigQuery: a per-grant authorized view plus an expiring IAM permission on the requester's own Google login, Google default credentials only (key files refused), and revoke that fails closed. Design: [docs/design/bigquery.md](docs/design/bigquery.md). Notes: [docs/release-notes/v0.7.0.md](docs/release-notes/v0.7.0.md). Mock- and CI-tested; a live GCP test was not run.
 
@@ -136,7 +136,7 @@ No dates yet. Open an issue to discuss one.
 | --- | --- | :---: |
 | Snowflake HMAC patch | Replace the v0.6.0 `SHA2_HMAC` setup call with a secure Python 3.12 UDF. Tag `v0.6.1` on `release/0.6.x`. Notes: [docs/release-notes/v0.6.1.md](docs/release-notes/v0.6.1.md). | ✅ |
 
-### v0.7.0: shipped pending tag
+### v0.7.0: released
 
 | Item | What | Status |
 | --- | --- | :---: |
