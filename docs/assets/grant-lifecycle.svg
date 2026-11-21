@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="400" height="356" viewBox="0 0 400 356" role="img" aria-labelledby="title desc">
   <title id="title">How a datagrant grant works</title>
-  <desc id="desc">A developer requests specific columns, rows, and a duration. Policy denies, allows, or requires approval. An allowed grant opens a masked view with a temporary login. Expiry or revocation ends access. Signed receipts record grant events.</desc>
+  <desc id="desc">A developer requests specific columns, rows, and a duration. Policy denies, allows, or requires approval. An allowed grant opens a masked view with a temporary Postgres login or a Snowflake key pair. Expiry or revocation ends access. Signed receipts record grant events.</desc>
   <rect width="400" height="356" rx="12" fill="#eff5fa"/>
   <g fill="#fff" stroke="#526982" stroke-width="1.5">
     <rect x="24" y="18" width="352" height="55" rx="5"/>
@@ -21,7 +21,7 @@
     <g font-size="17">
       <text x="40" y="63">Columns, rows, and duration</text>
       <text x="40" y="141">Deny, allow, or require approval</text>
-      <text x="40" y="219">Use a temporary login</text>
+      <text x="40" y="219">Use a temporary login or key pair</text>
       <text x="40" y="297">Expire or revoke the grant</text>
       <text x="40" y="336">Signed receipts record grant events.</text>
       <text x="65" y="91">checks</text>
