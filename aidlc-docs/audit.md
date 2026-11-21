@@ -102,4 +102,11 @@ Append-only. Never edit past entries. Format: date (UTC), stage, actor, action, 
 | 2026-11-16 CT | Construction | Codex | Maintainer asked to resume after usage reset. M5 PR 4: mocked BigQuery revoke/sweep, per-grant IAM removal, best-effort cancellation, revision-owned cleanup with crash grace/retries, grant list/status helpers, and pending TTL expiry without DDL. Tests include stale lists, claim loss, receipt/store outages, two grants sharing a principal, and issuance unable to reactivate a claimed row. Existing approved M5 construction scope; live adapter/CLI apply remain disabled pending later units. | **implementation in review** |
 | 2026-11-16 CT | Construction | Codex | PR 4 focused validation: 63 BigQuery grant/revoke tests passed, including interruption recovery and stale claim/finalization protection; Ruff, mypy (27 source files), Bandit (zero findings/parse errors), and diff checks passed. Mocked store contract only; no live GCP calls or CLI enablement. | **draft candidate; full-suite/CI verification pending** |
 | 2026-11-18 CT | Construction | Codex | Maintainer requested a public README update. Documented the merged BigQuery revoke/sweep work and draft adapter without changing the release version or enabling CLI apply. | **documentation refresh** |
+
+## 2026-11-20 11:06 PM CT: Roadmap through 1.0 approved
+
+Maintainer (Chris) approved the alpha, beta and 1.0 roadmap, including a v0.8.0 PCI pack, in chat: "Yes, post the roadmap as outlined". Docs only; ROADMAP.md and roadmap/README.md updated.
+
+| Date | Stage | Actor | Action | Approval |
+| --- | --- | --- | --- | --- |
 | 2026-11-21 CT | Construction | executor (Cursor cloud agent) | v0.6.1 release-prep: package version 0.6.1, CHANGELOG Unreleased Snowflake HMAC fix moved under 0.6.1, current-version docs and release notes. Patch replaces v0.6.0 `SHA2_HMAC` with a Python 3.12 stdlib hmac UDF (#61); NULL stays NULL; key column is BINARY. Verified by CI and SQL checks only; no live Snowflake smoke test. Release pending; not tagged or published. | **in review** |

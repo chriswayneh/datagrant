@@ -1,10 +1,10 @@
 # Roadmap working guide
 
-The [roadmap overview](../ROADMAP.md) is the readable summary of what has shipped. [Task definitions](issues.yml) hold early planning (why, files, acceptance, size, dependencies). Treat `ROADMAP.md` as current; `issues.yml` is historical and does not list M4.
+The [roadmap overview](../ROADMAP.md) is the readable plan and the summary of what has shipped. [Task definitions](issues.yml) hold early planning (why, files, acceptance, size, dependencies). Treat `ROADMAP.md` as current; `issues.yml` is historical and does not list M4.
 
 **v0.6.1 is ready, release pending** (not tagged). It patches v0.6.0 Snowflake setup (`SHA2_HMAC`). Notes: [docs/release-notes/v0.6.1.md](../docs/release-notes/v0.6.1.md). The latest published release is **v0.6.0** (tag `v0.6.0`, 2026-11-14). M4 Snowflake warehouses shipped in that tag. Product README: [../README.md](../README.md).
 
-**Next after M4:** BigQuery, target v0.7.0+. M5 design approved (2026-11-14 4:51 PM CT; picks 1B through 11B): [docs/design/bigquery.md](../docs/design/bigquery.md). [Step 4](https://github.com/chriswayneh/datagrant/pull/62) merged; [step 5 of 7](https://github.com/chriswayneh/datagrant/pull/63) is in draft. BigQuery `--apply` remains disabled. Rate limits, `max_rows`, and break-glass stay out.
+**Next after v0.6.1:** BigQuery in v0.7.0, the PCI pack in v0.8.0, beta in v0.9.0 and 1.0. See the [roadmap overview](../ROADMAP.md). BigQuery `--apply` remains disabled until its last step.
 
 Update task status in `issues.yml` and the overview in the same PR as the work. Mark a version released only after the maintainer publishes it.
 
