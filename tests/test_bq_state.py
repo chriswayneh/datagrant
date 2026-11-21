@@ -43,8 +43,14 @@ class Client:
 @pytest.fixture
 def plan() -> GrantPlan:
     return build_plan(
-        dec(), req(), project=PROJECT, principal=PRINCIPAL, grant_id=GID,
-        hash_key=KEY, now=NOW, location="US",
+        dec(),
+        req(),
+        project=PROJECT,
+        principal=PRINCIPAL,
+        grant_id=GID,
+        hash_key=KEY,
+        now=NOW,
+        location="US",
     )
 
 
@@ -60,8 +66,12 @@ def test_reservation_locks_before_check_and_round_trips_cleanup_facts(plan: Gran
     assert plan.view_sql not in str(params)
     row = {name: value for name, (_, value) in params.items()}
     row.update(
-        status="issuing", started_at=NOW, revision=0,
-        cleanup_complete=False, claimed_at=None, cleanup_reason=None,
+        status="issuing",
+        started_at=NOW,
+        revision=0,
+        cleanup_complete=False,
+        claimed_at=None,
+        cleanup_reason=None,
     )
     client.rows = [row]
     stored = store.get_grant(GID)
@@ -129,9 +139,9 @@ def test_pending_round_trip_and_expiry_use_only_request_state(plan: GrantPlan) -
     insert, params = client.calls[0]
     assert "'pending', 0, '[]'" in insert
     assert PRINCIPAL not in insert and KEY.derived.hex() not in str(params)
-    client.rows = [{
-        **{name: value for name, (_, value) in params.items()}, "revision": 0, "votes_json": "[]"
-    }]
+    client.rows = [
+        {**{name: value for name, (_, value) in params.items()}, "revision": 0, "votes_json": "[]"}
+    ]
     snapshot = store.get_pending(GID)
     assert snapshot is not None
     row = snapshot.pending
@@ -152,10 +162,13 @@ def test_quorum_claim_and_expiry_use_the_evaluated_revision(
     store = RequestStore(client, SDK, PROJECT, "US")
     grant_id = "abcdef012346"
     store.insert_pending(pending, PRINCIPAL)
-    client.rows = [{
-        **{name: value for name, (_, value) in client.calls[0][1].items()},
-        "revision": 0, "votes_json": "[]",
-    }]
+    client.rows = [
+        {
+            **{name: value for name, (_, value) in client.calls[0][1].items()},
+            "revision": 0,
+            "votes_json": "[]",
+        }
+    ]
     assert store.record_vote(GID, policy, BOB, now=NOW, grant_id=grant_id) is None
     first_vote = client.calls[-1][1]
     assert first_vote["status"] == ("STRING", "pending")

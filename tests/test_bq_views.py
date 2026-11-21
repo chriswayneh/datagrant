@@ -60,12 +60,15 @@ def test_create_and_drop_wait_for_view_only_jobs(plan: GrantPlan) -> None:
     assert KEY.derived.hex() not in create
 
 
-@pytest.mark.parametrize("change", [
-    {"project": "other-proj"},
-    {"grant_id": "not-a-grant"},
-    {"view_id": f"{PROJECT}.datagrant_views.G_abcdef012346"},
-    {"view_id": f"{PROJECT}.clinic.patients"},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"project": "other-proj"},
+        {"grant_id": "not-a-grant"},
+        {"view_id": f"{PROJECT}.datagrant_views.G_abcdef012346"},
+        {"view_id": f"{PROJECT}.clinic.patients"},
+    ],
+)
 def test_foreign_or_mismatched_view_target_is_rejected_before_query(
     plan: GrantPlan, change: dict[str, Any]
 ) -> None:

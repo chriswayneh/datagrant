@@ -56,8 +56,12 @@ def test_interrupted_finalization_reconciles_without_issuing_again(
     client.requests.result = 0
     with pytest.raises(GrantError, match="finalization needs reconciliation"):
         issue_approved(
-            client, claim, project=PROJECT, dataset=policy.datasets[row.facts.dataset],
-            receipts=_sink(tmp_path), now=NOW,
+            client,
+            claim,
+            project=PROJECT,
+            dataset=policy.datasets[row.facts.dataset],
+            receipts=_sink(tmp_path),
+            now=NOW,
         )
     plan = client.plan
     assert plan is not None and plan.request_id == row.request_id and plan.principal == PRINCIPAL
@@ -85,8 +89,12 @@ def test_failed_grant_only_settles_after_cleanup(
     claim = ApprovalClaim(row.request_id, 2, "abcdef012346", snapshot, approval)
     client = Client()
     plan = issue_approved(
-        client, claim, project=PROJECT, dataset=policy.datasets[row.facts.dataset],
-        receipts=_sink(tmp_path), now=NOW,
+        client,
+        claim,
+        project=PROJECT,
+        dataset=policy.datasets[row.facts.dataset],
+        receipts=_sink(tmp_path),
+        now=NOW,
     )
     client.row = GrantRecord(plan, "failed", NOW)
     assert reconcile_approval(client, claim) == "pending"

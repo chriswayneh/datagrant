@@ -35,10 +35,12 @@ class _Store:
 
     def _query(self, sql: str, values: dict[str, tuple[str, Any]]) -> tuple[Any, Any]:
         try:
-            config = self._sdk.QueryJobConfig(query_parameters=[
-                self._sdk.ScalarQueryParameter(name, kind, value)
-                for name, (kind, value) in values.items()
-            ])
+            config = self._sdk.QueryJobConfig(
+                query_parameters=[
+                    self._sdk.ScalarQueryParameter(name, kind, value)
+                    for name, (kind, value) in values.items()
+                ]
+            )
             job = self._client.query(
                 sql,
                 job_config=config,
@@ -92,17 +94,20 @@ VALUES
    @source_dataset, @source_table, @view_id, @location, @facts_json, @request_id);
 COMMIT TRANSACTION;
 """  # nosec B608
-        self._query(sql, {
-            "grant_id": grant_id,
-            "principal": ("STRING", plan.principal),
-            "expires_at": ("TIMESTAMP", plan.expires_at),
-            "source_dataset": ("STRING", plan.source_dataset),
-            "source_table": ("STRING", plan.source_table),
-            "view_id": ("STRING", plan.view_id),
-            "location": ("STRING", plan.location),
-            "facts_json": ("STRING", facts),
-            "request_id": _grant_id(plan.request_id) if plan.request_id else ("STRING", None),
-        })
+        self._query(
+            sql,
+            {
+                "grant_id": grant_id,
+                "principal": ("STRING", plan.principal),
+                "expires_at": ("TIMESTAMP", plan.expires_at),
+                "source_dataset": ("STRING", plan.source_dataset),
+                "source_table": ("STRING", plan.source_table),
+                "view_id": ("STRING", plan.view_id),
+                "location": ("STRING", plan.location),
+                "facts_json": ("STRING", facts),
+                "request_id": _grant_id(plan.request_id) if plan.request_id else ("STRING", None),
+            },
+        )
 
     def _update(self, assignments: str, predicate: str, **values: tuple[str, Any]) -> int:
         sql = f"""
@@ -293,16 +298,17 @@ INSERT INTO {self._table}
 VALUES (@request_id, @principal, @expires_at, @facts_json, 'pending', 0, '[]');
 COMMIT TRANSACTION;
 """  # nosec B608
-        self._query(sql, {
-            "request_id": _grant_id(row.request_id),
-            "principal": ("STRING", _parse_principal(principal)),
-            "expires_at": ("TIMESTAMP", row.expires_at),
-            "facts_json": ("STRING", _encode_facts(row.facts)),
-        })
+        self._query(
+            sql,
+            {
+                "request_id": _grant_id(row.request_id),
+                "principal": ("STRING", _parse_principal(principal)),
+                "expires_at": ("TIMESTAMP", row.expires_at),
+                "facts_json": ("STRING", _encode_facts(row.facts)),
+            },
+        )
 
-    def _read_requests(
-        self, sql: str, **values: tuple[str, Any]
-    ) -> list[RequestSnapshot]:
+    def _read_requests(self, sql: str, **values: tuple[str, Any]) -> list[RequestSnapshot]:
         _, rows = self._query(sql, values)
         try:
             return [
@@ -365,14 +371,17 @@ SET votes_json = @votes, status = @status, grant_id = @grant_id, revision = revi
 WHERE request_id = @request_id AND status = 'pending' AND revision = @revision
   AND expires_at = @expires_at AND expires_at > CURRENT_TIMESTAMP()
 """  # nosec B608
-        count = self._affected(sql, {
-            "request_id": _grant_id(request_id),
-            "expires_at": ("TIMESTAMP", row.expires_at),
-            "revision": ("INT64", row.revision),
-            "votes": ("STRING", _encode_votes(approval.votes)),
-            "status": ("STRING", "approving" if approval.is_final else "pending"),
-            "grant_id": grant_param if approval.is_final else ("STRING", None),
-        })
+        count = self._affected(
+            sql,
+            {
+                "request_id": _grant_id(request_id),
+                "expires_at": ("TIMESTAMP", row.expires_at),
+                "revision": ("INT64", row.revision),
+                "votes": ("STRING", _encode_votes(approval.votes)),
+                "status": ("STRING", "approving" if approval.is_final else "pending"),
+                "grant_id": grant_param if approval.is_final else ("STRING", None),
+            },
+        )
         if count != 1:
             raise GrantError("BigQuery pending request changed; reload before approving")
         if approval.is_final:
@@ -386,12 +395,15 @@ SET status = 'expired', revision = revision + 1
 WHERE request_id = @request_id AND status = 'pending' AND revision = @revision
   AND expires_at = @expires_at AND expires_at <= @now AND expires_at <= CURRENT_TIMESTAMP()
 """  # nosec B608
-        return self._affected(sql, {
-            "request_id": _grant_id(row.request_id),
-            "expires_at": ("TIMESTAMP", row.expires_at),
-            "now": ("TIMESTAMP", now),
-            "revision": ("INT64", row.revision),
-        })
+        return self._affected(
+            sql,
+            {
+                "request_id": _grant_id(row.request_id),
+                "expires_at": ("TIMESTAMP", row.expires_at),
+                "now": ("TIMESTAMP", now),
+                "revision": ("INT64", row.revision),
+            },
+        )
 
     def get_approving(self, request_id: str) -> ApprovalRef | None:
         _, rows = self._query(
@@ -414,12 +426,15 @@ SET status = @status, revision = revision + 1
 WHERE request_id = @request_id AND status = 'approving' AND revision = @revision
   AND grant_id = @grant_id
 """  # nosec B608
-        return self._affected(sql, {
-            "request_id": _grant_id(claim.request_id),
-            "grant_id": _grant_id(claim.grant_id),
-            "revision": ("INT64", claim.revision),
-            "status": ("STRING", status),
-        })
+        return self._affected(
+            sql,
+            {
+                "request_id": _grant_id(claim.request_id),
+                "grant_id": _grant_id(claim.grant_id),
+                "revision": ("INT64", claim.revision),
+                "status": ("STRING", status),
+            },
+        )
 
     def finish_approval(self, claim: ApprovalRef) -> int:
         return self._finish(claim, "approved")

@@ -82,7 +82,9 @@ def evaluate_approval(
         if policy.identity.allowed_groups and not groups & policy.identity.allowed_groups:
             raise GrantError("BigQuery requester is outside the allowed identity groups")
         request_groups = frozenset(
-            policy.identity.group_map[group] for group in groups if group in policy.identity.group_map
+            policy.identity.group_map[group]
+            for group in groups
+            if group in policy.identity.group_map
         )
     elif meta.get("source") not in {None, "os", "flag"}:
         raise GrantError("BigQuery requester identity no longer matches policy")

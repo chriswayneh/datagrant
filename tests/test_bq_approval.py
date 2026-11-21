@@ -22,23 +22,42 @@ def approval_case() -> tuple[Policy, PendingRequest]:
     request = req()
     duration = timedelta(hours=4)
     rule = TableRule(
-        request.table, frozenset({"readers"}), {"patient_id": "passthrough", "ssn": "redact"},
-        (), False, duration,
+        request.table,
+        frozenset({"readers"}),
+        {"patient_id": "passthrough", "ssn": "redact"},
+        (),
+        False,
+        duration,
     )
     dataset = Dataset(request.dataset, PROJECT, {request.table: rule}, engine="bigquery")
     policy = Policy(
-        1, "two-person", duration,
+        1,
+        "two-person",
+        duration,
         {"readers": frozenset({"alice"}), "approvers": frozenset({"alice", "bob", "carol"})},
-        {dataset.name: dataset}, "current", approver_groups=frozenset({"approvers"}),
+        {dataset.name: dataset},
+        "current",
+        approver_groups=frozenset({"approvers"}),
         approvals_required=2,
     )
     plan = build_plan(
-        dec(rule.columns), request, project=PROJECT, principal=PRINCIPAL, grant_id=GID, now=NOW,
+        dec(rule.columns),
+        request,
+        project=PROJECT,
+        principal=PRINCIPAL,
+        grant_id=GID,
+        now=NOW,
     )
     assert plan.facts is not None
-    pending = PendingRequest(GID, NOW + timedelta(minutes=20), replace(
-        plan.facts, approval="two-person", identity={"source": "os"},
-    ))
+    pending = PendingRequest(
+        GID,
+        NOW + timedelta(minutes=20),
+        replace(
+            plan.facts,
+            approval="two-person",
+            identity={"source": "os"},
+        ),
+    )
     return policy, pending
 
 
@@ -58,7 +77,8 @@ def test_rechecks_request_and_separation_of_duties(case: tuple[Policy, PendingRe
     with pytest.raises(GrantError, match="not eligible"):
         evaluate_approval(policy, pending, VerifiedIdentity("Alice", "os"), (), now=NOW)
     changed = replace(
-        policy, separation_of_duties="distinct-groups",
+        policy,
+        separation_of_duties="distinct-groups",
         groups={**policy.groups, "readers": frozenset({"alice", "bob"})},
     )
     with pytest.raises(GrantError, match="not eligible"):
@@ -74,9 +94,18 @@ def test_oidc_aliases_cannot_add_another_vote_or_self_approve(
 ) -> None:
     policy, pending = case
     policy = replace(policy, identity=IdentityConfig(mode="oidc", issuer=ISSUER))
-    pending = replace(pending, facts=replace(pending.facts, identity={
-        "source": "oidc", "iss": ISSUER, "sub": "requester", "username_claim": "sub",
-    }))
+    pending = replace(
+        pending,
+        facts=replace(
+            pending.facts,
+            identity={
+                "source": "oidc",
+                "iss": ISSUER,
+                "sub": "requester",
+                "username_claim": "sub",
+            },
+        ),
+    )
     bob = VerifiedIdentity("bob", "oidc", ISSUER, "approver", username_claim="sub")
     alias = VerifiedIdentity("carol", "oidc", ISSUER, "approver", username_claim="sub")
     result = evaluate_approval(policy, pending, alias, (Vote(bob, policy.sha256),), now=NOW)

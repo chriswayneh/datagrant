@@ -103,9 +103,7 @@ class DatasetAccessClient:
         return body
 
     def _write(self, url: str, etag: str, access: list[dict[str, Any]]) -> None:
-        response = self._request(
-            "PATCH", url, headers={"If-Match": etag}, json={"access": access}
-        )
+        response = self._request("PATCH", url, headers={"If-Match": etag}, json={"access": access})
         status = response.status_code
         if status == 200:
             return
@@ -123,7 +121,9 @@ class DatasetAccessClient:
 
     def _iam_url(self, project: str, dataset: str, version: int) -> str:
         if project != self._grant_project or dataset != VIEW_DATASET:
-            raise GrantError("dataset IAM only supports datagrant_views in the configured grant project")
+            raise GrantError(
+                "dataset IAM only supports datagrant_views in the configured grant project"
+            )
         if version != ACCESS_POLICY_VERSION:
             raise GrantError("dataset IAM requires policy version 3")
         return _dataset_url(project, dataset)
@@ -148,9 +148,9 @@ class DatasetAccessClient:
                         binding["members"].append(member)
                     break
             else:
-                bindings.append({
-                    "role": role, "members": [member], "condition": deepcopy(condition)
-                })
+                bindings.append(
+                    {"role": role, "members": [member], "condition": deepcopy(condition)}
+                )
         return _DatasetPolicy(
             etag, bindings, resource=url, original_etag=etag, access=deepcopy(access)
         )
@@ -202,7 +202,9 @@ class DatasetAccessClient:
             field_name = "groupByEmail" if kind == "group" else "userByEmail"
             entry = {"role": role, field_name: email, "condition": condition}
             if _managed_member(entry, role) != member:
-                raise GrantError("dataset IAM principal does not round-trip through the access list")
+                raise GrantError(
+                    "dataset IAM principal does not round-trip through the access list"
+                )
             access.append(entry)
         self._write(url, policy.etag, access)
 
@@ -219,7 +221,7 @@ class DatasetAccessClient:
             STATE_DATASET,
             VIEW_DATASET,
         }:
-            raise GrantError("BigQuery source cannot be a DataGrant internal dataset")
+            raise GrantError("BigQuery source cannot be a datagrant internal dataset")
         target = {
             "dataset": {"projectId": plan.project, "datasetId": VIEW_DATASET},
             "targetTypes": ["VIEWS"],
@@ -237,7 +239,9 @@ class DatasetAccessClient:
             ):
                 raise GrantError("BigQuery source, views, and requested locations must match")
             access = _access_list(source)
-            if any(entry.get("dataset") == target and not entry.get("condition") for entry in access):
+            if any(
+                entry.get("dataset") == target and not entry.get("condition") for entry in access
+            ):
                 return False
             try:
                 self._write(source_url, _etag(source), [*access, {"dataset": target}])

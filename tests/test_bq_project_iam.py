@@ -29,7 +29,9 @@ class Client(FakeClient):
     def get_project_iam(self, project: str, *, access_policy_version: int) -> IamPolicy:
         return self.iam.get_project_iam(project, access_policy_version=access_policy_version)
 
-    def set_project_iam(self, project: str, policy: IamPolicy, *, access_policy_version: int) -> None:
+    def set_project_iam(
+        self, project: str, policy: IamPolicy, *, access_policy_version: int
+    ) -> None:
         self.iam.set_project_iam(project, policy, access_policy_version=access_policy_version)
 
 
@@ -72,17 +74,24 @@ def test_project_unbind_retains_other_grants_and_leaves_audit_settings_alone() -
         dec(), req(), project=PROJECT, principal=PRINCIPAL, grant_id=GID, hash_key=KEY, now=NOW
     )
     other_plan = build_plan(
-        dec(), req(), project=PROJECT, principal=PRINCIPAL, grant_id="abcdef012346",
-        hash_key=KEY, now=NOW,
+        dec(),
+        req(),
+        project=PROJECT,
+        principal=PRINCIPAL,
+        grant_id="abcdef012346",
+        hash_key=KEY,
+        now=NOW,
     )
     other_grant = job_user_binding(other_plan)
     session = Session(
-        Response(body={
-            "version": 3,
-            "etag": "present",
-            "bindings": [OWNER, other_grant, job_user_binding(plan)],
-            "auditConfigs": [{"service": "bigquery.googleapis.com"}],
-        }),
+        Response(
+            body={
+                "version": 3,
+                "etag": "present",
+                "bindings": [OWNER, other_grant, job_user_binding(plan)],
+                "auditConfigs": [{"service": "bigquery.googleapis.com"}],
+            }
+        ),
         Response(),
     )
     apply_unbind(Client(session), plan)
@@ -99,7 +108,10 @@ def test_project_unbind_retains_other_grants_and_leaves_audit_settings_alone() -
         ({"etag": "present", "version": 2}, "invalid policy"),
         ({"etag": "present", "bindings": [{}]}, "invalid binding"),
         (
-            {"etag": "present", "bindings": [{"role": "roles/viewer_withcond_hash", "members": []}]},
+            {
+                "etag": "present",
+                "bindings": [{"role": "roles/viewer_withcond_hash", "members": []}],
+            },
             "incomplete conditional policy",
         ),
     ],

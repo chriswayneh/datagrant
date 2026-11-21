@@ -25,7 +25,12 @@ class QueryClient(Client):
 def test_issue_and_revoke_through_assembled_client(tmp_path: Path) -> None:
     plan = build_plan(
         dec({"patient_id": "passthrough", "ssn": "redact"}),
-        req(), project=PROJECT, principal=PRINCIPAL, grant_id=GID, location="US", now=NOW,
+        req(),
+        project=PROJECT,
+        principal=PRINCIPAL,
+        grant_id=GID,
+        location="US",
+        now=NOW,
     )
     binding = dataset_binding(plan)
     entry = {
@@ -34,11 +39,16 @@ def test_issue_and_revoke_through_assembled_client(tmp_path: Path) -> None:
         "condition": binding["condition"],
     }
     session = Session(
-        Response(body={"location": "US"}), source([AUTHORIZATION]),
-        source([]), Response(),
-        Response(body={"version": 1, "etag": "first"}), Response(),
+        Response(body={"location": "US"}),
+        source([AUTHORIZATION]),
+        source([]),
+        Response(),
+        Response(body={"version": 1, "etag": "first"}),
+        Response(),
         Response(body={"version": 3, "etag": "second", "bindings": [job_user_binding(plan)]}),
-        Response(), source([entry]), Response(),
+        Response(),
+        source([entry]),
+        Response(),
     )
     sdk = QueryClient()
     client: RevokeClient = BigQueryGrantClient(
@@ -53,8 +63,12 @@ def test_issue_and_revoke_through_assembled_client(tmp_path: Path) -> None:
 
     row = {name: value for name, (_, value) in sdk.calls[0][1].items()}
     row.update(
-        status="active", started_at=NOW, revision=3,
-        cleanup_complete=False, cleanup_reason=None, claimed_at=None,
+        status="active",
+        started_at=NOW,
+        revision=3,
+        cleanup_complete=False,
+        cleanup_reason=None,
+        claimed_at=None,
     )
     sdk.rows = [row]
     result = revoke(client, GID, receipts=sink, now=NOW)
@@ -87,7 +101,9 @@ def test_factory_reuses_credentials_and_closes_both_transports(
         return SimpleNamespace(close=lambda: closed.append("http"))
 
     monkeypatch.setattr("datagrant.bq.client.load_adc", adc)
-    monkeypatch.setattr("datagrant.bq.client.load_client", lambda: SimpleNamespace(Client=create_sdk))
+    monkeypatch.setattr(
+        "datagrant.bq.client.load_client", lambda: SimpleNamespace(Client=create_sdk)
+    )
     monkeypatch.setattr(
         "datagrant.bq.client.importlib",
         SimpleNamespace(import_module=lambda _: SimpleNamespace(AuthorizedSession=create_session)),
@@ -100,5 +116,8 @@ def test_factory_reuses_credentials_and_closes_both_transports(
 def test_missing_adc_does_not_open_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("datagrant.bq.client.load_client", lambda: object())
     monkeypatch.setattr("datagrant.bq.client.load_adc", lambda _: None)
-    with pytest.raises(BigQuerySetupError, match="no BigQuery ADC"), open_grant_client(PROJECT, "US"):
+    with (
+        pytest.raises(BigQuerySetupError, match="no BigQuery ADC"),
+        open_grant_client(PROJECT, "US"),
+    ):
         pytest.fail("missing credentials should prevent connection")

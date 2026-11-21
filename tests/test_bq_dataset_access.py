@@ -79,7 +79,9 @@ def plan() -> GrantPlan:
 
 
 def source(access: list[dict[str, Any]], etag: str = 'W/"1"') -> Response:
-    return Response(body={"location": "us", "access": access, "etag": etag, "labels": {"keep": "me"}})
+    return Response(
+        body={"location": "us", "access": access, "etag": etag, "labels": {"keep": "me"}}
+    )
 
 
 def test_plan_separates_source_from_operator_resources(plan: GrantPlan) -> None:
@@ -87,9 +89,10 @@ def test_plan_separates_source_from_operator_resources(plan: GrantPlan) -> None:
     assert f"`{SOURCE_PROJECT}`.`clinic`.`patients`" in plan.view_sql
     assert f"`{PROJECT}`.`datagrant`.`hash_hmac`" in plan.view_sql
     assert plan.view_id == f"{PROJECT}.datagrant_views.G_{GID}"
-    assert f"projects/{PROJECT}/datasets/datagrant_views/" in dataset_binding(plan)["condition"][
-        "expression"
-    ]
+    assert (
+        f"projects/{PROJECT}/datasets/datagrant_views/"
+        in dataset_binding(plan)["condition"]["expression"]
+    )
     assert job_user_binding(plan)["role"] == "roles/bigquery.jobUser"
 
 
@@ -137,7 +140,10 @@ def test_concurrent_authorization_needs_no_duplicate_write(plan: GrantPlan) -> N
 @pytest.mark.parametrize(
     ("snapshot", "message"),
     [
-        (Response(body={"location": "EU", "access": EXISTING, "etag": "1"}), "locations must match"),
+        (
+            Response(body={"location": "EU", "access": EXISTING, "etag": "1"}),
+            "locations must match",
+        ),
         (Response(body={"location": "US", "etag": "1"}), "complete access list"),
         (source(EXISTING, ""), "etag missing"),
         (Response(403), "read failed"),
@@ -199,11 +205,14 @@ class IamClient(FakeClient):
         )
 
 
-@pytest.mark.parametrize(("member", "field"), [
-    (PRINCIPAL, "userByEmail"),
-    ("serviceAccount:reader@clinic-proj.iam.gserviceaccount.com", "userByEmail"),
-    ("group:readers@example.com", "groupByEmail"),
-])
+@pytest.mark.parametrize(
+    ("member", "field"),
+    [
+        (PRINCIPAL, "userByEmail"),
+        ("serviceAccount:reader@clinic-proj.iam.gserviceaccount.com", "userByEmail"),
+        ("group:readers@example.com", "groupByEmail"),
+    ],
+)
 def test_dataset_binding_round_trip_keeps_other_access(
     plan: GrantPlan, member: str, field: str
 ) -> None:
@@ -221,9 +230,12 @@ def test_dataset_binding_round_trip_keeps_other_access(
         "condition": binding["condition"],
     }
     session = Session(
-        source(kept), Response(412),
-        source([*kept, another], "new"), Response(),
-        source([*kept, another, entry], "bound"), Response(),
+        source(kept),
+        Response(412),
+        source([*kept, another], "new"),
+        Response(),
+        source([*kept, another, entry], "bound"),
+        Response(),
     )
     client = IamClient(session)
     apply_bind(client, plan)

@@ -76,7 +76,9 @@ def open_grant_client(project: str, state_location: str) -> Iterator[BigQueryGra
     sdk = load_client()
     credentials = load_adc([*ADC_SCOPES, _PROJECT_SCOPE])
     if credentials is None:
-        raise BigQuerySetupError("no BigQuery ADC: application-default credentials are not available")
+        raise BigQuerySetupError(
+            "no BigQuery ADC: application-default credentials are not available"
+        )
     transport = importlib.import_module("google.auth.transport.requests")
     with ExitStack() as cleanup:
         client = sdk.Client(project=project, credentials=credentials)

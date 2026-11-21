@@ -81,7 +81,9 @@ class ProjectIamClient:
                 raise GrantError("project IAM returned an incomplete conditional policy")
         return IamPolicy(etag, bindings, version)
 
-    def set_project_iam(self, project: str, policy: IamPolicy, *, access_policy_version: int) -> None:
+    def set_project_iam(
+        self, project: str, policy: IamPolicy, *, access_policy_version: int
+    ) -> None:
         if not policy.etag.strip():
             raise GrantError("project IAM policy etag missing")
         if policy.version != ACCESS_POLICY_VERSION:
