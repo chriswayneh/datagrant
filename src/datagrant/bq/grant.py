@@ -35,7 +35,7 @@ REDACTED = "[REDACTED]"
 _PRINCIPAL_PREFIXES = ("user:", "serviceAccount:", "group:")
 _REFUSED_PRINCIPALS = frozenset({"allusers", "allauthenticatedusers"})
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-_EMAIL_RE = re.compile(r"^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+$")
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+$")
 ACCESS_POLICY_VERSION = 3
 ETAG_MAX_TRIES = 2
 JOB_USER_ROLE = "roles/bigquery.jobUser"
@@ -192,6 +192,26 @@ def _parse_principal(raw: str) -> str:
     if not _EMAIL_RE.fullmatch(rest):
         raise GrantError("google principal email is invalid")
     return prefix + rest
+
+
+def resolve_google_principal(
+    *,
+    flag: str | None = None,
+    mapped: str | None = None,
+    oidc_email: str | None = None,
+) -> str:
+    """Flag, then policy map, then OIDC email. Missing is a GrantError."""
+    if flag is not None and str(flag).strip():
+        return _parse_principal(flag)
+    if mapped is not None and str(mapped).strip():
+        return _parse_principal(mapped)
+    if oidc_email is not None and str(oidc_email).strip():
+        value = oidc_email.strip()
+        folded = value.translate(_ASCII_LOWER)
+        if any(folded.startswith(p.lower()) for p in _PRINCIPAL_PREFIXES):
+            return _parse_principal(value)
+        return _parse_principal(f"user:{value}")
+    raise GrantError("google principal is required")
 
 
 def _canonical_member(raw: object) -> str | None:
@@ -521,6 +541,7 @@ def _ours(existing: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
 def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
     title = _binding_title(binding)
     principal = _parse_principal(binding["members"][0])
+    match: dict[str, Any] | None = None
     for existing in policy.bindings:
         if _binding_title(existing) != title:
             continue
@@ -529,13 +550,17 @@ def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
         members = existing.get("members")
         if not isinstance(members, list):
             raise GrantError(f"IAM condition title {title} already in use")
-        if any(_canonical_member(member) == principal for member in members):
-            return False
-        members.append(principal)
+        if match is not None:
+            raise GrantError(f"IAM condition title {title} already in use")
+        match = existing
+    if match is None:
+        added = dict(binding)
+        added["members"] = [principal]
+        policy.bindings.append(added)
         return True
-    added = dict(binding)
-    added["members"] = [principal]
-    policy.bindings.append(added)
+    if any(_canonical_member(member) == principal for member in match["members"]):
+        return False
+    match["members"].append(principal)
     return True
 
 

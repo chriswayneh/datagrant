@@ -49,7 +49,7 @@ class _Store:
                 timeout=TIMEOUT,
                 job_retry=None,
             )
-            rows = job.result(timeout=_JOB_TIMEOUT, job_retry=None)
+            rows = list(job.result(timeout=_JOB_TIMEOUT, job_retry=None))
         except Exception:  # noqa: BLE001 - provider errors may contain query parameters
             raise GrantError("BigQuery state query failed") from None
         return job, rows
@@ -146,6 +146,25 @@ WHERE grant_id = @grant_id AND {predicate}
             "status IN ('issuing', 'enabling')",
             grant_id=self._id(plan),
         )
+
+    def count_live_grants(self, principal: str) -> int:
+        """Count issuing/enabling/active rows for this Google principal.
+
+        Postgres and Snowflake stores are not included. The cap is per engine.
+        """
+        member = _parse_principal(principal)
+        _, rows = self._query(
+            f"SELECT COUNT(*) AS n FROM {self._table} WHERE principal = @principal "  # nosec B608
+            "AND status IN ('issuing', 'enabling', 'active') "
+            "AND expires_at > CURRENT_TIMESTAMP()",
+            {"principal": ("STRING", member)},
+        )
+        if len(rows) != 1:
+            raise GrantError("BigQuery concurrent-grant count failed")
+        n = rows[0]["n"]
+        if type(n) is not int or n < 0:
+            raise GrantError("BigQuery concurrent-grant count failed")
+        return n
 
     def claim_revoke(self, row: GrantRecord, reason: Reason, now: datetime) -> int:
         if row.status not in {"issuing", "enabling", "active", "failed", "revoking"}:

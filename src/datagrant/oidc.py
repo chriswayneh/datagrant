@@ -86,6 +86,7 @@ class IdentityConfig:
     max_token_age: timedelta = DEFAULT_MAX_TOKEN_AGE
     clock_skew: timedelta = DEFAULT_CLOCK_SKEW
     jwks_cache_ttl: timedelta = DEFAULT_JWKS_CACHE_TTL
+    google_principals: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

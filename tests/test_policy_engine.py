@@ -375,3 +375,16 @@ def test_bigquery_one_part_table_name() -> None:
     )
     with pytest.raises(PolicyError, match="dataset.table"):
         parse_policy(d)
+
+
+def test_google_principals_map_is_validated() -> None:
+    d = doc()
+    d["identity"] = {
+        "mode": "local",
+        "google_principals": {"alice": "user:alice@example.com"},
+    }
+    p = parse_policy(d)
+    assert p.identity.google_principals == {"alice": "user:alice@example.com"}
+    d["identity"]["google_principals"] = {"alice": "not-an-email"}
+    with pytest.raises(PolicyError, match="google_principals"):
+        parse_policy(d)

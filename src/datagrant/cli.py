@@ -991,6 +991,39 @@ def _bq_refuse_locator(args: argparse.Namespace) -> None:
         raise CliError(str(exc), EXIT_USAGE) from None
 
 
+def _bq_resolve_principal(args: argparse.Namespace, policy: Any, caller: Any) -> str:
+    from datagrant.bq.grant import GrantError, resolve_google_principal
+    from datagrant.oidc import normalize_principal
+
+    flag = getattr(args, "google_principal", None)
+    mapped = policy.identity.google_principals.get(normalize_principal(caller.username))
+    oidc_email = None
+    if caller.source == "oidc" and (caller.username_claim == "email" or "@" in caller.username):
+        oidc_email = caller.username
+    try:
+        return resolve_google_principal(flag=flag, mapped=mapped, oidc_email=oidc_email)
+    except GrantError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
+
+
+def _bq_concurrent_reason(store: Any, policy: Any, principal: str, dataset: str) -> str | None:
+    cap = policy.concurrent_grant_cap(dataset)
+    if cap is None:
+        return None
+    n = store.count_live_grants(principal)
+    return _cap_message(principal, n, cap)
+
+
+def _have_bq_project(args: argparse.Namespace) -> bool:
+    from datagrant.bigquery_support import BigQuerySetupError, resolve_project
+
+    try:
+        resolve_project(getattr(args, "bigquery_project", None))
+    except BigQuerySetupError:
+        return False
+    return True
+
+
 def _bq_require_apply_setup(args: argparse.Namespace) -> None:
     from datagrant.bigquery_support import (
         BigQuerySetupError,
@@ -1017,6 +1050,7 @@ def _bigquery_request(ctx: Ctx, req: Any, decision: Any, policy: Any, caller: An
     a = ctx.args
     ds = policy.datasets[req.dataset]
     _bq_refuse_locator(a)
+    principal = _bq_resolve_principal(a, policy, caller)
     if not a.apply:
         what = (
             "store a pending request for another person to approve"
@@ -1031,10 +1065,35 @@ def _bigquery_request(ctx: Ctx, req: Any, decision: Any, policy: Any, caller: An
                 "dataset": req.dataset,
                 "table": req.table,
                 "requester": caller.username,
+                "google_principal": principal,
                 "location": ds.location,
             },
-            "dry run: allowed by policy; engine=bigquery; with --apply datagrant would "
+            "dry run: allowed by policy; engine=bigquery; google principal "
+            f"{principal}; with --apply datagrant would "
             f"require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC, then {what}",
+        )
+        return EXIT_OK
+    _bq_require_apply_setup(a)
+    raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
+
+
+def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
+    """Route BigQuery approve. Grant --apply stays refused until the last M5 step."""
+    from datagrant.bigquery_support import EXTRA_HINT
+
+    a = ctx.args
+    _bq_refuse_locator(a)
+    if not a.apply:
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "bigquery",
+                "request_id": a.request_id,
+                "approver": caller.username,
+            },
+            f"dry run: {caller.username} may approve request {a.request_id}; "
+            "the stored google principal is shown to approvers; with --apply "
+            f"datagrant would require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC",
         )
         return EXIT_OK
     _bq_require_apply_setup(a)
@@ -1604,6 +1663,8 @@ def cmd_approve(ctx: Ctx) -> int:
         have_sf = False
     if have_sf and not have_pg:
         return _snowflake_approve(ctx, policy, caller)
+    if _have_bq_project(a) and not have_pg:
+        return _bigquery_approve(ctx, policy, caller)
     with _pg_session(a, lock=bool(a.apply)) as conn:
         _public_preflight_gate(ctx, conn, policy, apply=bool(a.apply))
         if a.apply:
@@ -2671,6 +2732,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
     r.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     r.add_argument(
+        "--google-principal",
+        help="IAM member to bind (user:email, group:, or serviceAccount:); "
+        "local BigQuery requests need this or policy.identity.google_principals",
+    )
+    r.add_argument(
         "--pending-ttl",
         default=None,
         metavar="TTL",
@@ -2687,6 +2753,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
     ap.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
     ap.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
+    ap.add_argument(
+        "--google-principal",
+        help="IAM member to bind (user:email, group:, or serviceAccount:); "
+        "ignored when the pending BigQuery request already stored a principal",
+    )
     ap.set_defaults(fn=cmd_approve)
 
     g = sub.add_parser("grant", help="inspect grants").add_subparsers(

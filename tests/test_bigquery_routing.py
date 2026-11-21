@@ -69,6 +69,8 @@ BQ_REQ = [
     "eval",
     "--as-user",
     "alice",
+    "--google-principal",
+    "user:alice@example.com",
 ]
 
 
@@ -101,6 +103,101 @@ def test_policy_check_mixed_postgres_snowflake_bigquery(tmp_path: Path) -> None:
     assert "clinic" in body["datasets"]
     assert "snow_clinic" in body["datasets"]
     assert "bq_clinic" in body["datasets"]
+
+
+def test_bigquery_dry_run_shows_google_principal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    path = _policy(tmp_path)
+    out: list[str] = []
+    code = cli.main([*BQ_REQ, "--policy", str(path), "--json"], out.append)
+    assert code == EXIT_OK
+    body = json.loads(out[0])
+    assert body["google_principal"] == "user:alice@example.com"
+    text: list[str] = []
+    assert cli.main([*BQ_REQ, "--policy", str(path)], text.append) == EXIT_OK
+    assert "user:alice@example.com" in text[0]
+
+
+def test_bigquery_request_requires_google_principal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    path = _policy(tmp_path)
+    argv = [item for item in BQ_REQ if item != "user:alice@example.com"]
+    # drop the flag name too
+    cut = argv.index("--google-principal")
+    argv = argv[:cut] + argv[cut + 1 :]
+    code = cli.main([*argv, "--policy", str(path)])
+    assert code == EXIT_USAGE
+    assert "google principal" in capsys.readouterr().err
+
+
+def test_bigquery_request_maps_policy_principal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    yaml = (
+        MIXED
+        + "\nidentity:\n  mode: local\n  google_principals:\n    alice: user:alice@example.com\n"
+    )
+    path = tmp_path / "mapped.yaml"
+    path.write_text(yaml)
+    path.chmod(0o600)
+    argv = [item for item in BQ_REQ]
+    cut = argv.index("--google-principal")
+    argv = argv[:cut] + argv[cut + 2 :]
+    out: list[str] = []
+    code = cli.main([*argv, "--policy", str(path), "--json"], out.append)
+    assert code == EXIT_OK
+    assert json.loads(out[0])["google_principal"] == "user:alice@example.com"
+
+
+def test_bigquery_approve_routes_without_postgres_dsn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DATAGRANT_DSN", raising=False)
+    monkeypatch.delenv("DATAGRANT_SNOWFLAKE_DSN", raising=False)
+    path = _policy(tmp_path)
+    out: list[str] = []
+    code = cli.main(
+        [
+            "approve",
+            "abcdef012345",
+            "--policy",
+            str(path),
+            "--bigquery-project",
+            "clinic-proj",
+            "--as-user",
+            "carol",
+            "--json",
+        ],
+        out.append,
+    )
+    assert code == EXIT_OK
+    body = json.loads(out[0])
+    assert body["dry_run"] is True
+    assert body["engine"] == "bigquery"
+    assert body["approver"] == "carol"
+    text: list[str] = []
+    assert (
+        cli.main(
+            [
+                "approve",
+                "abcdef012345",
+                "--policy",
+                str(path),
+                "--bigquery-project",
+                "clinic-proj",
+                "--as-user",
+                "carol",
+            ],
+            text.append,
+        )
+        == EXIT_OK
+    )
+    assert "stored google principal" in text[0]
 
 
 def test_bigquery_dry_run_does_not_need_adc(
@@ -350,6 +447,8 @@ def test_bigquery_request_canonicalizes_three_part_table(
             "eval",
             "--as-user",
             "alice",
+            "--google-principal",
+            "user:alice@example.com",
             "--policy",
             str(path),
             "--json",
@@ -360,6 +459,7 @@ def test_bigquery_request_canonicalizes_three_part_table(
     body = json.loads(out[0])
     assert body["dry_run"] is True
     assert body["table"] == "clinic_ds.patients"
+    assert body["google_principal"] == "user:alice@example.com"
 
 
 def test_bigquery_request_rejects_three_part_wrong_project(

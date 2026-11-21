@@ -20,6 +20,7 @@ from datagrant.bq.grant import (
     GrantError,
     GrantPlan,
     IamPolicy,
+    _upsert_binding,
     apply_bind,
     apply_plan,
     apply_unbind,
@@ -30,6 +31,7 @@ from datagrant.bq.grant import (
     q,
     q_project,
     render_row_filter,
+    resolve_google_principal,
     reverse_drop,
     view_resource_name,
     view_select_sql,
@@ -547,7 +549,7 @@ def test_iam_failure_after_issued_drops_view_writes_revoked(tmp_path: Path) -> N
 def test_cli_apply_still_not_implemented() -> None:
     src = Path("src/datagrant/cli.py").read_text()
     assert "BigQuery grant --apply is not implemented yet" in src
-    assert "from datagrant.bq" not in src
+    assert src.count("BigQuery grant --apply is not implemented yet") >= 2
 
 
 def test_plan_guards_and_quoting() -> None:
@@ -870,6 +872,18 @@ def test_lit_round_trip() -> None:
     assert lit("\u0085") == r"'\u0085'"
 
 
+def test_resolve_google_principal_flag_policy_then_oidc() -> None:
+    assert (
+        resolve_google_principal(flag="user:flag@example.com", mapped="user:map@example.com")
+        == "user:flag@example.com"
+    )
+    assert resolve_google_principal(mapped="user:map@example.com") == "user:map@example.com"
+    assert resolve_google_principal(oidc_email="Alice@Example.com") == "user:alice@example.com"
+    assert resolve_google_principal(oidc_email="user:Alice@Example.com") == "user:alice@example.com"
+    with pytest.raises(GrantError, match="google principal is required"):
+        resolve_google_principal()
+
+
 def test_principal_allowlist() -> None:
     ok = (
         "user:alice@example.com",
@@ -917,7 +931,14 @@ def test_principal_allowlist() -> None:
                 source_dataset="clinic",
                 now=NOW,
             )
-    for bad in ("user:not-an-email", "user:alice@", "user:@example.com", "user:a@b@c"):
+    for bad in (
+        "user:not-an-email",
+        "user:alice@",
+        "user:@example.com",
+        "user:a@b@c",
+        "user:alice!@example.com",
+        "user:alice@exam_ple.com",
+    ):
         with pytest.raises(GrantError, match="email is invalid"):
             build_plan(
                 dec(masks={"patient_id": "passthrough"}),
@@ -927,6 +948,26 @@ def test_principal_allowlist() -> None:
                 source_dataset="clinic",
                 now=NOW,
             )
+    plus = build_plan(
+        dec(masks={"patient_id": "passthrough"}),
+        req(columns=("patient_id",)),
+        project=PROJECT,
+        principal="user:alice+ml@example.com",
+        source_dataset="clinic",
+        grant_id=GID,
+        now=NOW,
+    )
+    assert plus.principal == "user:alice+ml@example.com"
+    apostrophe = build_plan(
+        dec(masks={"patient_id": "passthrough"}),
+        req(columns=("patient_id",)),
+        project=PROJECT,
+        principal="user:o'brien@example.com",
+        source_dataset="clinic",
+        grant_id=GID,
+        now=NOW,
+    )
+    assert apostrophe.principal == "user:o'brien@example.com"
     for bad in ("alice@example.com", "principal://x", "user:"):
         with pytest.raises(GrantError, match="principal"):
             build_plan(
@@ -1130,6 +1171,21 @@ def test_etag_409_retries_once_with_fresh_etag(tmp_path: Path) -> None:
         apply_plan(stuck, _plan(), _sink(tmp_path / "b"))
     assert stuck.calls.count("set_dataset_iam") == 2
     assert stuck.calls.count("get_dataset_iam") >= 2
+
+
+def test_upsert_checks_every_duplicate_title() -> None:
+    plan = _plan()
+    ours = dataset_binding(plan)
+    clash = {
+        "role": "roles/bigquery.dataViewer",
+        "members": ["user:ops@example.com"],
+        "condition": {"title": f"G_{GID}", "expression": "true"},
+    }
+    policy = IamPolicy(etag='W/"1"', bindings=[copy.deepcopy(ours), copy.deepcopy(clash)])
+    with pytest.raises(GrantError, match="IAM condition title G_abcdef012345 already in use"):
+        _upsert_binding(policy, dataset_binding(plan))
+    assert policy.bindings[0]["members"] == [PRINCIPAL]
+    assert policy.bindings[1] == clash
 
 
 def test_clashing_title_bind_refuses_and_leaves_operator_binding(tmp_path: Path) -> None:

@@ -204,6 +204,57 @@ def test_quorum_claim_and_expiry_use_the_evaluated_revision(
         assert params["revision"] == ("INT64", 2)
 
 
+def test_query_paging_errors_are_wrapped(plan: GrantPlan) -> None:
+    class Paging:
+        num_dml_affected_rows = 1
+
+        def query(self, sql: str, **kwargs: Any) -> "Paging":
+            return self
+
+        def result(self, *, timeout: int, job_retry: None) -> Any:
+            def pages() -> Any:
+                yield {"n": 1}
+                raise RuntimeError("page two failed")
+
+            return pages()
+
+    with pytest.raises(GrantError, match="state query failed"):
+        GrantStore(Paging(), SDK, PROJECT, "US").count_live_grants(PRINCIPAL)
+
+
+def test_cli_concurrent_reason_uses_store_count(plan: GrantPlan) -> None:
+    from types import SimpleNamespace
+
+    from datagrant.cli import _bq_concurrent_reason
+
+    class Store:
+        def count_live_grants(self, principal: str) -> int:
+            assert principal == PRINCIPAL
+            return 2
+
+    policy = SimpleNamespace(concurrent_grant_cap=lambda dataset: 2)
+    msg = _bq_concurrent_reason(Store(), policy, PRINCIPAL, "bq_clinic")
+    assert msg is not None
+    assert "max_concurrent_grants is 2" in msg
+    policy = SimpleNamespace(concurrent_grant_cap=lambda dataset: None)
+    assert _bq_concurrent_reason(Store(), policy, PRINCIPAL, "bq_clinic") is None
+
+
+def test_count_live_grants_is_per_principal(plan: GrantPlan) -> None:
+    client = Client()
+    client.rows = [{"n": 2}]
+    n = GrantStore(client, SDK, PROJECT, "US").count_live_grants(PRINCIPAL)
+    assert n == 2
+    sql, params = client.calls[0]
+    assert "status IN ('issuing', 'enabling', 'active')" in sql
+    assert "expires_at > CURRENT_TIMESTAMP()" in sql
+    assert params["principal"] == ("STRING", PRINCIPAL)
+    assert PRINCIPAL not in sql
+    client.rows = [{"n": -1}]
+    with pytest.raises(GrantError, match="concurrent-grant count failed"):
+        GrantStore(client, SDK, PROJECT, "US").count_live_grants(PRINCIPAL)
+
+
 def test_auto_request_cannot_enter_pending_storage(plan: GrantPlan) -> None:
     assert plan.facts is not None
     pending = PendingRequest(GID, plan.expires_at, plan.facts)
