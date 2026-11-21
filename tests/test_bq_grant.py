@@ -679,6 +679,20 @@ def test_cleanup_drop_view_failure_keeps_mark_failed_and_revoked(tmp_path: Path)
     assert "deauthorize" not in names.calls
 
 
+def test_unbind_cleanup_failure_sets_cleanup_failed_on_revoked(tmp_path: Path) -> None:
+    sink = _sink(tmp_path)
+    client = FakeClient(raise_after_bind=True, fail_on="unbind_iam")
+    with pytest.raises(GrantError, match="cleanup failed"):
+        apply_plan(client, _plan(), sink)
+    revoked = [
+        json.loads(line)["receipt"]
+        for line in (tmp_path / "r.jsonl").read_text().splitlines()
+        if json.loads(line)["receipt"]["event"] == "revoked"
+    ]
+    assert revoked[0]["details"]["cleanup_failed"] is True
+    assert "unbind_iam" in str(revoked[0]["details"]["error"])
+
+
 def test_insert_and_authorize_failures(tmp_path: Path) -> None:
     sink = _sink(tmp_path)
     client = FakeClient(fail_on="insert_issuing")
@@ -873,6 +887,26 @@ def test_principal_allowlist() -> None:
             now=NOW,
         )
         assert plan.principal == principal
+    mixed = build_plan(
+        dec(masks={"patient_id": "passthrough"}),
+        req(columns=("patient_id",)),
+        project=PROJECT,
+        principal="USER:Alice@Example.com",
+        source_dataset="clinic",
+        grant_id=GID,
+        now=NOW,
+    )
+    assert mixed.principal == "user:alice@example.com"
+    sa = build_plan(
+        dec(masks={"patient_id": "passthrough"}),
+        req(columns=("patient_id",)),
+        project=PROJECT,
+        principal="SERVICEACCOUNT:sa@clinic-proj.iam.gserviceaccount.com",
+        source_dataset="clinic",
+        grant_id=GID,
+        now=NOW,
+    )
+    assert sa.principal == "serviceAccount:sa@clinic-proj.iam.gserviceaccount.com"
     for bad in ("allUsers", "allAuthenticatedUsers", "domain:example.com"):
         with pytest.raises(GrantError, match="refused google principal"):
             build_plan(
@@ -903,6 +937,46 @@ def test_principal_allowlist() -> None:
                 source_dataset="clinic",
                 now=NOW,
             )
+
+
+def test_principal_rejects_unicode_casefold_homoglyphs() -> None:
+    kwargs = {
+        "project": PROJECT,
+        "source_dataset": "clinic",
+        "now": NOW,
+    }
+    with pytest.raises(GrantError, match="email is invalid"):
+        build_plan(
+            dec(masks={"patient_id": "passthrough"}),
+            req(columns=("patient_id",)),
+            principal="user:\u212aelvin@example.com",
+            **kwargs,
+        )
+    plan = build_plan(
+        dec(masks={"patient_id": "passthrough"}),
+        req(columns=("patient_id",)),
+        principal="user:Kelvin@example.com",
+        grant_id=GID,
+        **kwargs,
+    )
+    assert plan.principal == "user:kelvin@example.com"
+
+
+def test_mixed_case_iam_members_bind_and_unbind() -> None:
+    plan = _plan()
+    client = FakeClient()
+    mixed_ds = dict(dataset_binding(plan))
+    mixed_ds["members"] = ["user:Alice@Example.com"]
+    mixed_job = dict(job_user_binding(plan))
+    mixed_job["members"] = ["user:Alice@Example.com"]
+    client.dataset_policy = IamPolicy(etag='W/"1"', bindings=[mixed_ds])
+    client.project_policy = IamPolicy(etag='W/"1"', bindings=[mixed_job])
+    apply_unbind(client, plan)
+    assert client.dataset_policy.bindings == []
+    assert client.project_policy.bindings == []
+    apply_bind(client, plan)
+    assert client.dataset_policy.bindings[0]["members"] == [plan.principal]
+    assert client.project_policy.bindings[0]["members"] == [plan.principal]
 
 
 def test_unbind_iam_on_bind_attempt(tmp_path: Path) -> None:

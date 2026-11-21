@@ -336,7 +336,7 @@ Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-
 - Etag RMW (unit): `datasets.update` and `setIamPolicy` send the etag from the prior get; a stub 409 retries once with a fresh etag and succeeds; both get and update pass `accessPolicyVersion=3`. Add this assertion in construction PR 3 or 4.
 - Two-person planner/apply invariant (unit): a `two-person` plan must include an approver, matching Postgres and Snowflake. Apply checks present receipt facts before its first client operation, including directly constructed plans. Auto grants still allow an empty approver list. This is an internal consistency check; authenticated eligibility, quorum, and pending-request claims remain the CLI approval boundary in PR 5.
 - Two-person pending (unit, PR 5): stores principal only; no view and no IAM until final approve; pending TTL expiry does not call BigQuery DDL.
-- Revoke RPC (unit): drop view first, then that grant's dataset bind and that grant's `jobUser` bind (condition title `G_<id>`); does not remove the source authorized-dataset entry; does not inspect other grants. Two grants for one principal: revoke one; the other grant's `jobUser` binding stays. Stub view-drop failure is `revoke_failed` / exit 4; `jobs.cancel` error does not fail the revoke if the view is gone; receipt failure after drop is exit 3.
+- Revoke RPC (unit): drop view first, then that grant's dataset bind and that grant's `jobUser` bind (condition title `G_<id>`); does not remove the source authorized-dataset entry; does not inspect other grants. Two grants for one principal: revoke one; the other grant's `jobUser` binding stays. IAM removal still runs if the drop fails; still exit 4. Stub view-drop failure is `revoke_failed` / exit 4; `jobs.cancel` error does not fail the revoke if the view is gone; receipt failure after drop is exit 3.
 - Sweep: skip `issuing`/`enabling` younger than 10 minutes; clean older ones; expire `active` past `expires_at`; IAM condition is not treated as a substitute for sweep.
 - Compat: existing Postgres and Snowflake unit tests still pass without a BigQuery extra.
 - Extra pin: `google-cloud-bigquery` with a reviewed version range (construction PR names the range after a CVE pass). CI job `pip-audit-bigquery` installs `.[bigquery]` and runs `pip-audit`. No live BigQuery calls.
@@ -409,7 +409,7 @@ The one-line why is the whole point. Chris approved all 11 revised picks on 2026
 
 9. **What makes revoke fail closed given IAM lag?**
    - A. Remove the IAM bind first, then drop the view.
-   - B. Drop the view first, then remove IAM, then `jobs.cancel` best-effort. Exit 4 if the view still exists.
+   - B. Drop the view first, then remove IAM, then `jobs.cancel` best-effort. IAM removal still runs if the drop fails; still exit 4. Exit 4 if the view still exists.
    - C. Cancel jobs in a loop until QUERY_HISTORY is quiet, then drop.
    - **Recommend B (approved).** A deleted view does not serve rows even if IAM has not propagated. Cancel loops are slow, billed, and still miss jobs. Same spirit as Snowflake DISABLE-then-DROP.
 

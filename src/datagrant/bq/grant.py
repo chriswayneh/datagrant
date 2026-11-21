@@ -34,7 +34,8 @@ _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 REDACTED = "[REDACTED]"
 _PRINCIPAL_PREFIXES = ("user:", "serviceAccount:", "group:")
 _REFUSED_PRINCIPALS = frozenset({"allusers", "allauthenticatedusers"})
-_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+$")
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_EMAIL_RE = re.compile(r"^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+$")
 ACCESS_POLICY_VERSION = 3
 ETAG_MAX_TRIES = 2
 JOB_USER_ROLE = "roles/bigquery.jobUser"
@@ -181,15 +182,25 @@ def _parse_principal(raw: str) -> str:
     if not principal:
         raise GrantError("google principal is required")
     _reject_controls("google principal", principal)
-    lowered = principal.lower()
-    if lowered in _REFUSED_PRINCIPALS or lowered.startswith("domain:"):
+    folded = principal.translate(_ASCII_LOWER)
+    if folded in _REFUSED_PRINCIPALS or folded.startswith("domain:"):
         raise GrantError(f"refused google principal {principal!r}")
-    if not any(principal.startswith(p) for p in _PRINCIPAL_PREFIXES):
+    prefix = next((p for p in _PRINCIPAL_PREFIXES if folded.startswith(p.lower())), None)
+    if prefix is None:
         raise GrantError("google principal must be user:, serviceAccount:, or group:")
-    rest = principal.split(":", 1)[1]
+    rest = folded.split(":", 1)[1]
     if not _EMAIL_RE.fullmatch(rest):
         raise GrantError("google principal email is invalid")
-    return principal
+    return prefix + rest
+
+
+def _canonical_member(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        return _parse_principal(raw)
+    except GrantError:
+        return None
 
 
 def _col_expr(col: str, mask: str, hash_scope: str, *, project: str) -> str:
@@ -509,7 +520,7 @@ def _ours(existing: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
 
 def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
     title = _binding_title(binding)
-    principal = binding["members"][0]
+    principal = _parse_principal(binding["members"][0])
     for existing in policy.bindings:
         if _binding_title(existing) != title:
             continue
@@ -518,17 +529,19 @@ def _upsert_binding(policy: IamPolicy, binding: dict[str, Any]) -> bool:
         members = existing.get("members")
         if not isinstance(members, list):
             raise GrantError(f"IAM condition title {title} already in use")
-        if principal in members:
+        if any(_canonical_member(member) == principal for member in members):
             return False
         members.append(principal)
         return True
-    policy.bindings.append(binding)
+    added = dict(binding)
+    added["members"] = [principal]
+    policy.bindings.append(added)
     return True
 
 
 def _remove_grant_bindings(policy: IamPolicy, expected: Mapping[str, Any]) -> bool:
     """Remove plan.principal from the matching binding; drop it if empty."""
-    principal = expected["members"][0]
+    principal = _parse_principal(expected["members"][0])
     title = _binding_title(expected)
     changed = False
     keep: list[dict[str, Any]] = []
@@ -537,11 +550,14 @@ def _remove_grant_bindings(policy: IamPolicy, expected: Mapping[str, Any]) -> bo
             keep.append(existing)
             continue
         members = existing.get("members")
-        if not isinstance(members, list) or principal not in members:
+        if not isinstance(members, list):
+            keep.append(existing)
+            continue
+        remaining = [member for member in members if _canonical_member(member) != principal]
+        if len(remaining) == len(members):
             keep.append(existing)
             continue
         changed = True
-        remaining = [m for m in members if m != principal]
         if remaining:
             updated = dict(existing)
             updated["members"] = remaining
@@ -648,9 +664,21 @@ def _strip_grant_prefix(plan: GrantPlan, msg: str) -> str:
     return msg.removeprefix(f"grant {plan.grant_id}: ")
 
 
-def append_revoked(plan: GrantPlan, receipts: ReceiptSink | None, *, reason: str) -> None:
+def append_revoked(
+    plan: GrantPlan,
+    receipts: ReceiptSink | None,
+    *,
+    reason: str,
+    cleanup_failed: bool = False,
+    error: str | None = None,
+) -> None:
     if receipts is None or plan.facts is None:
         return
+    details: dict[str, object] = {"engine": "bigquery", "reason": reason}
+    if cleanup_failed:
+        details["cleanup_failed"] = True
+        if error:
+            details["error"] = error
     try:
         receipt.append(
             receipts.log,
@@ -658,7 +686,7 @@ def append_revoked(plan: GrantPlan, receipts: ReceiptSink | None, *, reason: str
             plan.facts,
             receipts.key,
             host=receipts.host,
-            details={"engine": "bigquery", "reason": reason},
+            details=details,
         )
     except Exception:  # noqa: BLE001, S110  # nosec B110
         pass
@@ -731,7 +759,13 @@ def apply_plan(
             except Exception as exc:  # noqa: BLE001 - keep original; name both
                 cleanup_exc = exc
             if issued:
-                append_revoked(plan, receipts, reason=revoked_reason)
+                append_revoked(
+                    plan,
+                    receipts,
+                    reason=revoked_reason,
+                    cleanup_failed=cleanup_exc is not None,
+                    error=str(cleanup_exc) if cleanup_exc is not None else None,
+                )
         if not isinstance(original, Exception):
             # Bare `raise` would re-raise cleanup_exc if reverse_drop failed.
             raise original  # noqa: TRY201
