@@ -14,6 +14,6 @@ These pages match [v0.6.0](https://github.com/chriswayneh/datagrant/releases/tag
 
 Design notes: [BigQuery](design/bigquery.md) (M5 / v0.7.0+, unreleased), [warehouses](design/warehouses.md) (M4 / v0.6.0, Snowflake shipped), [ops hardening](design/ops-hardening.md), [approvals](design/approvals-policy-limits.md), [OIDC](design/oidc-identity.md), [receipt sink](design/receipt-sink.md).
 
-BigQuery [step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with mocked revoke and sweep. [Step 5](https://github.com/chriswayneh/datagrant/pull/63) is in review covering the adapter and approvals. BigQuery `--apply` remains disabled.
+BigQuery [steps 4](https://github.com/chriswayneh/datagrant/pull/62) and [5](https://github.com/chriswayneh/datagrant/pull/63) of 7 are merged. Step 6 is next. BigQuery `--apply` remains disabled.
 
 Example policies live in [examples/](../examples/). Changelog and roadmap: [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md). Next after M4 is BigQuery (v0.7.0+).

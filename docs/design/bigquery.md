@@ -1,6 +1,6 @@
 # Design: BigQuery (v0.7.0+ / M5)
 
-Status: M5 construction in progress (step 4 merged, step 5 of 7 in review). Design approved 2026-11-14 4:51 PM CT (Chris: "Approve all 11 revised BigQuery picks"; picks 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B). Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../../aidlc-docs/audit.md).
+Status: M5 construction in progress (steps 4 and 5 of 7 merged, step 6 next). Design approved 2026-11-14 4:51 PM CT (Chris: "Approve all 11 revised BigQuery picks"; picks 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B). Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Recorded in [audit.md](../../aidlc-docs/audit.md).
 
 M4 (v0.6.0) shipped Snowflake. ROADMAP next item is **the same request, mask, expire, revoke, sweep and receipt model on BigQuery** (IAM / authorized views, not a password user). Target **v0.7.0+**. Rate limits, `max_rows`, and break-glass stay out.
 
@@ -343,7 +343,7 @@ Quotas that can bite (not policy keys): IAM bindings per resource, Google's per-
 - Live (optional): if `DATAGRANT_TEST_BIGQUERY` is set (project + ADC), issue, SELECT as a throwaway principal, revoke, confirm the view is gone. Fictional data only. CI default is unset (skip). That live test **asserts both**: (a) the grantee can query the view **without** `bigquery.tables.get`; (b) the grantee can `SELECT` a view that calls `datagrant.hash_hmac` **without** IAM on the UDF dataset. After bind/unbind, wait: IAM changes typically take 2 minutes and can take 7 minutes or longer; do not treat a still-denied or still-allowed query as a product bug until that window has passed.
 - No real IdP, no real PHI/PII. Fictional names only.
 
-## Follow-up PRs (construction in progress, step 4 merged, step 5 of 7 in review)
+## Follow-up PRs (construction in progress, steps 4 and 5 of 7 merged, step 6 next)
 
 Same shape as M4: one concern per PR, tests in each, docs last. No rate-limit PR. No `max_rows` PR. No break-glass PR. No policy-tag PR.
 
@@ -447,4 +447,4 @@ Checked against Google docs (not inferred from SDK types):
 3. **`max_rows` stays out.**
 4. **No break-glass.** Emergency path is a reviewed policy edit to `approval: auto`.
 5. **M4 shipped in v0.6.0** (PRs #47 to #53, tag `v0.6.0` at `6581ab8`).
-6. **M5 design approved 2026-11-14 4:51 PM CT.** Chris: "Approve all 11 revised BigQuery picks". Picks: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Status: construction in progress (step 4 merged, step 5 of 7 in review).
+6. **M5 design approved 2026-11-14 4:51 PM CT.** Chris: "Approve all 11 revised BigQuery picks". Picks: 1B, 2B, 3B, 4B, 5B, 6B, 7B, 8B, 9B, 10B, 11B. Construction go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. Status: construction in progress (steps 4 and 5 of 7 merged, step 6 next).
