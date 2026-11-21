@@ -8,7 +8,7 @@
 
 **Temporary, masked access to PHI and PII in Postgres, Snowflake, and BigQuery, with signed access receipts.**
 
-Coming in [v0.8.0](ROADMAP.md): PCI DSS support pack (PAN masking, cardholder-data policy, evidence report).
+**Planned for [v0.8.0](ROADMAP.md#v080-pci-pack): PCI DSS support pack.** The pack is planned to add payment card number masking, a sample cardholder-data policy, and an evidence report built from signed grant receipts.
 
 [Watch the demo](#demo) · [Quick start](#quick-start) · [Examples](examples/README.md) · [Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
 
