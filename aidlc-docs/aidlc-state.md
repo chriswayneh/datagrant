@@ -15,7 +15,7 @@
 | Construction | M3 / v0.5.0 | ✅ Released (PRs #40 to #45, tag `v0.5.0` at `9aadcf2`, 2026-11-11 CT). |
 | Construction | M4 / v0.6.0 | ✅ Released (PRs #47 to #53, tag `v0.6.0` at `6581ab8`, 2026-11-14 CT). |
 | Inception | M5 / BigQuery design | **Design approved** 2026-11-14 4:51 PM CT (picks 1B through 11B). Artifact: [docs/design/bigquery.md](../docs/design/bigquery.md). |
-| Construction | M5 / BigQuery | **construction in progress (PR 4 of 7).** Go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. |
+| Construction | M5 / BigQuery | **construction in progress (step 4 merged, step 5 of 7 in review).** Go 2026-11-14 5:00 PM CT, relayed by Grok Bot after merging #56. |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
-**Current stage:** M5 construction in progress (PR 4 of 7). v0.6.1 ready, release pending. v0.6.0 remains the latest published release. M4 Snowflake warehouses shipped in v0.6.0. Inception (U1–U8) approved 2026-11-02.
+**Current stage:** M5 construction in progress (step 4 merged, step 5 of 7 in review). v0.6.1 ready, release pending. v0.6.0 remains the latest published release. M4 Snowflake warehouses shipped in v0.6.0. Inception (U1–U8) approved 2026-11-02.
