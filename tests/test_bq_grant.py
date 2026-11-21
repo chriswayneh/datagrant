@@ -131,16 +131,21 @@ class FakeClient:
         self.table_iam = table_iam
         self.routine_iam = routine_iam
         self.catalog: Any = None
+        self.inspect_project: str | None = None
+        self.live_hash_grants = 0
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
         if self.fail_on == name:
             raise RuntimeError(f"stub:{name}")
 
-    def inspect_table(self, dataset: str, table: str, *, location: str | None = None) -> Any:
+    def inspect_table(
+        self, dataset: str, table: str, *, location: str | None = None, project: str | None = None
+    ) -> Any:
         from datagrant.bq.mask import TableCatalog
 
         self.calls.append("inspect_table")
+        self.inspect_project = project
         if self.catalog is not None:
             return self.catalog
         return TableCatalog({"patient_id": "STRING", "ssn": "STRING", "email": "STRING"})
@@ -155,11 +160,12 @@ class FakeClient:
             raise GrantError("BigQuery hash-master table has table-level IAM")
         if self.routine_iam:
             raise GrantError("BigQuery hash_hmac routine has routine-level IAM")
-        if self.hash_duplicate:
+        if self.hash_duplicate and not rotate:
             raise GrantError("BigQuery hash-master has duplicate rows")
         if self.hash_mismatch and not rotate:
             raise GrantError("BigQuery hash-master key does not match; rotate explicitly")
         self.hash_loads.append(key.derived)
+        self.hash_duplicate = False
         self.hash_mismatch = False
         _ = key_fingerprint(key)
 
@@ -189,6 +195,9 @@ class FakeClient:
     def count_live_grants(self, requester: str, principal: str | None = None) -> int:
         n = sum(1 for st in self.status.values() if st in {"issuing", "enabling", "active"})
         return n + self.extra_live
+
+    def count_live_hash_grants(self) -> int:
+        return self.live_hash_grants
 
     def create_view(self, plan: GrantPlan) -> None:
         self._step("create_view")

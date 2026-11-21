@@ -24,9 +24,10 @@ class SDK:
         return dict(query_parameters)
 
     class SchemaField:
-        def __init__(self, name: str, field_type: str) -> None:
+        def __init__(self, name: str, field_type: str, mode: str = "NULLABLE") -> None:
             self.name = name
             self.field_type = field_type
+            self.mode = mode
 
     class SourceFormat:
         NEWLINE_DELIMITED_JSON = "NEWLINE_DELIMITED_JSON"
@@ -293,6 +294,18 @@ def test_count_live_grants_is_per_requester(plan: GrantPlan) -> None:
     client.rows = [{"n": -1}]
     with pytest.raises(GrantError, match="concurrent-grant count failed"):
         GrantStore(client, SDK, PROJECT, "US").count_live_grants("alice")
+
+
+def test_count_live_hash_grants_filters_hash_masks() -> None:
+    client = Client()
+    client.rows = [{"n": 3}]
+    n = GrantStore(client, SDK, PROJECT, "US").count_live_hash_grants()
+    assert n == 3
+    sql, params = client.calls[0]
+    assert "JSON_QUERY(facts_json, '$.masks')" in sql
+    assert r':"hash"' in sql
+    assert "status IN ('issuing', 'enabling', 'active')" in sql
+    assert params == {}
 
 
 def test_one_requester_with_many_principals_hits_the_cap(plan: GrantPlan) -> None:

@@ -1150,7 +1150,7 @@ def _bq_inspect_catalog(client: Any, ds: Any, req: Any) -> Any:
     from datagrant.bq.grant import _split_table
 
     dataset, table = _split_table(req.table, ds.schema)
-    return inspect(dataset, table, location=ds.location)
+    return inspect(dataset, table, project=ds.database, location=ds.location)
 
 
 def _bq_require_apply_setup(args: argparse.Namespace) -> None:
@@ -1179,35 +1179,61 @@ def cmd_setup_bigquery(ctx: Ctx) -> int:
 
     a = ctx.args
     rotate = bool(getattr(a, "rotate_hash_key", False))
+    force = bool(getattr(a, "force", False))
     if rotate:
         _warn(ctx, "rotating the BigQuery hash key changes every pseudonym")
     _bq_refuse_locator(a)
     if not a.apply:
         what = "rotate the hash-master key" if rotate else "provision hash-master and hash_hmac"
+        extra = ""
+        if rotate:
+            extra = (
+                " Rotation prints the live hash-grant count and refuses while any "
+                "are active unless --force is given."
+            )
         ctx.emit(
             {
                 "dry_run": True,
                 "engine": "bigquery",
                 "rotate_hash_key": rotate,
+                "force": force,
             },
             "dry run: with --apply datagrant would "
             f"require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC, then {what}. "
             "The datagrant dataset must be operator-only (no projectReaders). "
-            "Project-level BigQuery data roles are key-equivalent; use a dedicated hash project.",
+            "Project-level BigQuery data roles are key-equivalent; use a dedicated hash project."
+            f"{extra}",
         )
         return EXIT_OK
     _bq_require_apply_setup(a)
     key = load_hash_key(resolve_key_path("hash", a.hash_key))
+    live = 0
     with _bq_grant_client(a) as client:
         try:
             setup = getattr(client, "setup_hash", None)
             if not callable(setup):
                 raise GrantError("BigQuery client cannot provision hash-master")
+            if rotate:
+                counter = getattr(client, "count_live_hash_grants", None)
+                if not callable(counter):
+                    raise GrantError("BigQuery client cannot count live hash grants")
+                live = counter()
+                _warn(ctx, f"{live} live hash grant(s)")
+                if live > 0 and not force:
+                    raise GrantError(
+                        f"refuse rotation while {live} live hash grants are active; pass --force"
+                    )
             setup(key, rotate=rotate)
         except GrantError as exc:
             raise CliError(str(exc), EXIT_FAILED) from None
     ctx.emit(
-        {"engine": "bigquery", "rotate_hash_key": rotate, "status": "ready"},
+        {
+            "engine": "bigquery",
+            "rotate_hash_key": rotate,
+            "force": force,
+            "live_hash_grants": live,
+            "status": "ready",
+        },
         "rotated BigQuery hash-master" if rotate else "provisioned BigQuery hash-master",
     )
     return EXIT_OK
@@ -3317,6 +3343,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rotate-hash-key",
         action="store_true",
         help="replace the hash-master key (changes every BigQuery pseudonym)",
+    )
+    bqsu.add_argument(
+        "--force",
+        action="store_true",
+        help="rotate even when live hash grants exist",
     )
     bqsu.set_defaults(fn=cmd_setup_bigquery)
 

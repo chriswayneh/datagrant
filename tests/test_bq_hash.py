@@ -86,6 +86,7 @@ def test_hash_store_loads_key_without_query_parameter() -> None:
     assert base64.b64decode(payload["key"]) == KEY.derived
     assert config["write_disposition"] == "WRITE_TRUNCATE"
     assert config["source_format"] == "NEWLINE_DELIMITED_JSON"
+    assert all(field.mode == "REQUIRED" for field in config["schema"])
     assert any("CREATE TABLE IF NOT EXISTS" in s for s, _ in client.calls)
     assert any("hash_hmac" in s and "CREATE OR REPLACE FUNCTION" in s for s, _ in client.calls)
     assert not any("@key" in s for s, _ in client.calls)
@@ -125,6 +126,13 @@ def test_duplicate_rows_are_refused() -> None:
     with pytest.raises(GrantError, match="duplicate rows"):
         store.require_fingerprint(KEY)
     assert not client.loads
+
+
+def test_rotate_cleans_duplicate_master_rows() -> None:
+    client = FakeClient(hash_duplicate=True)
+    client.setup_hash(KEY, rotate=True)
+    assert client.hash_loads
+    assert client.hash_duplicate is False
 
 
 def test_provider_error_does_not_leak_key() -> None:

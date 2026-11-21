@@ -4,7 +4,7 @@
 datagrant [--json] [--dsn DSN] [--signing-key FILE] [--hash-key FILE] [--receipt-log FILE] [--receipt-sink URL] [--receipt-sink-mode MODE] [--version] COMMAND ...
 ```
 
-Run `datagrant COMMAND --help` for the exact flags of your installed version. This page matches v0.6.0.
+Run `datagrant COMMAND --help` for the exact flags of your installed version. This page matches v0.7.0.
 
 ## Conventions
 
@@ -54,8 +54,8 @@ Prints the public key hex for `receipts verify --pubkey`.
 ### `policy check FILE`
 Validates a policy offline. No database is involved, and no IdP is contacted. If `DATAGRANT_OIDC_ALLOW_INSECURE_LOCALHOST=1` and `identity.mode` is `oidc`, it prints a warning that insecure `http://` localhost OIDC URLs are enabled.
 
-### `setup bigquery [--rotate-hash-key] [--apply]`
-Provisions `datagrant._hash_master` and `datagrant.hash_hmac` in the grant project. Dry run by default. `--apply` creates the table and UDF if needed, then inserts the master row only if none exists. The key is written with a load job (never a query parameter). If a row exists, setup compares a fingerprint (`TO_HEX(SHA256(key)) = @fp`, sending only the hash) and refuses a mismatch with `rotate explicitly`. `--rotate-hash-key --apply` replaces the key and warns that rotation changes every BigQuery pseudonym. Before any key write, the `datagrant` dataset access list must be operator-only: no `READER`, no `projectReaders`, no `allUsers` / `allAuthenticatedUsers`, no domain entry, no dataset or view authorization, and no routine other than `hash_hmac`. Table-level IAM on `_hash_master` and routine-level IAM on `hash_hmac` are refused. Project-level BigQuery data roles are key-equivalent; use a dedicated hash project. Requires `datagrant[bigquery]`, `$DATAGRANT_BIGQUERY_PROJECT` / `--bigquery-project`, and ADC on `--apply`.
+### `setup bigquery [--rotate-hash-key] [--force] [--apply]`
+Provisions `datagrant._hash_master` and `datagrant.hash_hmac` in the grant project. Dry run by default. `--apply` creates the table and UDF if needed, then inserts the master row only if none exists. The key is written with a load job (never a query parameter). If a row exists, setup compares a fingerprint (`TO_HEX(SHA256(key)) = @fp`, sending only the hash) and refuses a mismatch with `rotate explicitly`. `--rotate-hash-key --apply` replaces the key, prints the live hash-grant count, and refuses while any hash grants are active unless `--force` is given. Rotation changes every BigQuery pseudonym and can `WRITE_TRUNCATE` duplicate master rows. Before any key write, the `datagrant` dataset access list must be operator-only: no `READER`, no `projectReaders`, no `allUsers` / `allAuthenticatedUsers`, no domain entry, no dataset or view authorization, and no routine other than `hash_hmac`. Table-level IAM on `_hash_master` and routine-level IAM on `hash_hmac` are refused. Project-level BigQuery data roles are key-equivalent; use a dedicated hash project. Requires `datagrant[bigquery]`, `$DATAGRANT_BIGQUERY_PROJECT` / `--bigquery-project`, and ADC on `--apply`.
 
 ### `request --dataset D --table SCHEMA.TABLE --columns C1,C2 --duration 2h --purpose TEXT [--row-filter EXPR] [--pending-ttl 24h] [--policy FILE] [--as-user NAME] [--oidc-token-file FILE] [--snowflake-dsn DSN] [--google-principal MEMBER] [--apply]`
 If `strict_preflight` is true, `--apply` exits 1 when PUBLIC preflight warnings remain (dry run still reports them). A group/other-accessible receipt log is refused on `--apply` (exit 1) before any grant is created. A 0644 policy file warns; with `strict_policy_permissions: true`, `--apply` refuses. `--strict-policy-permissions` or `$DATAGRANT_STRICT_POLICY_PERMISSIONS=1` forces that refusal from outside the file and checks the mode before the YAML is parsed. `--apply` also refuses (exit 1) if the admin role cannot `SET log_statement` (superuser, or PostgreSQL 15+ `GRANT SET ON PARAMETER log_statement`). When it can, `apply_plan` issues `SET LOCAL log_statement = 'none'` in the grant transaction so passwords and hash-key parameters are not captured in the server log.
@@ -189,6 +189,7 @@ Bad settings exit 2 before any database work. Flags beat the environment.
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `keys init` | | ✓ | ✓ | | | | | ✓ |
 | `keys export-pubkey` | | ✓ | | | | | | |
+| `setup bigquery` | | | ✓ | | | | | ✓ |
 | `policy check` | | | | | | | | |
 | `request`, `approve` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `grant list`, `grant status` | ✓ | | | | | | | |

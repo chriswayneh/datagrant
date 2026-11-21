@@ -11,7 +11,13 @@ from test_bq_state import SDK, Client
 
 from datagrant.bigquery_support import BigQuerySetupError
 from datagrant.bq.client import BigQueryGrantClient, open_grant_client
-from datagrant.bq.grant import apply_plan, build_plan, dataset_binding, job_user_binding
+from datagrant.bq.grant import (
+    GrantError,
+    apply_plan,
+    build_plan,
+    dataset_binding,
+    job_user_binding,
+)
 from datagrant.bq.revoke import RevokeClient, revoke
 
 
@@ -148,6 +154,57 @@ def test_factory_reuses_credentials_and_closes_both_transports(
     with open_grant_client(PROJECT, "US") as client:
         assert isinstance(client, BigQueryGrantClient)
     assert closed == ["http", "sdk"]
+
+
+def test_setup_hash_rotate_replaces_duplicate_rows() -> None:
+    class DupClient(Client):
+        def query(self, sql: str, **kwargs: Any) -> "DupClient":
+            kwargs.setdefault("job_config", {})
+            if "COUNTIF" in sql:
+                self.rows = [{"n": 2, "matched": 1}]
+            super().query(sql, **kwargs)
+            return self
+
+    session = Session(
+        source(OPERATOR_ACCESS),
+        Response(status_code=404, body={}),
+        Response(status_code=404, body={}),
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source(OPERATOR_ACCESS),
+        Response(),
+        source(OPERATOR_ACCESS),
+        Response(),
+    )
+    sdk = DupClient()
+    client = BigQueryGrantClient(sdk, SDK, session, project=PROJECT, state_location="US")
+    client.setup_hash(KEY, rotate=True)
+    assert sdk.loads
+    table, _data, config = sdk.loads[-1]
+    assert "_hash_master" in table
+    assert config["write_disposition"] == "WRITE_TRUNCATE"
+    assert all(field.mode == "REQUIRED" for field in config["schema"])
+
+
+def test_setup_hash_refuses_duplicate_rows_without_rotate() -> None:
+    class DupClient(Client):
+        def query(self, sql: str, **kwargs: Any) -> "DupClient":
+            kwargs.setdefault("job_config", {})
+            if "COUNTIF" in sql:
+                self.rows = [{"n": 2, "matched": 1}]
+            super().query(sql, **kwargs)
+            return self
+
+    session = Session(
+        source(OPERATOR_ACCESS),
+        Response(status_code=404, body={}),
+        Response(status_code=404, body={}),
+    )
+    sdk = DupClient()
+    client = BigQueryGrantClient(sdk, SDK, session, project=PROJECT, state_location="US")
+    with pytest.raises(GrantError, match="duplicate rows"):
+        client.setup_hash(KEY, rotate=False)
+    assert sdk.loads == []
 
 
 def test_missing_adc_does_not_open_client(monkeypatch: pytest.MonkeyPatch) -> None:

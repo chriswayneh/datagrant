@@ -2,7 +2,7 @@
 
 Fictional names only. Never put real PHI, PII, credentials, or keys here.
 
-These examples cover released engines. For unreleased BigQuery work, see the [design](../docs/design/bigquery.md). [Steps 4](https://github.com/chriswayneh/datagrant/pull/62) and [5](https://github.com/chriswayneh/datagrant/pull/63) of 7 are merged. Step 6 is next. BigQuery `--apply` remains disabled.
+These examples cover released engines (Postgres, Snowflake, and BigQuery in v0.7.0). See the [design](../docs/design/bigquery.md) and [operations](../docs/operations.md#bigquery-v070).
 
 | File | Identity | Engine |
 | --- | --- | --- |
@@ -32,3 +32,26 @@ Add a dataset with `engine: snowflake`. Install `pip install '.[snowflake]'` fro
 ```
 
 `--apply` reads column types from `INFORMATION_SCHEMA.COLUMNS`, builds a secure view `FROM db.s.t AS "SRC"`, and re-emits filters as `"SRC"."COL"`. Same five masks as Postgres. Hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Sweep every 1 minute. Details: [CLI](../docs/cli.md), [operations](../docs/operations.md#warehouses-v060).
+
+## BigQuery (v0.7.0)
+
+Add a dataset with `engine: bigquery`. Install `pip install '.[bigquery]'` from a checkout of the v0.7.0 tag. Set `$DATAGRANT_BIGQUERY_PROJECT` and use ADC (JSON keys refused). Run `datagrant setup bigquery --apply` once against an operator-only `datagrant` dataset. Prefer a dedicated hash project: project-level BigQuery data roles are key-equivalent.
+
+```yaml
+  - name: bq_clinic
+    engine: bigquery
+    database: source-proj
+    schema: clinic_ds
+    location: US
+    tables:
+      - name: clinic_ds.patients
+        allowed_groups: [ml-team]
+        columns:
+          patient_id: passthrough
+          ssn: hash
+        filter_columns: [region]
+        row_filters:
+          - "region = 'west'"
+```
+
+`--apply` inspects `INFORMATION_SCHEMA.COLUMNS` in the source project, builds an authorized view with `` `SRC` ``, and binds IAM to the Google principal from `policy.identity.google_principals`. Same five masks as Postgres. Hashes are not designed to be joinable with Postgres or Snowflake. Sweep every 1 minute. Details: [CLI](../docs/cli.md), [operations](../docs/operations.md#bigquery-v070).

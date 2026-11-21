@@ -42,7 +42,7 @@ To try everything safely first, see [demo.md](demo.md).
 
 Details: [CLI](cli.md), [policy](policy.md), [security limits](security.md#known-limits), [design](design/warehouses.md).
 
-Snowflake is the second engine. Postgres `--apply` is unchanged. BigQuery is later.
+Snowflake is the second engine. Postgres `--apply` is unchanged. BigQuery is v0.7.0; see [BigQuery](#bigquery-v070).
 
 **Install.** `pip install 'datagrant[snowflake]'` (`snowflake-connector-python>=4.7.3,<6`). A Snowflake `--apply` without the extra is exit 2 and names `datagrant[snowflake]`.
 
@@ -57,6 +57,46 @@ Unreleased hash repair: setup creates a secure Python 3.12 `_HMAC_SHA256` functi
 **Opt-in hash smoke test.** Install `.[dev,snowflake]`, set `DATAGRANT_TEST_SNOWFLAKE_DSN` to a key-pair operator DSN targeting a scratch database with an active warehouse, and run `python -m pytest -q tests/integration/test_sf_hash.py`. This deliberately creates two randomly named `DG_TEST_*` schemas, provisions the functions and fictional key, then drops those schemas in a `finally` cleanup. The operator needs CREATE SCHEMA/FUNCTION/TABLE/VIEW in that scratch database. An interrupted process may leave its named test schemas for operator cleanup. The test is skipped when the variable is unset. It validates SQL compilation, RFC HMAC output, scope separation, NULL/empty/Unicode inputs, and secure-view use as the operator; it does not yet validate access as a separate grantee or revoke/sweep behavior.
 
 `make demo` stays Postgres. Try Snowflake against a throwaway account after `datagrant policy check`.
+
+## BigQuery (v0.7.0)
+
+Details: [CLI](cli.md), [policy](policy.md), [security limits](security.md#known-limits), [design](design/bigquery.md).
+
+BigQuery is the third engine. Same request, approve, mask, expire, revoke, sweep, and receipt flow. Access is an authorized view plus an expiring IAM bind, not a password user.
+
+**Install.** `pip install 'datagrant[bigquery]'` (`google-cloud-bigquery>=3.27.0,<4`). A BigQuery `--apply` without the extra is exit 2 and names `datagrant[bigquery]`.
+
+**ADC.** `$DATAGRANT_BIGQUERY_PROJECT` / `--bigquery-project` (prefer the env var). Application Default Credentials only: user login, workload identity, or impersonation of a user-login source. JSON key files, `credentials_path`, `--bigquery-dsn`, and `$DATAGRANT_BIGQUERY_CREDENTIALS` are refused. Anyone who holds ADC for the grant project can still create views and IAM binds directly; run datagrant on a bastion that holds it.
+
+**Dedicated hash project.** Project-level BigQuery data roles (`roles/bigquery.dataViewer`, `dataEditor`, `dataOwner`) are key-equivalent: they can read `_hash_master` or call `hash_hmac` as an oracle. Put hash-master in a project whose IAM does not include project readers or broad data roles. Keep the `datagrant` dataset operator-only (no `READER`, no `projectReaders`).
+
+**Setup.**
+
+```sh
+datagrant setup bigquery                # dry run
+datagrant setup bigquery --apply        # provision _hash_master and hash_hmac
+```
+
+The key is written with a load job, never a query parameter. `--rotate-hash-key --apply` prints the live hash-grant count and refuses while any are active unless `--force`. Rotation changes every BigQuery pseudonym.
+
+**Request and approve.**
+
+```sh
+export DATAGRANT_BIGQUERY_PROJECT=grant-proj
+datagrant request --dataset bq_clinic --table clinic_ds.patients --columns patient_id \
+  --duration 2h --purpose "eval" --apply
+datagrant approve REQUEST_ID --apply
+```
+
+`--apply` inspects `INFORMATION_SCHEMA.COLUMNS` in the **source** project (`database`), not the grant project. Hash grants do a read-only preflight (ACL, UDF, fingerprint, no object IAM) before `insert_issuing`. That check is a snapshot: ACL or IAM can change before the first `hash_hmac` call.
+
+**Sweep.** Run `datagrant sweep --apply` every 1 minute (`* * * * *`). IAM `request.time` is a backstop for new queries, not sub-day enforcement. Missed sweeps leave the view until the next successful sweep. Sweep skips `issuing`/`enabling` rows younger than 10 minutes.
+
+**Hashes.** BigQuery hashes are not designed to be joinable with Postgres or Snowflake hashes (different HMAC output encoding). Keep separate `hash_scope` values.
+
+This path is mock- and CI-tested. A live GCP test was not run. Optional live tests stay behind `DATAGRANT_TEST_BIGQUERY`.
+
+`make demo` stays Postgres. Try BigQuery against a throwaway project after `datagrant policy check`.
 
 ## Ops hardening (v0.5.0)
 
