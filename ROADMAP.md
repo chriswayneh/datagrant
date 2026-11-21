@@ -9,7 +9,7 @@ datagrant gives people short-lived, masked, receipted access to sensitive data, 
 | Stage | Version | Theme | Status |
 | --- | --- | --- | :---: |
 | Alpha: core | v0.1.0 to v0.6.0 | Expiring, masked, receipted access on Postgres and Snowflake, real identity, two-person approval, ops hardening | ✅ Released |
-| Alpha: core | v0.6.1 | Patch: Snowflake setup fix | Next |
+| Alpha: core | v0.6.1 | Patch: Snowflake setup fix | ✅ Released |
 | Alpha: core | v0.7.0 | BigQuery | In progress |
 | Alpha: compliance | v0.8.0 | PCI pack | Planned |
 | Beta | v0.9.0 | Ready for outside teams | Planned |
@@ -17,12 +17,12 @@ datagrant gives people short-lived, masked, receipted access to sensitive data, 
 
 ## Alpha: building the core
 
-### v0.6.1: Snowflake patch
+### v0.6.1: Snowflake patch (released)
 
 | Item | What |
 | --- | --- |
-| Setup fix | v0.6.0 Snowflake setup calls a hash function Snowflake does not provide, so `CREATE FUNCTION HASH_HMAC` can fail. The fix is on `main` ([#61](https://github.com/chriswayneh/datagrant/pull/61)). Until v0.6.1 ships, use `main` for Snowflake or stay on Postgres. |
-| Known-issue note | README and v0.6.0 release notes call out the issue and the workaround. |
+| Setup fix | v0.6.0 Snowflake setup called `SHA2_HMAC`, which Snowflake does not provide, so `CREATE FUNCTION HASH_HMAC` could fail. [v0.6.1](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.1) ships the Python HMAC UDF ([#61](https://github.com/chriswayneh/datagrant/pull/61)). Use v0.6.1 or later for Snowflake. |
+| Known-issue note | README and [v0.6.0 notes](docs/release-notes/v0.6.0.md) point to v0.6.1 as the fix. |
 
 ### v0.7.0: BigQuery
 
@@ -129,5 +129,11 @@ No dates yet. Open an issue to discuss one.
 | Item | What | Status |
 | --- | --- | :---: |
 | Warehouses | Same request, mask, expire and receipt model on Snowflake first (per-grant `TYPE=SERVICE` user, key pair shown once, secure view, local receipts). BigQuery later. Postgres CLI unchanged. Design approved (PR #47 at `0449a0b`; picks 1B/2B/3A/4A/5B/6B/7B). Construction PRs #48 to #52: policy `engine` and Snowflake `--apply` routing; grant engine; revoke and sweep (atomic claims, 10-minute issuing/enabling grace); grant/approve `--apply` and concurrent cap across Snowflake datasets; masks and catalog (five mask names, type inspect, `"SRC"`-qualified filters so `IS NULL` on a `null`-masked column uses the base column). Hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Design: [docs/design/warehouses.md](docs/design/warehouses.md). | ✅ |
+
+### v0.6.1: done
+
+| Item | What | Status |
+| --- | --- | :---: |
+| Snowflake HMAC patch | Replace the v0.6.0 `SHA2_HMAC` setup call with a secure Python 3.12 UDF. Tag `v0.6.1` on `release/0.6.x`. Notes: [docs/release-notes/v0.6.1.md](docs/release-notes/v0.6.1.md). | ✅ |
 
 Ideas and priorities may change. Open an issue to discuss one.

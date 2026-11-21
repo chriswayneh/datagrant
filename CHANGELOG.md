@@ -14,6 +14,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ### Changed
 - README homepage: Postgres and Snowflake today, BigQuery coming in v0.7.0, and a PCI DSS support pack coming in v0.8.0. Restored the progress diagram.
+- Current published release is [v0.6.1](docs/release-notes/v0.6.1.md). Main stays on 0.7.0 development; the package version on main is unchanged.
 
 ### Fixed
 - BigQuery revoke now removes IAM bindings even if dropping the view fails, and principals are normalized to lowercase.
@@ -22,6 +23,13 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 - BigQuery two-person plans require an approver, matching the Postgres and Snowflake planners. Apply also refuses unapproved two-person receipt facts before any client operation or receipt write, including directly constructed or replaced plans. BigQuery CLI `--apply` remains disabled.
 - Snowflake setup provisions a secure Python 3.12 HMAC-SHA256 primitive using the standard library instead of calling the unavailable `SHA2_HMAC` built-in. The existing SQL wrapper keeps the key in its restricted table, preserves scope derivation and hex output, and keeps NULL distinct from empty strings. Added RFC 4231 handler regressions and an opt-in live SQL/secure-view smoke test (`DATAGRANT_TEST_SNOWFLAKE_DSN`); live validation is still required before release.
 - BigQuery `lit()` emits GoogleSQL (`\` first, then `\'`; controls as `\n` and friends; U+2028, U+2029, and U+0085 as `\u2028` / `\u2029` / `\u0085`). Reverse-drop calls `unbind_iam` (if bind was attempted), then `drop_view`, then `mark_failed`, each in try/finally; `apply_plan` still writes `revoked` when issued even if cleanup fails, drops the view at most once, and names both the original and cleanup errors without a duplicated `grant <id>:` prefix. A client `GrantError` still runs cleanup. `KeyboardInterrupt` is re-raised even if cleanup then fails.
+
+## [0.6.1] - 2026-11-21
+
+Snowflake HMAC patch.
+
+### Fixed
+- Snowflake setup called `SHA2_HMAC`, which Snowflake lacks. Setup now creates a secure Python 3.12 UDF that uses the standard-library `hmac`. NULL stays NULL. The hash key column is BINARY. Verified by CI and SQL checks only; there is no live Snowflake smoke test. ([#61](https://github.com/chriswayneh/datagrant/pull/61))
 
 ## [0.6.0] - 2026-11-14
 
