@@ -24,13 +24,31 @@ from datagrant.pg.grant import (
     new_password,
     preflight,
 )
-from datagrant.pg.mask import inspect_table
+from datagrant.pg.mask import ColumnType, TableCatalog, column_expr, inspect_table
 from datagrant.pg.revoke import revoke, sweep
 from datagrant.policy import Request, evaluate, parse_policy
 from datagrant.receipt import verify
 
 DSN = os.environ.get("DATAGRANT_TEST_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="DATAGRANT_TEST_DSN not set")
+
+
+def test_pan_display_mask_handles_malformed_and_short_values() -> None:
+    assert DSN
+    catalog = TableCatalog({"pan": ColumnType("pg_catalog", "text")}, None)
+    expression = column_expr("pan", "pan", catalog)
+    query = sql.SQL("SELECT {} FROM (VALUES (%s::text)) AS input(pan)").format(expression)
+    with psycopg.connect(DSN) as conn:
+        for value, expected in (
+            ("000000123456", "000000**3456"),
+            ("0000001234567890123", "000000*********0123"),
+            ("0000001234", "[REDACTED]"),
+            ("0000-00123456", "[REDACTED]"),
+            ("000000123456\n", "[REDACTED]"),
+            ("", "[REDACTED]"),
+            (None, None),
+        ):
+            assert conn.execute(query, (value,)).fetchone() == (expected,)
 
 POLICY = parse_policy(
     {
