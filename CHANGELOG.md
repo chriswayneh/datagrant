@@ -4,6 +4,8 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+- Add explicit card-data policy tags and a PAN display mask across Postgres, Snowflake, and BigQuery. Tagged PAN cannot pass through or be used in filters, and tagged CVV and track data cannot be granted.
+
 ## [0.7.0] - 2026-11-21
 
 [Released on GitHub](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0). BigQuery warehouse support was tested in CI with mocks; no live GCP test was run.

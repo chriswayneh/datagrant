@@ -29,7 +29,7 @@ from datagrant.oidc import (
 )
 from datagrant.rowfilter import RowFilterError, parse_row_filter
 
-MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null"})
+MASK_TYPES = frozenset({"passthrough", "redact", "hash", "partial", "null", "pan"})
 APPROVAL_MODES = frozenset({"auto", "two-person"})
 SOD_MODES = frozenset({"none", "distinct-groups"})
 ENGINES = frozenset({"postgres", "snowflake", "bigquery"})
@@ -265,6 +265,7 @@ def _parse_table(
             "allowed_groups",
             "columns",
             "filter_columns",
+            "card_data",
             "row_filters",
             "require_row_filter",
             "max_duration",
@@ -294,6 +295,25 @@ def _parse_table(
                 f"{where}.columns.{col}: unknown mask {mask!r} (one of {sorted(MASK_TYPES)})"
             )
     fcols = _str_list(raw.get("filter_columns", []), f"{where}.filter_columns")
+    card_data = _req(raw, "card_data", dict, where) if "card_data" in raw else {}
+    tagged: dict[str, str] = {}
+    for name_tag, kind in card_data.items():
+        if not isinstance(name_tag, str) or not _IDENT_RE.fullmatch(name_tag):
+            raise PolicyError(f"{where}.card_data: invalid column name")
+        if not isinstance(kind, str) or kind not in {"pan", "cvv", "track"}:
+            raise PolicyError(f"{where}.card_data: expected pan, cvv, or track")
+        folded = name_tag.lower()
+        if folded in tagged:
+            raise PolicyError(f"{where}.card_data: duplicate column tag")
+        tagged[folded] = kind
+    for col, mask in cols.items():
+        kind = tagged.get(col.lower())
+        if kind in {"cvv", "track"}:
+            raise PolicyError(f"{where}.columns.{col}: sensitive authentication data is not grantable")
+        if kind == "pan" and mask not in {"pan", "redact", "null"}:
+            raise PolicyError(f"{where}.columns.{col}: tagged PAN requires pan, redact, or null")
+        if mask == "pan" and kind != "pan":
+            raise PolicyError(f"{where}.columns.{col}: pan mask requires a PAN tag")
     for col in fcols:
         if not _IDENT_RE.fullmatch(col):
             raise PolicyError(f"{where}.filter_columns: invalid column name {col!r}")
@@ -309,6 +329,8 @@ def _parse_table(
             _, used = parse_row_filter(f)
         except RowFilterError as exc:
             raise PolicyError(f"{where}.row_filters[{k}]: {exc}") from None
+        if any(column.lower() in tagged for column in used):
+            raise PolicyError(f"{where}.row_filters[{k}]: card data cannot be used in filters")
         outside = sorted(used - set(cols) - set(fcols))
         if outside:
             raise PolicyError(

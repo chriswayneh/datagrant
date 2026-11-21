@@ -309,6 +309,14 @@ def _col_expr(
             f"CONCAT(REPEAT('*', LENGTH({text}) - 4), RIGHT({text}, 4)) "
             f"ELSE REPEAT('*', LENGTH({text})) END AS {ident}"
         )
+    if mask == "pan":
+        text = f"SAFE_CAST({src} AS STRING)"
+        return (
+            f"CASE WHEN {src} IS NULL THEN NULL "
+            f"WHEN REGEXP_CONTAINS({text}, r'^[0123456789]{{12,19}}$') "
+            f"THEN CONCAT(LEFT({text}, 6), REPEAT('*', LENGTH({text}) - 10), RIGHT({text}, 4)) "
+            f"ELSE {lit(REDACTED)} END AS {ident}"
+        )
     if mask == "hash":
         fn = f"{q_project(project)}.{q(STATE_DATASET)}.{q(HASH_UDF)}"
         return f"{fn}({lit(hash_scope)}, CAST({src} AS STRING)) AS {ident}"

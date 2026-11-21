@@ -81,6 +81,15 @@ def column_expr(
             " pg_catalog.right({v}, {keep})"
             " ELSE pg_catalog.repeat('*', pg_catalog.length({v})) END"
         ).format(v=as_text, min=sql.Literal(PARTIAL_MIN_LEN), keep=sql.Literal(PARTIAL_KEEP))
+    elif mask == "pan":
+        expr = sql.SQL(
+            "CASE WHEN {v} IS NULL THEN NULL"
+            " WHEN pg_catalog.length({v}) BETWEEN 12 AND 19"
+            " AND {v} OPERATOR(pg_catalog.!~) '[^0123456789]'"
+            " THEN pg_catalog.concat(pg_catalog.left({v}, 6),"
+            " pg_catalog.repeat('*', pg_catalog.length({v}) - 10), pg_catalog.right({v}, 4))"
+            " ELSE '[REDACTED]' END"
+        ).format(v=as_text)
     elif mask == "hash":
         if catalog.pgcrypto_schema is None:
             raise MaskError(

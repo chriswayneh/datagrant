@@ -118,3 +118,5 @@ Append-only. Never edit past entries. Format: date (UTC), stage, actor, action, 
 Maintainer (Chris) approved the alpha, beta and 1.0 roadmap, including a v0.8.0 PCI pack, in chat: "Yes, post the roadmap as outlined". Docs only; ROADMAP.md and roadmap/README.md updated.
 
 | 2026-11-21 CT | Construction | Codex | Verified the published v0.7.0 tag and updated the release status in the README, roadmap, release notes, and AI-DLC state. BigQuery mock and CI coverage is documented; live GCP acceptance was not run. | **documentation refresh** |
+
+| 2026-11-21 CT | Construction | Codex | Maintainer approved continuing PCI DSS support. Added the first v0.8.0 slice: explicit card-data classification, PAN display masks for three engines, and policy refusals for tagged card data in row filters or tagged CVV/track in grants. | **implementation in review** |

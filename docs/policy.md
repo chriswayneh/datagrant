@@ -45,6 +45,7 @@ v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_c
 | `allowed_groups` | yes | Groups whose members may request this table. |
 | `columns` | yes | Map of column to mask. Only listed columns can be requested. |
 | `filter_columns` | no | Columns that row filters may use but that are never in the view and can't be requested. Each must be used by a row filter and must not also be in `columns`. |
+| `card_data` | no | Map of column names to `pan`, `cvv`, or `track`. Tags are matched without regard to case. Tagged PAN can only use `pan`, `redact`, or `null`; tagged CVV and track data cannot be granted. No tagged card data can be used in a row filter. |
 | `row_filters` | no | Allowed row filters. A request's `--row-filter` must exactly match one entry. |
 | `require_row_filter` | no | `true` means a request without a row filter is denied. Needs at least one `row_filters` entry. |
 | `max_duration` | no | Per-table cap. It may not exceed the policy-wide `max_duration`. |
@@ -62,9 +63,12 @@ v0.4.0 keys (`approvals_required`, `separation_of_duties`, `pending_ttl`, `max_c
 | `redact` | The constant `[REDACTED]`. |
 | `null` | NULL, cast to the column's type. |
 | `partial` | Asterisks plus the last 4 characters. Values shorter than 8 characters are fully masked. |
+| `pan` | For a tagged payment card number with 12–19 ASCII digits, show the first 6 and last 4 with asterisks in between. NULL stays NULL; malformed values are redacted. |
 | `hash` | A hex HMAC-SHA256 of the value under a key derived from the local hash key and the dataset's `hash_scope`. Postgres needs `pgcrypto` and fails closed without it or without the key. Snowflake calls `datagrant.hash_hmac` (key not in view SQL). BigQuery calls `datagrant.hash_hmac` (key not in view SQL). Provision the master row once with `datagrant setup bigquery --apply` (load job, never a query parameter). `--rotate-hash-key` is explicit, prints the live hash-grant count, and refuses while any are active unless `--force`; it changes every BigQuery pseudonym. A hash grant `--apply` is a read-only preflight: the `datagrant` dataset must be operator-only (no `READER`, no `projectReaders`, no `allUsers` / `allAuthenticatedUsers`, no domain, no dataset/view authorization, no extra routines), `hash_hmac` must exist, there must be exactly one master row whose fingerprint matches, and `_hash_master` / `hash_hmac` must have no table- or routine-level IAM. Passthrough-only grants skip that check. A missing authorized-routine ACL is not that check: the grant can still become active, but the view is unusable. That preflight is a snapshot: between the check and the first `hash_hmac` call, dataset ACL or project IAM can change. Project-level BigQuery data roles are key-equivalent; use a dedicated hash project. Equal inputs give equal outputs within one hash scope (see [linkability](security.md#known-limits)). BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link. |
 
-Column types are read from the catalog when the grant is created (Postgres `pg_attribute`; Snowflake and BigQuery `INFORMATION_SCHEMA.COLUMNS`, with case-insensitive column matching on BigQuery). BigQuery inspect queries the **source** project (`database`), not the grant project. The five mask names are the same on all three engines. BigQuery `null` is `CAST(NULL AS <type>)` when `--apply` inspects the table.
+Column types are read from the catalog when the grant is created (Postgres `pg_attribute`; Snowflake and BigQuery `INFORMATION_SCHEMA.COLUMNS`, with case-insensitive column matching on BigQuery). BigQuery inspect queries the **source** project (`database`), not the grant project. The mask names are the same on all three engines. BigQuery `null` is `CAST(NULL AS <type>)` when `--apply` inspects the table.
+
+Card data tags support PCI DSS display and access controls. Operators must classify each card-data column, including aliases exposed through source views. DataGrant does not discover card data or change how it is stored.
 
 ## Row filters
 
