@@ -35,6 +35,7 @@ from datagrant.policy import Policy
 from datagrant.receipt import GrantFacts
 
 _JOB_TIMEOUT = 60
+LIVE_HASH_MASK_RE = r':\s*"hash"'
 
 
 class _Store:
@@ -194,7 +195,8 @@ WHERE grant_id = @grant_id AND {predicate}
             f"SELECT COUNT(*) AS n FROM {self._table} "  # nosec B608
             "WHERE status IN ('issuing', 'enabling', 'active') "
             "AND expires_at > CURRENT_TIMESTAMP() "
-            r"""AND REGEXP_CONTAINS(COALESCE(JSON_QUERY(facts_json, '$.masks'), ''), r':"hash"')""",
+            f"AND REGEXP_CONTAINS(COALESCE(JSON_QUERY(facts_json, '$.masks'), ''), "  # nosec B608
+            f"r'{LIVE_HASH_MASK_RE}')",
             {},
         )
         if len(rows) != 1:

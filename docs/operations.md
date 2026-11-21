@@ -50,7 +50,7 @@ Snowflake is the second engine. Postgres `--apply` is unchanged. BigQuery is v0.
 
 **Sweep.** Run `datagrant sweep --apply` every 1 minute (`* * * * *`). Snowflake `DAYS_TO_EXPIRY` is a calendar-day backstop, not sub-day enforcement. Missed sweeps leave the grant user ENABLE until the next successful sweep. Sweep skips `issuing`/`enabling` rows younger than 10 minutes.
 
-**Hashes.** Snowflake hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Keep separate `hash_scope` values.
+**Hashes.** BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link.
 
 Unreleased hash repair: setup creates a secure Python 3.12 `_HMAC_SHA256` function using only the standard library, then the existing SQL `HASH_HMAC` wrapper over the protected key table. The operator needs permission to create Python functions. Grant users need neither function's `USAGE` privilege and must not receive `SELECT` on the key table. NULL remains NULL; an empty string has its own hash.
 
@@ -92,7 +92,7 @@ datagrant approve REQUEST_ID --apply
 
 **Sweep.** Run `datagrant sweep --apply` every 1 minute (`* * * * *`). IAM `request.time` is a backstop for new queries, not sub-day enforcement. Missed sweeps leave the view until the next successful sweep. Sweep skips `issuing`/`enabling` rows younger than 10 minutes.
 
-**Hashes.** BigQuery hashes are not designed to be joinable with Postgres or Snowflake hashes (different HMAC output encoding). Keep separate `hash_scope` values.
+**Hashes.** BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link.
 
 This path is mock- and CI-tested. A live GCP test was not run. Optional live tests stay behind `DATAGRANT_TEST_BIGQUERY`.
 

@@ -31,7 +31,7 @@ Add a dataset with `engine: snowflake`. Install `pip install '.[snowflake]'` fro
           - "REGION = 'west'"
 ```
 
-`--apply` reads column types from `INFORMATION_SCHEMA.COLUMNS`, builds a secure view `FROM db.s.t AS "SRC"`, and re-emits filters as `"SRC"."COL"`. Same five masks as Postgres. Hashes are not designed to be joinable with Postgres hashes (different HMAC output encoding). Sweep every 1 minute. Details: [CLI](../docs/cli.md), [operations](../docs/operations.md#warehouses-v060).
+`--apply` reads column types from `INFORMATION_SCHEMA.COLUMNS`, builds a secure view `FROM db.s.t AS "SRC"`, and re-emits filters as `"SRC"."COL"`. Same five masks as Postgres. BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link. Sweep every 1 minute. Details: [CLI](../docs/cli.md), [operations](../docs/operations.md#warehouses-v060).
 
 ## BigQuery (v0.7.0)
 
@@ -54,4 +54,4 @@ Add a dataset with `engine: bigquery`. Install `pip install '.[bigquery]'` from 
           - "region = 'west'"
 ```
 
-`--apply` inspects `INFORMATION_SCHEMA.COLUMNS` in the source project, builds an authorized view with `` `SRC` ``, and binds IAM to the Google principal from `policy.identity.google_principals`. Same five masks as Postgres. Hashes are not designed to be joinable with Postgres or Snowflake. Sweep every 1 minute. Details: [CLI](../docs/cli.md), [operations](../docs/operations.md#bigquery-v070).
+`--apply` inspects `INFORMATION_SCHEMA.COLUMNS` in the source project, builds an authorized view with `` `SRC` ``, and binds IAM to the Google principal from `policy.identity.google_principals`. Same five masks as Postgres. BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link. Sweep every 1 minute. Details: [CLI](../docs/cli.md), [operations](../docs/operations.md#bigquery-v070).
