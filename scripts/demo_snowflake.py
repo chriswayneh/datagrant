@@ -69,7 +69,7 @@ def run(work: Path) -> None:
     os.environ.pop("DATAGRANT_DSN", None)
     os.environ.pop("DATAGRANT_SNOWFLAKE_DSN", None)
 
-    print("# datagrant snowflake demo, v0.6.0 (dry-run SQL only, no account)")
+    print("# datagrant snowflake demo, v0.6.1 (dry-run SQL only, no account)")
     print("$ datagrant --version")
     print(f"datagrant {__version__}")
 

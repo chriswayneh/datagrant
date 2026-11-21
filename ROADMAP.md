@@ -12,6 +12,7 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | v0.4.0 | Approvals and policy limits | ✅ Released |
 | v0.5.0 | Ops hardening | ✅ Released |
 | v0.6.0 | Warehouses | ✅ Released |
+| v0.6.1 | Snowflake setup patch | Ready, release pending |
 | v0.7.0+ | More warehouses (BigQuery) | Planned |
 
 ## v0.1.0: done
@@ -52,6 +53,12 @@ datagrant grows in small, reviewed units. Each unit is one pull request with tes
 | Item | What | Status |
 | --- | --- | :---: |
 | Ops hardening | Session `pg_advisory_lock` on mutating `--apply` (unlock in `finally`); `datagrant doctor`; optional `strict_preflight` (access-creating only); receipt-log 0600; optional `strict_policy_permissions`; `SET LOCAL log_statement` when the admin can SET it. No warehouses, rate limits, `max_rows`, or break-glass. Design: [docs/design/ops-hardening.md](docs/design/ops-hardening.md). | ✅ |
+
+## v0.6.1: ready, release pending
+
+| Item | What | Status |
+| --- | --- | :---: |
+| Snowflake hash setup | Replace `SHA2_HMAC` (Snowflake lacks it) with a Python 3.12 stdlib `hmac` UDF ([#61](https://github.com/chriswayneh/datagrant/pull/61)). NULL stays NULL; the key column is BINARY. Verified by CI and SQL checks only; no live Snowflake smoke test. | Ready, release pending |
 
 ## v0.6.0: done
 

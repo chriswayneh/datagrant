@@ -13,8 +13,14 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 ### Fixed
 - Docker demo on Postgres 18 mounts its disposable volume at `/var/lib/postgresql`, matching the official image's versioned data directory. CI integration retains Postgres 16 coverage.
 - BigQuery two-person plans require an approver, matching the Postgres and Snowflake planners. Apply also refuses unapproved two-person receipt facts before any client operation or receipt write, including directly constructed or replaced plans. BigQuery CLI `--apply` remains disabled.
-- Snowflake setup provisions a secure Python 3.12 HMAC-SHA256 primitive using the standard library instead of calling the unavailable `SHA2_HMAC` built-in. The existing SQL wrapper keeps the key in its restricted table, preserves scope derivation and hex output, and keeps NULL distinct from empty strings. Added RFC 4231 handler regressions and an opt-in live SQL/secure-view smoke test (`DATAGRANT_TEST_SNOWFLAKE_DSN`); live validation is still required before release.
 - BigQuery `lit()` emits GoogleSQL (`\` first, then `\'`; controls as `\n` and friends; U+2028, U+2029, and U+0085 as `\u2028` / `\u2029` / `\u0085`). Reverse-drop calls `unbind_iam` (if bind was attempted), then `drop_view`, then `mark_failed`, each in try/finally; `apply_plan` still writes `revoked` when issued even if cleanup fails, drops the view at most once, and names both the original and cleanup errors without a duplicated `grant <id>:` prefix. A client `GrantError` still runs cleanup. `KeyboardInterrupt` is re-raised even if cleanup then fails.
+
+## [0.6.1] - 2026-11-21
+
+Snowflake setup patch.
+
+### Fixed
+- Snowflake setup no longer calls `SHA2_HMAC`, which Snowflake lacks. It now provisions a secure Python 3.12 HMAC-SHA256 UDF that uses the standard-library `hmac` (`hmac.digest`). The existing SQL wrapper keeps the key in its BINARY column in the restricted table, preserves scope derivation and hex output, and keeps NULL distinct from empty strings (NULL stays NULL). Added RFC 4231 handler regressions. This fix is verified by CI and SQL checks only; there is no live Snowflake smoke test. ([#61](https://github.com/chriswayneh/datagrant/pull/61))
 
 ## [0.6.0] - 2026-11-14
 
