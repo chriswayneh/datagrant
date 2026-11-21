@@ -34,6 +34,7 @@ def issue_approved(
     receipts: ReceiptSink,
     now: datetime,
     hash_key: HashKey | None = None,
+    max_concurrent: int | None = None,
 ) -> GrantPlan:
     """Consume a freshly won claim. On ambiguity, leave it for reconciliation."""
     approval = claim.approval
@@ -45,6 +46,8 @@ def issue_approved(
         or dataset.engine != "bigquery"
     ):
         raise GrantError("BigQuery approval claim does not match the request")
+    if not claim.snapshot.principal:
+        raise GrantError("BigQuery pending request is missing a google principal")
     plan = build_plan(
         approval.decision,
         approval.request,
@@ -61,7 +64,7 @@ def issue_approved(
         hash_key=hash_key,
     )
     plan = replace(plan, request_id=claim.request_id)
-    apply_plan(client, plan, receipts)
+    apply_plan(client, plan, receipts, max_concurrent=max_concurrent)
     if client.requests.finish_approval(claim) != 1:
         raise GrantError("BigQuery grant issued but approval finalization needs reconciliation")
     return plan

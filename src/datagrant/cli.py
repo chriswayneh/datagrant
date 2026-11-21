@@ -998,20 +998,53 @@ def _bq_resolve_principal(args: argparse.Namespace, policy: Any, caller: Any) ->
     flag = getattr(args, "google_principal", None)
     mapped = policy.identity.google_principals.get(normalize_principal(caller.username))
     oidc_email = None
-    if caller.source == "oidc" and (caller.username_claim == "email" or "@" in caller.username):
+    if caller.source == "oidc" and caller.username_claim == "email":
         oidc_email = caller.username
     try:
-        return resolve_google_principal(flag=flag, mapped=mapped, oidc_email=oidc_email)
+        return resolve_google_principal(
+            flag=flag,
+            mapped=mapped,
+            oidc_email=oidc_email,
+            identity_mode=policy.identity.mode,
+        )
     except GrantError as exc:
         raise CliError(str(exc), EXIT_USAGE) from None
 
 
-def _bq_concurrent_reason(store: Any, policy: Any, principal: str, dataset: str) -> str | None:
+def _bq_concurrent_reason(
+    store: Any,
+    policy: Any,
+    requester: str,
+    dataset: str,
+    principal: str | None = None,
+) -> str | None:
+    from datagrant.bq.grant import GrantError
+
     cap = policy.concurrent_grant_cap(dataset)
     if cap is None:
         return None
-    n = store.count_live_grants(principal)
-    return _cap_message(principal, n, cap)
+    try:
+        n = store.count_live_grants(requester, principal=principal)
+    except GrantError as exc:
+        raise CliError(str(exc), EXIT_FAILED) from None
+    return _cap_message(requester, n, cap)
+
+
+@contextmanager
+def _bq_grant_client(args: argparse.Namespace) -> Iterator[Any]:
+    """Open the BigQuery grant client. Tests patch this to avoid live GCP."""
+    from datagrant.bigquery_support import BigQuerySetupError, resolve_location, resolve_project
+    from datagrant.bq.client import open_grant_client
+
+    try:
+        project = resolve_project(getattr(args, "bigquery_project", None))
+        location = resolve_location(getattr(args, "bigquery_location", None))
+        if location is None:
+            raise BigQuerySetupError("BigQuery state dataset location is required")
+        with open_grant_client(project, location) as client:
+            yield client
+    except BigQuerySetupError as exc:
+        raise CliError(str(exc), EXIT_USAGE) from None
 
 
 def _have_bq_project(args: argparse.Namespace) -> bool:
@@ -1043,9 +1076,19 @@ def _bq_require_apply_setup(args: argparse.Namespace) -> None:
         raise CliError(str(exc), EXIT_USAGE) from None
 
 
-def _bigquery_request(ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any) -> int:
-    """BigQuery dry run, or --apply setup checks. Grant issue is a later PR."""
+def _bigquery_request(
+    ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any, ttl: timedelta
+) -> int:
+    """BigQuery dry run, two-person pending persist, or --apply setup checks.
+
+    Auto grant issue is a later PR. The bound principal is identity-only.
+    """
+    import secrets
+
     from datagrant.bigquery_support import EXTRA_HINT
+    from datagrant.bq.grant import GrantError, identity_with_principal
+    from datagrant.bq.revoke import PendingRequest
+    from datagrant.receipt import GrantFacts
 
     a = ctx.args
     ds = policy.datasets[req.dataset]
@@ -1074,30 +1117,109 @@ def _bigquery_request(ctx: Ctx, req: Any, decision: Any, policy: Any, caller: An
         )
         return EXIT_OK
     _bq_require_apply_setup(a)
-    raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
+    with _bq_grant_client(a) as client:
+        reason = _bq_concurrent_reason(client, policy, caller.username, req.dataset)
+        if reason:
+            return _refuse_request(ctx, req, policy, [reason], caller)
+        if decision.approval == "two-person":
+            now = datetime.now(UTC)
+            request_id = secrets.token_hex(6)
+            facts = GrantFacts(
+                request_id,
+                req.requester,
+                req.dataset,
+                req.table,
+                tuple(req.columns),
+                {c: decision.masks[c] for c in req.columns},
+                req.row_filter,
+                req.purpose,
+                now,
+                now + req.duration,
+                decision.policy_sha256,
+                decision.policy_version,
+                "two-person",
+                (),
+                identity_with_principal(caller.request_state_dict(), principal),
+                None,
+            )
+            pending = PendingRequest(request_id, now + ttl, facts)
+            try:
+                client.requests.insert_pending(pending, principal)
+            except GrantError as exc:
+                raise CliError(str(exc), EXIT_FAILED) from None
+            n_req = policy.approvals_required
+            ctx.emit(
+                {
+                    "status": "pending",
+                    "request_id": request_id,
+                    "requester": caller.username,
+                    "identity_source": caller.source,
+                    "google_principal": principal,
+                    "pending_expires_at": pending.expires_at,
+                    "approvals_recorded": 0,
+                    "approvals_required": n_req,
+                    "approvals": f"0/{n_req}",
+                },
+                f"request {request_id} is pending approval by another person"
+                f" (approvals 0/{n_req}, expires {pending.expires_at.isoformat()}).\n"
+                f"google principal {principal}",
+            )
+            return EXIT_OK
+        raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
 
 
 def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
-    """Route BigQuery approve. Grant --apply stays refused until the last M5 step."""
+    """Load the stored principal, then check policy, SoD, quorum, and the cap.
+
+    Grant --apply stays refused until the last M5 step. Approve never takes
+    ``--google-principal`` and never re-derives the principal from the caller.
+    """
     from datagrant.bigquery_support import EXTRA_HINT
+    from datagrant.bq.approval import evaluate_approval
+    from datagrant.bq.grant import GrantError
 
     a = ctx.args
     _bq_refuse_locator(a)
-    if not a.apply:
-        ctx.emit(
-            {
-                "dry_run": True,
-                "engine": "bigquery",
-                "request_id": a.request_id,
-                "approver": caller.username,
-            },
-            f"dry run: {caller.username} may approve request {a.request_id}; "
-            "the stored google principal is shown to approvers; with --apply "
-            f"datagrant would require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC",
-        )
-        return EXIT_OK
-    _bq_require_apply_setup(a)
-    raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
+    if a.apply:
+        _bq_require_apply_setup(a)
+    with _bq_grant_client(a) as client:
+        try:
+            snapshot = client.requests.get_pending(a.request_id)
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+        if snapshot is None:
+            raise CliError(f"request {a.request_id} is not pending", EXIT_FAILED)
+        if not snapshot.principal:
+            raise CliError(
+                f"request {a.request_id} is missing a stored google principal", EXIT_USAGE
+            )
+        now = datetime.now(UTC)
+        try:
+            approval = evaluate_approval(policy, snapshot.pending, caller, snapshot.votes, now=now)
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+        requester = snapshot.pending.facts.requester
+        reason = _bq_concurrent_reason(client, policy, requester, snapshot.pending.facts.dataset)
+        if reason:
+            raise CliError(reason, EXIT_FAILED)
+        principal = snapshot.principal
+        if not a.apply:
+            ctx.emit(
+                {
+                    "dry_run": True,
+                    "engine": "bigquery",
+                    "request_id": a.request_id,
+                    "approver": caller.username,
+                    "google_principal": principal,
+                    "approvals_recorded": len(approval.votes),
+                    "approvals_required": approval.required,
+                },
+                f"dry run: {caller.username} may approve request {a.request_id}; "
+                f"google principal {principal}; with --apply "
+                f"datagrant would require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC",
+            )
+            return EXIT_OK
+        raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
 
 
 def _snowflake_request(
@@ -1505,7 +1627,7 @@ def cmd_request(ctx: Ctx) -> int:
     if not decision.allowed:
         return _refuse_request(ctx, req, policy, decision.reasons, caller)
     if policy.datasets[req.dataset].engine == "bigquery":
-        return _bigquery_request(ctx, req, decision, policy, caller)
+        return _bigquery_request(ctx, req, decision, policy, caller, ttl)
     if policy.datasets[req.dataset].engine == "snowflake":
         return _snowflake_request(ctx, req, decision, policy, caller, ttl)
     two_person = decision.approval == "two-person"
@@ -2733,8 +2855,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     r.add_argument(
         "--google-principal",
-        help="IAM member to bind (user:email, group:, or serviceAccount:); "
-        "local BigQuery requests need this or policy.identity.google_principals",
+        help="confirm the bound IAM member (user:email). Local-mode identity is "
+        "self-asserted; a free-form user: flag is allowed only with no mapping. "
+        "group: and serviceAccount: must come from policy.identity.google_principals",
     )
     r.add_argument(
         "--pending-ttl",
@@ -2753,11 +2876,6 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
     ap.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
     ap.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
-    ap.add_argument(
-        "--google-principal",
-        help="IAM member to bind (user:email, group:, or serviceAccount:); "
-        "ignored when the pending BigQuery request already stored a principal",
-    )
     ap.set_defaults(fn=cmd_approve)
 
     g = sub.add_parser("grant", help="inspect grants").add_subparsers(

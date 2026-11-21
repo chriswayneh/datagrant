@@ -35,7 +35,7 @@ REDACTED = "[REDACTED]"
 _PRINCIPAL_PREFIXES = ("user:", "serviceAccount:", "group:")
 _REFUSED_PRINCIPALS = frozenset({"allusers", "allauthenticatedusers"})
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+$")
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 ACCESS_POLICY_VERSION = 3
 ETAG_MAX_TRIES = 2
 JOB_USER_ROLE = "roles/bigquery.jobUser"
@@ -110,6 +110,7 @@ class GrantClient(Protocol):
         ...
 
     def mark_failed(self, plan: GrantPlan) -> None: ...
+    def count_live_grants(self, requester: str, principal: str | None = None) -> int: ...
 
 
 def q(name: str) -> str:
@@ -177,6 +178,18 @@ def _reject_controls(label: str, value: str) -> None:
         raise GrantError(f"{label} contains NUL or control characters")
 
 
+def _email_ok(rest: str) -> bool:
+    if not _EMAIL_RE.fullmatch(rest):
+        return False
+    local, _, domain = rest.partition("@")
+    if local.startswith(".") or local.endswith(".") or ".." in local:
+        return False
+    for label in domain.split("."):
+        if not label or label.startswith("-") or label.endswith("-"):
+            return False
+    return True
+
+
 def _parse_principal(raw: str) -> str:
     principal = raw.strip()
     if not principal:
@@ -189,9 +202,16 @@ def _parse_principal(raw: str) -> str:
     if prefix is None:
         raise GrantError("google principal must be user:, serviceAccount:, or group:")
     rest = folded.split(":", 1)[1]
-    if not _EMAIL_RE.fullmatch(rest):
+    if not _email_ok(rest):
         raise GrantError("google principal email is invalid")
     return prefix + rest
+
+
+def identity_with_principal(identity: Mapping[str, Any] | None, principal: str) -> dict[str, Any]:
+    """Copy receipt identity and pin the canonical Google principal into it."""
+    out = dict(identity) if identity is not None else {}
+    out["google_principal"] = principal
+    return out
 
 
 def resolve_google_principal(
@@ -199,18 +219,41 @@ def resolve_google_principal(
     flag: str | None = None,
     mapped: str | None = None,
     oidc_email: str | None = None,
+    identity_mode: str = "local",
 ) -> str:
-    """Flag, then policy map, then OIDC email. Missing is a GrantError."""
-    if flag is not None and str(flag).strip():
-        return _parse_principal(flag)
+    """Bound principal comes from identity: mapping, then verified OIDC email.
+
+    ``--google-principal`` may only confirm that bound value. A free-form flag
+    is allowed only in local mode with no mapping, and only as ``user:``.
+    ``group:`` and ``serviceAccount:`` must come from the policy mapping.
+    """
+    bound: str | None = None
     if mapped is not None and str(mapped).strip():
-        return _parse_principal(mapped)
-    if oidc_email is not None and str(oidc_email).strip():
+        bound = _parse_principal(mapped)
+    elif oidc_email is not None and str(oidc_email).strip():
         value = oidc_email.strip()
-        folded = value.translate(_ASCII_LOWER)
-        if any(folded.startswith(p.lower()) for p in _PRINCIPAL_PREFIXES):
-            return _parse_principal(value)
-        return _parse_principal(f"user:{value}")
+        if ":" in value:
+            raise GrantError("OIDC google principal must not contain ':'")
+        bound = _parse_principal(f"user:{value}")
+    flag_raw = flag if flag is not None and str(flag).strip() else None
+    flag_principal = _parse_principal(flag_raw) if flag_raw is not None else None
+    if identity_mode == "oidc":
+        if bound is None:
+            raise GrantError("google principal is required")
+        if flag_principal is not None and flag_principal != bound:
+            raise GrantError("google principal flag does not match identity")
+        return bound
+    if bound is not None:
+        if flag_principal is not None and flag_principal != bound:
+            raise GrantError("google principal flag does not match identity")
+        return bound
+    if flag_principal is not None:
+        if not flag_principal.startswith("user:"):
+            raise GrantError(
+                "google principal flag must be user:; group: and serviceAccount: "
+                "must come from policy.identity.google_principals"
+            )
+        return flag_principal
     raise GrantError("google principal is required")
 
 
@@ -414,7 +457,7 @@ def build_plan(
         decision.policy_version,
         decision.approval,
         tuple(approvers),
-        dict(requester_identity) if requester_identity is not None else None,
+        identity_with_principal(requester_identity, principal),
         tuple(dict(x) for x in approver_identities) if approver_identities is not None else None,
     )
     return GrantPlan(
@@ -721,12 +764,17 @@ def apply_plan(
     client: GrantClient,
     plan: GrantPlan,
     receipts: ReceiptSink | None = None,
+    *,
+    max_concurrent: int | None = None,
 ) -> None:
     """Fail-safe apply. IAM last: dataset bind + project jobUser, etag RMW.
 
     Cleanup calls ``drop_view`` at most once. ``mark_failed`` always runs.
     A post-issued failure still writes ``revoked`` if cleanup fails.
+    Re-checks ``max_concurrent_grants`` inside the issuing claim (by requester).
     """
+    if not plan.principal:
+        raise GrantError("google principal is required")
     if plan.facts is not None and plan.facts.approval == "two-person" and not plan.facts.approvers:
         raise GrantError("two-person approval: the grant needs an approver")
     created = False
@@ -736,6 +784,16 @@ def apply_plan(
     try:
         client.insert_issuing(plan)
         created = True
+        if max_concurrent is not None:
+            facts = plan.facts
+            if facts is None:
+                raise GrantError(f"grant {plan.grant_id}: concurrent cap check needs grant facts")
+            n = client.count_live_grants(facts.requester)
+            if n > max_concurrent:
+                raise GrantError(
+                    f"grant {plan.grant_id}: concurrent grant cap exceeded "
+                    f"({n} live, max_concurrent_grants is {max_concurrent}); view dropped"
+                )
         client.create_view(plan)
         client.authorize_views_dataset_if_missing(plan)
         if client.update_names(plan) != 1:

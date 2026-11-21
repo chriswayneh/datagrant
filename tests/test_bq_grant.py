@@ -26,6 +26,7 @@ from datagrant.bq.grant import (
     apply_unbind,
     build_plan,
     dataset_binding,
+    identity_with_principal,
     job_user_binding,
     lit,
     q,
@@ -88,6 +89,7 @@ class FakeClient:
         raise_after_bind: bool = False,
         conflict_dataset: int = 0,
         conflict_project: int = 0,
+        extra_live: int = 0,
     ) -> None:
         self.calls: list[str] = []
         self.fail_on = fail_on
@@ -107,6 +109,7 @@ class FakeClient:
         self.conflict_project = conflict_project
         self.iam_versions: list[int] = []
         self.iam_etags: list[str] = []
+        self.extra_live = extra_live
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -116,6 +119,10 @@ class FakeClient:
     def insert_issuing(self, plan: GrantPlan) -> None:
         self._step("insert_issuing")
         self.status[plan.grant_id] = "issuing"
+
+    def count_live_grants(self, requester: str, principal: str | None = None) -> int:
+        n = sum(1 for st in self.status.values() if st in {"issuing", "enabling", "active"})
+        return n + self.extra_live
 
     def create_view(self, plan: GrantPlan) -> None:
         self._step("create_view")
@@ -834,7 +841,7 @@ def test_identity_on_facts() -> None:
         approvers=("bob",),
     )
     assert plan.facts is not None
-    assert plan.facts.identity == {"source": "local"}
+    assert plan.facts.identity == {"source": "local", "google_principal": PRINCIPAL}
     assert plan.facts.approver_identities == ({"source": "local"},)
     assert plan.facts.approvers == ("bob",)
 
@@ -872,16 +879,54 @@ def test_lit_round_trip() -> None:
     assert lit("\u0085") == r"'\u0085'"
 
 
-def test_resolve_google_principal_flag_policy_then_oidc() -> None:
-    assert (
-        resolve_google_principal(flag="user:flag@example.com", mapped="user:map@example.com")
-        == "user:flag@example.com"
-    )
+def test_resolve_google_principal_identity_first() -> None:
     assert resolve_google_principal(mapped="user:map@example.com") == "user:map@example.com"
+    assert (
+        resolve_google_principal(flag="user:map@example.com", mapped="user:map@example.com")
+        == "user:map@example.com"
+    )
+    with pytest.raises(GrantError, match="does not match identity"):
+        resolve_google_principal(flag="user:flag@example.com", mapped="user:map@example.com")
+    with pytest.raises(GrantError, match="does not match identity"):
+        resolve_google_principal(
+            flag="user:other@example.com",
+            oidc_email="Alice@Example.com",
+            identity_mode="oidc",
+        )
     assert resolve_google_principal(oidc_email="Alice@Example.com") == "user:alice@example.com"
-    assert resolve_google_principal(oidc_email="user:Alice@Example.com") == "user:alice@example.com"
+    assert (
+        resolve_google_principal(
+            flag="user:alice@example.com",
+            oidc_email="Alice@Example.com",
+            identity_mode="oidc",
+        )
+        == "user:alice@example.com"
+    )
+    with pytest.raises(GrantError, match="must not contain ':'"):
+        resolve_google_principal(oidc_email="group:eng@example.com", identity_mode="oidc")
+    with pytest.raises(GrantError, match="google principal is required"):
+        resolve_google_principal(identity_mode="oidc")
+    with pytest.raises(GrantError, match="google principal is required"):
+        resolve_google_principal(flag="user:alice@example.com", identity_mode="oidc")
+    with pytest.raises(GrantError, match="must be user:"):
+        resolve_google_principal(flag="group:eng@example.com")
+    with pytest.raises(GrantError, match="must be user:"):
+        resolve_google_principal(flag="serviceAccount:sa@proj.iam.gserviceaccount.com")
+    assert resolve_google_principal(flag="user:alice@example.com") == "user:alice@example.com"
+    assert (
+        resolve_google_principal(flag="group:eng@example.com", mapped="group:eng@example.com")
+        == "group:eng@example.com"
+    )
     with pytest.raises(GrantError, match="google principal is required"):
         resolve_google_principal()
+
+
+def test_identity_with_principal_pins_canonical_member() -> None:
+    assert identity_with_principal({"source": "os"}, PRINCIPAL) == {
+        "source": "os",
+        "google_principal": PRINCIPAL,
+    }
+    assert identity_with_principal(None, PRINCIPAL) == {"google_principal": PRINCIPAL}
 
 
 def test_principal_allowlist() -> None:
@@ -938,6 +983,9 @@ def test_principal_allowlist() -> None:
         "user:a@b@c",
         "user:alice!@example.com",
         "user:alice@exam_ple.com",
+        "user:a@b..com",
+        "user:a@-b.com",
+        "user:.a@b.com",
     ):
         with pytest.raises(GrantError, match="email is invalid"):
             build_plan(
@@ -1228,3 +1276,15 @@ def test_conditional_binding_cap_is_named() -> None:
     client = Cap()
     with pytest.raises(GrantError, match="per-principal conditional-binding cap"):
         apply_bind(client, _plan())
+
+
+def test_apply_plan_rechecks_concurrent_cap_by_requester(tmp_path: Path) -> None:
+    client = FakeClient(extra_live=1)
+    with pytest.raises(GrantError, match="concurrent grant cap exceeded"):
+        apply_plan(client, _plan(), _sink(tmp_path), max_concurrent=1)
+    assert client.calls[0] == "insert_issuing"
+    assert "drop_view" in client.calls
+    assert "bind_iam" not in client.calls
+    ok = FakeClient()
+    apply_plan(ok, _plan(), _sink(tmp_path / "ok"), max_concurrent=1)
+    assert ok.status[GID] == "active"

@@ -147,17 +147,26 @@ WHERE grant_id = @grant_id AND {predicate}
             grant_id=self._id(plan),
         )
 
-    def count_live_grants(self, principal: str) -> int:
-        """Count issuing/enabling/active rows for this Google principal.
+    def count_live_grants(self, requester: str, principal: str | None = None) -> int:
+        """Count issuing/enabling/active rows for this requester.
 
-        Postgres and Snowflake stores are not included. The cap is per engine.
+        Optional ``principal`` further restricts the count. Postgres and
+        Snowflake stores are not included. The cap is per engine.
         """
-        member = _parse_principal(principal)
+        if not isinstance(requester, str) or not requester.strip():
+            raise GrantError("requester is required")
+        values: dict[str, tuple[str, Any]] = {"requester": ("STRING", requester)}
+        extra = ""
+        if principal is not None:
+            extra = " AND principal = @principal"
+            values["principal"] = ("STRING", _parse_principal(principal))
         _, rows = self._query(
-            f"SELECT COUNT(*) AS n FROM {self._table} WHERE principal = @principal "  # nosec B608
+            f"SELECT COUNT(*) AS n FROM {self._table} "  # nosec B608
+            "WHERE JSON_VALUE(facts_json, '$.requester') = @requester "
             "AND status IN ('issuing', 'enabling', 'active') "
-            "AND expires_at > CURRENT_TIMESTAMP()",
-            {"principal": ("STRING", member)},
+            "AND expires_at > CURRENT_TIMESTAMP()"
+            f"{extra}",
+            values,
         )
         if len(rows) != 1:
             raise GrantError("BigQuery concurrent-grant count failed")
@@ -389,6 +398,7 @@ UPDATE {self._table}
 SET votes_json = @votes, status = @status, grant_id = @grant_id, revision = revision + 1
 WHERE request_id = @request_id AND status = 'pending' AND revision = @revision
   AND expires_at = @expires_at AND expires_at > CURRENT_TIMESTAMP()
+  AND principal = @principal
 """  # nosec B608
         count = self._affected(
             sql,
@@ -396,6 +406,7 @@ WHERE request_id = @request_id AND status = 'pending' AND revision = @revision
                 "request_id": _grant_id(request_id),
                 "expires_at": ("TIMESTAMP", row.expires_at),
                 "revision": ("INT64", row.revision),
+                "principal": ("STRING", snapshot.principal),
                 "votes": ("STRING", _encode_votes(approval.votes)),
                 "status": ("STRING", "approving" if approval.is_final else "pending"),
                 "grant_id": grant_param if approval.is_final else ("STRING", None),

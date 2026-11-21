@@ -1,5 +1,6 @@
 """Grant store contract at the BigQuery SDK boundary."""
 
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -139,6 +140,8 @@ def test_pending_round_trip_and_expiry_use_only_request_state(plan: GrantPlan) -
     insert, params = client.calls[0]
     assert "'pending', 0, '[]'" in insert
     assert PRINCIPAL not in insert and KEY.derived.hex() not in str(params)
+    payload = json.loads(params["facts_json"][1])
+    assert payload["identity"]["google_principal"] == PRINCIPAL
     client.rows = [
         {**{name: value for name, (_, value) in params.items()}, "revision": 0, "votes_json": "[]"}
     ]
@@ -219,7 +222,7 @@ def test_query_paging_errors_are_wrapped(plan: GrantPlan) -> None:
             return pages()
 
     with pytest.raises(GrantError, match="state query failed"):
-        GrantStore(Paging(), SDK, PROJECT, "US").count_live_grants(PRINCIPAL)
+        GrantStore(Paging(), SDK, PROJECT, "US").count_live_grants("alice")
 
 
 def test_cli_concurrent_reason_uses_store_count(plan: GrantPlan) -> None:
@@ -228,31 +231,59 @@ def test_cli_concurrent_reason_uses_store_count(plan: GrantPlan) -> None:
     from datagrant.cli import _bq_concurrent_reason
 
     class Store:
-        def count_live_grants(self, principal: str) -> int:
-            assert principal == PRINCIPAL
+        def count_live_grants(self, requester: str, principal: str | None = None) -> int:
+            assert requester == "alice"
+            assert principal is None
             return 2
 
     policy = SimpleNamespace(concurrent_grant_cap=lambda dataset: 2)
-    msg = _bq_concurrent_reason(Store(), policy, PRINCIPAL, "bq_clinic")
+    msg = _bq_concurrent_reason(Store(), policy, "alice", "bq_clinic")
     assert msg is not None
     assert "max_concurrent_grants is 2" in msg
+    assert "requester 'alice'" in msg
     policy = SimpleNamespace(concurrent_grant_cap=lambda dataset: None)
-    assert _bq_concurrent_reason(Store(), policy, PRINCIPAL, "bq_clinic") is None
+    assert _bq_concurrent_reason(Store(), policy, "alice", "bq_clinic") is None
 
 
-def test_count_live_grants_is_per_principal(plan: GrantPlan) -> None:
+def test_count_live_grants_is_per_requester(plan: GrantPlan) -> None:
     client = Client()
     client.rows = [{"n": 2}]
-    n = GrantStore(client, SDK, PROJECT, "US").count_live_grants(PRINCIPAL)
+    n = GrantStore(client, SDK, PROJECT, "US").count_live_grants("alice")
     assert n == 2
     sql, params = client.calls[0]
+    assert "JSON_VALUE(facts_json, '$.requester') = @requester" in sql
     assert "status IN ('issuing', 'enabling', 'active')" in sql
     assert "expires_at > CURRENT_TIMESTAMP()" in sql
+    assert params["requester"] == ("STRING", "alice")
+    assert "alice" not in sql
+    assert "principal" not in params
+    client.rows = [{"n": 1}]
+    n = GrantStore(client, SDK, PROJECT, "US").count_live_grants("alice", principal=PRINCIPAL)
+    assert n == 1
+    sql, params = client.calls[1]
+    assert "AND principal = @principal" in sql
     assert params["principal"] == ("STRING", PRINCIPAL)
     assert PRINCIPAL not in sql
     client.rows = [{"n": -1}]
     with pytest.raises(GrantError, match="concurrent-grant count failed"):
-        GrantStore(client, SDK, PROJECT, "US").count_live_grants(PRINCIPAL)
+        GrantStore(client, SDK, PROJECT, "US").count_live_grants("alice")
+
+
+def test_one_requester_with_many_principals_hits_the_cap(plan: GrantPlan) -> None:
+    from types import SimpleNamespace
+
+    from datagrant.cli import _bq_concurrent_reason
+
+    class Store:
+        def count_live_grants(self, requester: str, principal: str | None = None) -> int:
+            assert requester == "alice"
+            assert principal is None
+            return 2
+
+    policy = SimpleNamespace(concurrent_grant_cap=lambda dataset: 2)
+    msg = _bq_concurrent_reason(Store(), policy, "alice", "bq_clinic")
+    assert msg is not None
+    assert "already has 2 active grant(s)" in msg
 
 
 def test_auto_request_cannot_enter_pending_storage(plan: GrantPlan) -> None:

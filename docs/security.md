@@ -35,7 +35,7 @@ datagrant narrows, time-boxes and records access to regulated tables in Postgres
 
 ## Known limits
 
-- **Local identity is not authentication.** Default `identity.mode: local` (and omitted `identity`) still takes the OS user or `--as-user`. Anyone with the admin DSN can claim any name, so two-person approval is a workflow control in that mode.
+- **Local identity is not authentication.** Default `identity.mode: local` (and omitted `identity`) still takes the OS user or `--as-user`. Anyone with the admin DSN can claim any name, so two-person approval is a workflow control in that mode. Local-mode identity is self-asserted, including a BigQuery `--google-principal` that is not backed by `policy.identity.google_principals`.
 - **Local-mode distinct-groups.** In `identity.mode: local`, `distinct-groups` separation of duties is only as strong as the claimed names, the same way `approvals_required` is N claimed names, not N people.
 - **OIDC is a CLI boundary, not a database boundary.** Verifying tokens on `request`/`approve` does not stop someone who already holds the admin DSN, write access to `policy.yaml`, or the keys from connecting to Postgres directly or editing policy. To treat OIDC as an enforced control, run datagrant on a bastion, CI job or wrapper that holds `DATAGRANT_DSN` and the policy and accepts only caller ID tokens.
 - **Bearer ID tokens can be replayed** until `exp` and `max_token_age` (default 15 minutes from `iat`). There is no DPoP or sender-constraining. Keep `--oidc-token-file` at `0600`. datagrant does not check live IdP session revocation.
