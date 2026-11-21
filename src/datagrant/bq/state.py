@@ -352,7 +352,7 @@ COMMIT TRANSACTION;
                 )
                 for row in rows
             ]
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, GrantError):
             raise GrantError("BigQuery returned an invalid pending request") from None
 
     def get_pending(self, request_id: str) -> RequestSnapshot | None:

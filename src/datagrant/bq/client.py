@@ -1,4 +1,4 @@
-"""Compose BigQuery grant operations without exposing a CLI apply path."""
+"""Compose BigQuery grant operations for CLI --apply, revoke, and sweep."""
 
 from __future__ import annotations
 

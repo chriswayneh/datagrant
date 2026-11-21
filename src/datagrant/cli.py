@@ -978,6 +978,63 @@ def _print_sf_grant(
     return EXIT_OK
 
 
+def _print_bq_grant(
+    ctx: Ctx,
+    plan: Any,
+    user: str,
+    source: str,
+    *,
+    approvals_recorded: int | None = None,
+    approvals_required: int | None = None,
+) -> int:
+    data: dict[str, Any] = {
+        "status": "granted",
+        "engine": "bigquery",
+        "grant_id": plan.grant_id,
+        "view": plan.view_id,
+        "google_principal": plan.principal,
+        "expires_at": plan.expires_at,
+        "requester": user,
+        "identity_source": source,
+    }
+    if approvals_recorded is not None and approvals_required is not None:
+        data["approvals_recorded"] = approvals_recorded
+        data["approvals_required"] = approvals_required
+        data["approvals"] = f"{approvals_recorded}/{approvals_required}"
+    text = (
+        f"grant {plan.grant_id} active until {plan.expires_at.isoformat()}\n"
+        f"bigquery view={plan.view_id} principal={plan.principal}"
+    )
+    ctx.emit(data, text)
+    return EXIT_OK
+
+
+def _deliver_bq_issued(ctx: Ctx, client: Any, plan: Any, local: Any) -> None:
+    """Flush the outbox. Required sink failure reverse-drops the BigQuery grant."""
+    from datagrant.bq.grant import append_revoked, reverse_drop
+    from datagrant.outbox import flush, quick
+
+    remote = _remote(ctx.args)
+    if remote is None:
+        return
+    res = flush(local.log, remote.sink)
+    if res.error is None:
+        return
+    if remote.mode != "required":
+        _warn(ctx, f"receipt not delivered to sink, {res.pending} pending: {res.error}")
+        return
+    reverse_drop(client, plan, unbind=True)
+    append_revoked(plan, local, reason="sink_failed")
+    flush(local.log, quick(remote.sink))
+    raise CliError(
+        _hide_token(
+            f"grant {plan.grant_id}: receipt not delivered to sink ({res.error}); "
+            "BigQuery view dropped"
+        ),
+        EXIT_RECEIPT,
+    )
+
+
 def _bq_refuse_locator(args: argparse.Namespace) -> None:
     from datagrant.bigquery_support import BigQuerySetupError, refuse_secret_locator
 
@@ -1031,17 +1088,18 @@ def _bq_concurrent_reason(
 
 
 @contextmanager
-def _bq_grant_client(args: argparse.Namespace) -> Iterator[Any]:
+def _bq_grant_client(args: argparse.Namespace, *, location: str | None = None) -> Iterator[Any]:
     """Open the BigQuery grant client. Tests patch this to avoid live GCP."""
     from datagrant.bigquery_support import BigQuerySetupError, resolve_location, resolve_project
     from datagrant.bq.client import open_grant_client
 
     try:
         project = resolve_project(getattr(args, "bigquery_project", None))
-        location = resolve_location(getattr(args, "bigquery_location", None))
-        if location is None:
+        resolved = resolve_location(getattr(args, "bigquery_location", None))
+        chosen = resolved if resolved is not None else location
+        if chosen is None:
             raise BigQuerySetupError("BigQuery state dataset location is required")
-        with open_grant_client(project, location) as client:
+        with open_grant_client(project, chosen) as client:
             yield client
     except BigQuerySetupError as exc:
         raise CliError(str(exc), EXIT_USAGE) from None
@@ -1055,6 +1113,29 @@ def _have_bq_project(args: argparse.Namespace) -> bool:
     except BigQuerySetupError:
         return False
     return True
+
+
+def _bq_engine_only(args: argparse.Namespace) -> bool:
+    have_pg = bool(getattr(args, "dsn", None) or (os.environ.get(DSN_ENV) or "").strip())
+    return _have_bq_project(args) and not have_pg
+
+
+def _bq_policy_location(policy: Any, dataset: str | None = None) -> str | None:
+    if dataset is not None:
+        ds = policy.datasets.get(dataset)
+        loc = getattr(ds, "location", None) if ds is not None else None
+        if isinstance(loc, str) and loc.strip():
+            return loc.strip()
+    locs = {
+        str(ds.location).strip()
+        for ds in policy.datasets.values()
+        if getattr(ds, "engine", None) == "bigquery"
+        and isinstance(getattr(ds, "location", None), str)
+        and str(ds.location).strip()
+    }
+    if len(locs) == 1:
+        return next(iter(locs))
+    return None
 
 
 def _bq_require_apply_setup(args: argparse.Namespace) -> None:
@@ -1079,14 +1160,11 @@ def _bq_require_apply_setup(args: argparse.Namespace) -> None:
 def _bigquery_request(
     ctx: Ctx, req: Any, decision: Any, policy: Any, caller: Any, ttl: timedelta
 ) -> int:
-    """BigQuery dry run, two-person pending persist, or --apply setup checks.
-
-    Auto grant issue is a later PR. The bound principal is identity-only.
-    """
+    """BigQuery dry run, two-person pending persist, or auto grant --apply."""
     import secrets
 
-    from datagrant.bigquery_support import EXTRA_HINT
-    from datagrant.bq.grant import GrantError, identity_with_principal
+    from datagrant.bigquery_support import EXTRA_HINT, resolve_project
+    from datagrant.bq.grant import GrantError, apply_plan, build_plan, identity_with_principal
     from datagrant.bq.revoke import PendingRequest
     from datagrant.receipt import GrantFacts
 
@@ -1117,7 +1195,7 @@ def _bigquery_request(
         )
         return EXIT_OK
     _bq_require_apply_setup(a)
-    with _bq_grant_client(a) as client:
+    with _bq_grant_client(a, location=_bq_policy_location(policy, req.dataset)) as client:
         reason = _bq_concurrent_reason(client, policy, caller.username, req.dataset)
         if reason:
             return _refuse_request(ctx, req, policy, [reason], caller)
@@ -1165,24 +1243,59 @@ def _bigquery_request(
                 f"google principal {principal}",
             )
             return EXIT_OK
-        raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
+        hash_key = (
+            load_hash_key(resolve_key_path("hash", a.hash_key))
+            if _needs_hash(decision, req.columns)
+            else None
+        )
+        now = datetime.now(UTC)
+        sink = _sink(a)
+        _check_outbox(ctx, sink)
+        try:
+            plan = build_plan(
+                decision,
+                req,
+                project=resolve_project(getattr(a, "bigquery_project", None)),
+                principal=principal,
+                source_project=ds.database,
+                source_dataset=ds.schema,
+                location=ds.location,
+                now=now,
+                hash_key=hash_key,
+                requester_identity=caller.receipt_dict(),
+            )
+            apply_plan(
+                client,
+                plan,
+                sink,
+                max_concurrent=policy.concurrent_grant_cap(req.dataset),
+            )
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+        _deliver_bq_issued(ctx, client, plan, sink)
+        return _print_bq_grant(ctx, plan, caller.username, caller.source)
 
 
 def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
     """Load the stored principal, then check policy, SoD, quorum, and the cap.
 
-    Grant --apply stays refused until the last M5 step. Approve never takes
-    ``--google-principal`` and never re-derives the principal from the caller.
+    ``--apply`` records the vote and issues from ``claim.snapshot.principal``.
+    Approve never takes ``--google-principal`` and never re-derives the
+    principal from the caller.
     """
-    from datagrant.bigquery_support import EXTRA_HINT
+    import secrets
+
+    from datagrant.bigquery_support import EXTRA_HINT, resolve_project
     from datagrant.bq.approval import evaluate_approval
     from datagrant.bq.grant import GrantError
+    from datagrant.bq.issuance import issue_approved
 
     a = ctx.args
     _bq_refuse_locator(a)
     if a.apply:
         _bq_require_apply_setup(a)
-    with _bq_grant_client(a) as client:
+    fallback = _bq_policy_location(policy)
+    with _bq_grant_client(a, location=fallback) as client:
         try:
             snapshot = client.requests.get_pending(a.request_id)
         except GrantError as exc:
@@ -1204,6 +1317,11 @@ def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
             raise CliError(reason, EXIT_FAILED)
         principal = snapshot.principal
         if not a.apply:
+            next_step = (
+                "then issue the authorized view"
+                if approval.is_final
+                else "then record this approval"
+            )
             ctx.emit(
                 {
                     "dry_run": True,
@@ -1216,10 +1334,96 @@ def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                 },
                 f"dry run: {caller.username} may approve request {a.request_id}; "
                 f"google principal {principal}; with --apply "
-                f"datagrant would require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC",
+                f"datagrant would require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC, "
+                f"{next_step}",
             )
             return EXIT_OK
-        raise CliError("BigQuery grant --apply is not implemented yet", EXIT_USAGE)
+        grant_id = secrets.token_hex(6)
+        try:
+            claim = client.requests.record_vote(
+                a.request_id, policy, caller, now=now, grant_id=grant_id
+            )
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+        recorded = len(approval.votes)
+        required = approval.required
+        if claim is None:
+            if not approval.added:
+                ctx.emit(
+                    {
+                        "status": "pending",
+                        "engine": "bigquery",
+                        "request_id": a.request_id,
+                        "already_approved": True,
+                        "google_principal": principal,
+                        "approvals_recorded": recorded,
+                        "approvals_required": required,
+                        "approvals": f"{recorded}/{required}",
+                    },
+                    f"{caller.username} already approved request {a.request_id}"
+                    f" ({recorded}/{required})",
+                )
+                return EXIT_OK
+            _write_decision_receipt(
+                ctx,
+                "approval_recorded",
+                snapshot.pending.facts,
+                {
+                    "request_id": a.request_id,
+                    "engine": "bigquery",
+                    "approvals_recorded": recorded,
+                    "approvals_required": required,
+                    "phase": "approve",
+                    "google_principal": principal,
+                },
+            )
+            ctx.emit(
+                {
+                    "status": "pending",
+                    "engine": "bigquery",
+                    "request_id": a.request_id,
+                    "google_principal": principal,
+                    "approvals_recorded": recorded,
+                    "approvals_required": required,
+                    "approvals": f"{recorded}/{required}",
+                },
+                f"{caller.username} recorded approval {recorded} of {required}"
+                f" for request {a.request_id}; no grant yet.\ngoogle principal {principal}",
+            )
+            return EXIT_OK
+        ds = policy.datasets[claim.approval.request.dataset]
+        hash_key = (
+            load_hash_key(resolve_key_path("hash", a.hash_key))
+            if _needs_hash(claim.approval.decision, claim.approval.request.columns)
+            else None
+        )
+        sink = _sink(a)
+        _check_outbox(ctx, sink)
+        try:
+            plan = issue_approved(
+                client,
+                claim,
+                project=resolve_project(getattr(a, "bigquery_project", None)),
+                dataset=ds,
+                receipts=sink,
+                now=now,
+                hash_key=hash_key,
+                max_concurrent=policy.concurrent_grant_cap(ds.name),
+            )
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+        _deliver_bq_issued(ctx, client, plan, sink)
+        ident = snapshot.pending.facts.identity or {}
+        raw_source = ident.get("source")
+        req_source = raw_source if isinstance(raw_source, str) else caller.source
+        return _print_bq_grant(
+            ctx,
+            plan,
+            requester,
+            req_source,
+            approvals_recorded=len(claim.approval.votes),
+            approvals_required=claim.approval.required,
+        )
 
 
 def _snowflake_request(
@@ -2166,6 +2370,180 @@ def _grant_rows(conn: Any, where: str, params: tuple[Any, ...]) -> list[dict[str
     return out
 
 
+def _bq_grant_dict(row: Any) -> dict[str, Any]:
+    facts = row.plan.facts
+    return {
+        "id": row.plan.grant_id,
+        "status": row.status,
+        "requester": None if facts is None else facts.requester,
+        "dataset": None if facts is None else facts.dataset,
+        "table_name": row.plan.source_table if facts is None else facts.table,
+        "expires_at": row.plan.expires_at,
+        "google_principal": row.plan.principal,
+        "view": row.plan.view_id,
+        "engine": "bigquery",
+    }
+
+
+def _bigquery_grant_list(ctx: Ctx) -> int:
+    from datagrant.bq.revoke import list_grants
+
+    with _bq_grant_client(ctx.args) as client:
+        rows = [_bq_grant_dict(r) for r in list_grants(client, active_only=not bool(ctx.args.all))]
+    text = (
+        "\n".join(
+            f"{r['id']}  {r['status']:<8} {r.get('requester') or ''!s:<12} "
+            f"{r.get('dataset')}/{r.get('table_name')}"
+            for r in rows
+        )
+        or "no grants"
+    )
+    ctx.emit({"grants": rows, "engine": "bigquery"}, text)
+    return EXIT_OK
+
+
+def _bigquery_grant_status(ctx: Ctx) -> int:
+    from datagrant.bq.revoke import get_grant
+
+    with _bq_grant_client(ctx.args) as client:
+        row = get_grant(client, ctx.args.grant_id)
+    if row is None:
+        raise CliError(f"unknown grant {ctx.args.grant_id}")
+    data = _bq_grant_dict(row)
+    ctx.emit(data, "\n".join(f"{k}: {'-' if v is None else v}" for k, v in data.items()))
+    return EXIT_OK
+
+
+def _bigquery_revoke(ctx: Ctx) -> int:
+    from datagrant.bq.grant import GrantError
+    from datagrant.bq.revoke import get_grant, revoke
+
+    a = ctx.args
+    _bq_refuse_locator(a)
+    if a.apply:
+        _bq_require_apply_setup(a)
+    if not a.apply:
+        with _bq_grant_client(a) as client:
+            try:
+                row = get_grant(client, a.grant_id)
+            except GrantError as exc:
+                raise CliError(str(exc), EXIT_FAILED) from None
+        if row is None:
+            raise CliError(f"unknown grant {a.grant_id}")
+        active = row.status not in {"revoked", "expired"} and not row.cleanup_complete
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "bigquery",
+                "grant_id": a.grant_id,
+                "status": row.status,
+                "would_revoke": active,
+            },
+            f"dry run: grant {a.grant_id} is {row.status}; "
+            + (
+                "--apply would drop the view and unbind this grant's IAM"
+                if active
+                else "nothing to do"
+            ),
+        )
+        return EXIT_OK
+    sink, key_problem = _revoke_receipts(ctx)
+    with _bq_grant_client(a) as client:
+        try:
+            r = revoke(client, a.grant_id, "manual", sink)
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+    delivery = _deliver_quick(ctx, sink)
+    code = _exit_for([r] if r.outcome != "noop" else [], key_problem)
+    msg = f"grant {r.grant_id}: {r.outcome}"
+    if r.outcome == "revoked":
+        msg += f" ({r.jobs_cancelled} job(s) cancelled)"
+    if r.error:
+        msg += f"\nerror: {r.error}"
+    if r.receipt_error or (key_problem and r.outcome != "noop"):
+        msg += f"\nreceipt not written: {r.receipt_error or key_problem}"
+    ctx.emit(
+        _result_dict(r) | {"key_problem": key_problem, "sink": delivery, "engine": "bigquery"},
+        msg,
+    )
+    return code
+
+
+def _bigquery_sweep(ctx: Ctx) -> int:
+    from datagrant.bq.grant import GrantError
+    from datagrant.bq.revoke import expire_pending, list_grants, sweep
+
+    a = ctx.args
+    _bq_refuse_locator(a)
+    if a.apply:
+        _bq_require_apply_setup(a)
+    if not a.apply:
+        now = datetime.now(UTC)
+        with _bq_grant_client(a) as client:
+            try:
+                due_ids = [
+                    r.plan.grant_id
+                    for r in list_grants(client, active_only=False)
+                    if r.status == "active" and r.plan.expires_at <= now
+                ]
+                stale = [p.request_id for p in client.list_due_requests(now)]
+            except GrantError as exc:
+                raise CliError(str(exc), EXIT_FAILED) from None
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "bigquery",
+                "would_revoke": due_ids,
+                "would_expire_requests": stale,
+            },
+            "dry run: --apply would "
+            + (
+                f"revoke expired BigQuery grants {', '.join(due_ids)}"
+                if due_ids
+                else "revoke no grants"
+            )
+            + (f" and expire requests {', '.join(stale)}" if stale else ""),
+        )
+        return EXIT_OK
+    sink, key_problem = _revoke_receipts(ctx)
+    with _bq_grant_client(a) as client:
+        try:
+            results = sweep(client, sink)
+            expired = expire_pending(client, sink)
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+    expired_requests = [item.request_id for item in expired]
+    request_receipt_error = next(
+        (item.receipt_error for item in expired if item.receipt_error), None
+    )
+    delivery = _deliver_quick(ctx, sink)
+    lines = [
+        f"grant {r.grant_id}: {r.outcome}"
+        + (f" ({r.error})" if r.error else "")
+        + (f" [receipt not written: {r.receipt_error}]" if r.receipt_error else "")
+        for r in results
+    ]
+    lines += [f"request {rid}: expired" for rid in expired_requests]
+    if key_problem and (results or expired_requests):
+        lines.append(f"receipts not written: {key_problem}")
+    elif request_receipt_error:
+        lines.append(f"receipts not written: {request_receipt_error}")
+    ctx.emit(
+        {
+            "results": [_result_dict(r) for r in results],
+            "expired_requests": expired_requests,
+            "key_problem": key_problem,
+            "sink": delivery,
+            "engine": "bigquery",
+        },
+        "\n".join(lines) or "nothing to sweep",
+    )
+    code = _exit_for(results, key_problem)
+    if code == EXIT_OK and expired_requests and (key_problem or request_receipt_error):
+        return EXIT_RECEIPT
+    return code
+
+
 def _snowflake_grant_list(ctx: Ctx) -> int:
     from datagrant.sf.revoke import list_grants
 
@@ -2343,6 +2721,8 @@ def _snowflake_sweep(ctx: Ctx) -> int:
 def cmd_grant_list(ctx: Ctx) -> int:
     if _sf_dsn_only(ctx.args):
         return _snowflake_grant_list(ctx)
+    if _bq_engine_only(ctx.args):
+        return _bigquery_grant_list(ctx)
 
     with _connect(ctx.args) as conn:
         rows = _grant_rows(conn, "" if ctx.args.all else "WHERE status = 'active'", ())
@@ -2362,6 +2742,8 @@ def cmd_grant_list(ctx: Ctx) -> int:
 def cmd_grant_status(ctx: Ctx) -> int:
     if _sf_dsn_only(ctx.args):
         return _snowflake_grant_status(ctx)
+    if _bq_engine_only(ctx.args):
+        return _bigquery_grant_status(ctx)
 
     with _connect(ctx.args) as conn:
         rows = _grant_rows(conn, "WHERE id = %s", (ctx.args.grant_id,))
@@ -2380,13 +2762,16 @@ def _revoke_receipts(ctx: Ctx) -> tuple[Any, str | None]:
 
 
 def _result_dict(r: Any) -> dict[str, Any]:
-    return {
+    data: dict[str, Any] = {
         "grant_id": r.grant_id,
         "outcome": r.outcome,
-        "sessions_terminated": r.sessions_terminated,
+        "sessions_terminated": getattr(r, "sessions_terminated", 0),
         "error": r.error,
         "receipt_error": r.receipt_error,
     }
+    if getattr(r, "jobs_cancelled", None) is not None:
+        data["jobs_cancelled"] = r.jobs_cancelled
+    return data
 
 
 def _exit_for(results: Sequence[Any], key_problem: str | None) -> int:
@@ -2403,6 +2788,8 @@ def cmd_revoke(ctx: Ctx) -> int:
 
     if _sf_dsn_only(ctx.args):
         return _snowflake_revoke(ctx)
+    if _bq_engine_only(ctx.args):
+        return _bigquery_revoke(ctx)
     _host_file_gate(
         ctx,
         access_creating=False,
@@ -2461,6 +2848,8 @@ def cmd_sweep(ctx: Ctx) -> int:
 
     if _sf_dsn_only(ctx.args):
         return _snowflake_sweep(ctx)
+    if _bq_engine_only(ctx.args):
+        return _bigquery_sweep(ctx)
     _host_file_gate(
         ctx,
         access_creating=False,
@@ -2885,6 +3274,7 @@ def build_parser() -> argparse.ArgumentParser:
     gl.add_argument("--all", action="store_true", help="include revoked/expired")
     gl.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     gl.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    gl.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
     gl.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
     gl.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     gl.set_defaults(fn=cmd_grant_list)
@@ -2892,6 +3282,7 @@ def build_parser() -> argparse.ArgumentParser:
     gs.add_argument("grant_id")
     gs.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     gs.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    gs.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
     gs.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
     gs.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     gs.set_defaults(fn=cmd_grant_status)
@@ -2900,6 +3291,7 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("grant_id")
     rv.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     rv.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    rv.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
     rv.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
     rv.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     rv.set_defaults(fn=cmd_revoke)
@@ -2910,6 +3302,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sw.add_argument("--snowflake-dsn", help=_SF_DSN_HELP)
     sw.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    sw.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
     sw.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
     sw.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
     sw.set_defaults(fn=cmd_sweep)
