@@ -42,13 +42,16 @@ class ProjectIamClient:
             raise GrantError("project IAM only supports the configured BigQuery grant project")
         if access_policy_version != ACCESS_POLICY_VERSION:
             raise GrantError("project IAM requires policy version 3")
-        return self._session.request(
-            "POST",
-            f"{_ROOT}/{self._project}:{operation}",
-            json=payload,
-            timeout=TIMEOUT,
-            allow_redirects=False,
-        )
+        try:
+            return self._session.request(
+                "POST",
+                f"{_ROOT}/{self._project}:{operation}",
+                json=payload,
+                timeout=TIMEOUT,
+                allow_redirects=False,
+            )
+        except Exception:  # noqa: BLE001 - transport errors can include URLs
+            raise GrantError("project IAM request failed") from None
 
     def get_project_iam(self, project: str, *, access_policy_version: int) -> IamPolicy:
         response = self._request(

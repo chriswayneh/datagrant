@@ -14,6 +14,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ### Fixed
 - BigQuery revoke now removes IAM bindings even if dropping the view fails, and principals are normalized to lowercase.
+- BigQuery dataset and project IAM transport failures raise GrantError without URLs or resource names.
 - Docker demo on Postgres 18 mounts its disposable volume at `/var/lib/postgresql`, matching the official image's versioned data directory. CI integration retains Postgres 16 coverage.
 - BigQuery two-person plans require an approver, matching the Postgres and Snowflake planners. Apply also refuses unapproved two-person receipt facts before any client operation or receipt write, including directly constructed or replaced plans. BigQuery CLI `--apply` remains disabled.
 - Snowflake setup provisions a secure Python 3.12 HMAC-SHA256 primitive using the standard library instead of calling the unavailable `SHA2_HMAC` built-in. The existing SQL wrapper keeps the key in its restricted table, preserves scope derivation and hex output, and keeps NULL distinct from empty strings. Added RFC 4231 handler regressions and an opt-in live SQL/secure-view smoke test (`DATAGRANT_TEST_SNOWFLAKE_DSN`); live validation is still required before release.

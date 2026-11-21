@@ -89,9 +89,12 @@ class DatasetAccessClient:
         params: dict[str, int | str] = {"accessPolicyVersion": ACCESS_POLICY_VERSION}
         if metadata_only:
             params["datasetView"] = "METADATA"
-        return self._session.request(
-            method, url, params=params, timeout=TIMEOUT, allow_redirects=False, **kwargs
-        )
+        try:
+            return self._session.request(
+                method, url, params=params, timeout=TIMEOUT, allow_redirects=False, **kwargs
+            )
+        except Exception:  # noqa: BLE001 - transport errors can include URLs
+            raise GrantError("BigQuery dataset request failed") from None
 
     def _read(self, url: str, *, metadata_only: bool = False) -> dict[str, Any]:
         response = self._request("GET", url, metadata_only=metadata_only)

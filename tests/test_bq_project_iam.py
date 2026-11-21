@@ -136,6 +136,23 @@ def test_context_and_write_preconditions_prevent_network_calls() -> None:
     assert not session.calls
 
 
+def test_project_iam_request_errors_do_not_leak_url() -> None:
+    url = f"{BASE}:getIamPolicy"
+
+    class Boom:
+        def request(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(f"POST {url} clinic-proj")
+
+    client = ProjectIamClient(Boom(), PROJECT)  # type: ignore[arg-type]
+    with pytest.raises(GrantError, match="project IAM request failed") as err:
+        client.get_project_iam(PROJECT, access_policy_version=3)
+    text = str(err.value)
+    assert url not in text
+    assert "https://" not in text
+    assert "clinic-proj" not in text
+    assert err.value.__cause__ is None
+
+
 def test_provider_cap_message_is_reported_without_raw_provider_details() -> None:
     session = Session(
         Response(400, {"error": {"message": "Too many conditional bindings for member example"}})
