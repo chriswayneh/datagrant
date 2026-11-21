@@ -8,13 +8,17 @@
 
 **Temporary, masked access to PHI and PII in Postgres and Snowflake, with signed access receipts.**
 
-[Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md) · [Releases](https://github.com/chriswayneh/datagrant/releases)
+[Watch the demo](#demo) · [Quick start](#quick-start) · [Examples](examples/README.md) · [Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
 
 </div>
 
-An open source command line tool that gives developers short, limited access to PHI and PII in Postgres and Snowflake. Each grant covers only the columns and rows they need, masks sensitive values, ends automatically, and leaves a signed record of who saw what.
+An open source command line tool that gives developers short, limited access to PHI and PII in Postgres and Snowflake. Each grant covers only the columns and rows they need, masks sensitive values, and expires. Signed receipts record who was granted access, what the grant allowed, and when it expired or was revoked.
 
 **Status:** [v0.6.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.6.0) is released ([release notes](docs/release-notes/v0.6.0.md)). v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+
+**BigQuery progress (unreleased):** [Step 4](https://github.com/chriswayneh/datagrant/pull/62) merged with revoke, sweep, and pending-request expiry tested against mocks. [Draft step 5](https://github.com/chriswayneh/datagrant/pull/63) adds the Google Cloud adapter, grant state, and approval quorum. BigQuery `--apply` remains disabled while CLI integration and scratch-project verification are pending.
+
+![A request passes through policy or approval, opens a masked view with a temporary login, and ends at expiry or revocation. Signed receipts record grant events.](docs/assets/grant-lifecycle.svg)
 
 ## Demo
 
@@ -70,7 +74,7 @@ Only features that ship in v0.6.0 (verified against the CLI and source):
 
 ## Architecture
 
-Flow of a grant: **request -> policy -> masked view + expiring role -> receipt log -> revoke/sweep**.
+The diagram above shows the grant lifecycle for the released engines. The Postgres path below shows where approval, receipt verification, and cleanup happen.
 
 ```mermaid
 flowchart LR

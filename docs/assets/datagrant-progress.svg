@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 236" role="img" aria-labelledby="title description">
+  <title id="title">DataGrant: released engines and BigQuery progress</title>
+  <desc id="description">Postgres and Snowflake shipped. BigQuery revoke and sweep merged with mock tests; the adapter and approval quorum are in draft. BigQuery CLI apply remains disabled.</desc>
+  <rect width="760" height="236" rx="12" fill="#f0f5fa"/>
+  <g font-family="sans-serif" fill="#15263a">
+    <text x="28" y="37" font-size="22" font-weight="700">Temporary, masked grants</text>
+    <rect x="28" y="55" width="704" height="57" rx="5" fill="#fff" stroke="#526982"/>
+    <text x="45" y="78" font-size="17" font-weight="700">Released · Postgres and Snowflake</text>
+    <text x="45" y="99" font-size="15">Limit rows and columns, mask values, expire grants, and sign receipts.</text>
+    <rect x="28" y="125" width="704" height="84" rx="5" fill="#fff" stroke="#526982" stroke-dasharray="6 4"/>
+    <text x="45" y="149" font-size="17" font-weight="700">In development · BigQuery</text>
+    <text x="45" y="171" font-size="15">Merged: mocked revoke and sweep. Draft: adapter and approval quorum.</text>
+    <text x="45" y="193" font-size="15" font-weight="700">CLI apply remains disabled.</text>
+  </g>
+</svg>
