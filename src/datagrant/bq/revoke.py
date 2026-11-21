@@ -102,10 +102,22 @@ def _now(now: datetime | None) -> datetime:
 
 
 def _write_receipt(
-    sink: ReceiptSink | None, plan: GrantPlan, event: receipt.Event, reason: Reason
+    sink: ReceiptSink | None,
+    plan: GrantPlan,
+    event: receipt.Event,
+    reason: Reason,
+    *,
+    error: str | None = None,
 ) -> str | None:
     if sink is None or plan.facts is None:
         return "receipt sink or grant facts unavailable"
+    details: dict[str, object] = {
+        "engine": "bigquery",
+        "principal": plan.principal,
+        "reason": reason,
+    }
+    if error:
+        details["error"] = error
     try:
         receipt.append(
             sink.log,
@@ -113,7 +125,7 @@ def _write_receipt(
             plan.facts,
             sink.key,
             host=sink.host,
-            details={"engine": "bigquery", "principal": plan.principal, "reason": reason},
+            details=details,
         )
     except Exception as exc:  # noqa: BLE001 - access removal must survive a receipt outage
         return str(exc)
@@ -169,8 +181,20 @@ def revoke(
     claimed_revision = row.revision + 1
     try:
         # A missing view is success; the adapter must implement idempotent DROP.
-        client.drop_view(plan)
-        apply_unbind(client, plan)
+        # Unbind still runs if drop_view raises so leftover IAM is not stranded.
+        parts: list[str] = []
+        try:
+            try:
+                client.drop_view(plan)
+            except Exception as exc:  # noqa: BLE001 - unbind still runs
+                parts.append(f"drop_view failed ({exc})")
+        finally:
+            try:
+                apply_unbind(client, plan)
+            except Exception as exc:  # noqa: BLE001 - still report drop_view
+                parts.append(f"unbind failed ({exc})")
+        if parts:
+            raise GrantError("; ".join(parts))
         cancelled = 0
         cancel_error = None
         try:
@@ -190,7 +214,7 @@ def revoke(
             client.release_revoke(grant_id, claimed_revision, error)
         except Exception as state_exc:  # noqa: BLE001 - report both failures
             error += f"; recording failure failed ({state_exc})"
-        receipt_error = _write_receipt(receipts, plan, "revoke_failed", reason)
+        receipt_error = _write_receipt(receipts, plan, "revoke_failed", reason, error=error)
         return RevokeResult(grant_id, "failed", reason, error=error, receipt_error=receipt_error)
     event: receipt.Event = (
         "expired" if reason == "expired" else ("revoke_failed" if final == "failed" else "revoked")

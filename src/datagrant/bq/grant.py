@@ -183,12 +183,13 @@ def _parse_principal(raw: str) -> str:
     lowered = principal.lower()
     if lowered in _REFUSED_PRINCIPALS or lowered.startswith("domain:"):
         raise GrantError(f"refused google principal {principal!r}")
-    if not any(principal.startswith(p) for p in _PRINCIPAL_PREFIXES):
+    prefix = next((p for p in _PRINCIPAL_PREFIXES if lowered.startswith(p.lower())), None)
+    if prefix is None:
         raise GrantError("google principal must be user:, serviceAccount:, or group:")
-    rest = principal.split(":", 1)[1]
+    rest = lowered.split(":", 1)[1]
     if not _EMAIL_RE.fullmatch(rest):
         raise GrantError("google principal email is invalid")
-    return principal
+    return prefix + rest
 
 
 def _col_expr(col: str, mask: str, hash_scope: str, *, project: str) -> str:
@@ -637,9 +638,21 @@ def _strip_grant_prefix(plan: GrantPlan, msg: str) -> str:
     return msg.removeprefix(f"grant {plan.grant_id}: ")
 
 
-def append_revoked(plan: GrantPlan, receipts: ReceiptSink | None, *, reason: str) -> None:
+def append_revoked(
+    plan: GrantPlan,
+    receipts: ReceiptSink | None,
+    *,
+    reason: str,
+    cleanup_failed: bool = False,
+    error: str | None = None,
+) -> None:
     if receipts is None or plan.facts is None:
         return
+    details: dict[str, object] = {"engine": "bigquery", "reason": reason}
+    if cleanup_failed:
+        details["cleanup_failed"] = True
+        if error:
+            details["error"] = error
     try:
         receipt.append(
             receipts.log,
@@ -647,7 +660,7 @@ def append_revoked(plan: GrantPlan, receipts: ReceiptSink | None, *, reason: str
             plan.facts,
             receipts.key,
             host=receipts.host,
-            details={"engine": "bigquery", "reason": reason},
+            details=details,
         )
     except Exception:  # noqa: BLE001, S110  # nosec B110
         pass
@@ -720,7 +733,13 @@ def apply_plan(
             except Exception as exc:  # noqa: BLE001 - keep original; name both
                 cleanup_exc = exc
             if issued:
-                append_revoked(plan, receipts, reason=revoked_reason)
+                append_revoked(
+                    plan,
+                    receipts,
+                    reason=revoked_reason,
+                    cleanup_failed=cleanup_exc is not None,
+                    error=str(cleanup_exc) if cleanup_exc is not None else None,
+                )
         if not isinstance(original, Exception):
             # Bare `raise` would re-raise cleanup_exc if reverse_drop failed.
             raise original  # noqa: TRY201

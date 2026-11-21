@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -129,11 +130,30 @@ def test_failed_drop_has_failure_receipt_and_can_retry(tmp_path: Path) -> None:
     result = revoke(client, GID, receipts=sink, now=NOW)
     assert result.outcome == "failed"
     assert row.plan.view_id in client.views
-    assert "get_project_iam" not in client.calls
     assert not client.rows[GID].cleanup_complete
     client.fail_drop = False
     assert sweep(client, sink, now=NOW)[0].outcome == "revoked"
     assert _events(tmp_path / "r.jsonl") == ["revoke_failed", "revoked"]
+
+
+def test_drop_view_failure_still_unbinds_and_releases_claim(tmp_path: Path) -> None:
+    client = Store(fail_drop=True)
+    client.add()
+    sink = _sink(tmp_path)
+    result = revoke(client, GID, receipts=sink, now=NOW)
+    assert result.outcome == "failed"
+    assert result.error and "drop_view failed" in result.error
+    assert "unbind_iam" in client.calls or "get_project_iam" in client.calls
+    assert not client.project_policy.bindings
+    assert not client.dataset_policy.bindings
+    assert client.rows[GID].claimed_at is None
+    assert not client.rows[GID].cleanup_complete
+    failed = [
+        json.loads(line)["receipt"]
+        for line in sink.log.read_text().splitlines()
+        if json.loads(line)["receipt"]["event"] == "revoke_failed"
+    ]
+    assert failed and "drop_view" in str(failed[0]["details"].get("error"))
 
 
 def test_unbind_failure_still_attempts_both_policies_then_retries() -> None:
