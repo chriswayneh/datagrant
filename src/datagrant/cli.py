@@ -2391,11 +2391,18 @@ def _bq_grant_dict(row: Any) -> dict[str, Any]:
     }
 
 
+def _bq_warn_invalid_grants(ctx: Ctx, client: Any) -> None:
+    n = len(list(getattr(client, "invalid_grant_results", ()) or ()))
+    if n:
+        _warn(ctx, f"skipped {n} invalid grant record(s)")
+
+
 def _bigquery_grant_list(ctx: Ctx) -> int:
     from datagrant.bq.revoke import list_grants
 
     with _bq_grant_client(ctx.args) as client:
         rows = [_bq_grant_dict(r) for r in list_grants(client, active_only=not bool(ctx.args.all))]
+        _bq_warn_invalid_grants(ctx, client)
     text = (
         "\n".join(
             f"{r['id']}  {r['status']:<8} {r.get('requester') or ''!s:<12} "
@@ -2412,6 +2419,8 @@ def _bigquery_grant_status(ctx: Ctx) -> int:
     from datagrant.bq.revoke import get_grant
 
     with _bq_grant_client(ctx.args) as client:
+        client.list_grants()
+        _bq_warn_invalid_grants(ctx, client)
         row = get_grant(client, ctx.args.grant_id)
     if row is None:
         raise CliError(f"unknown grant {ctx.args.grant_id}")
@@ -2495,7 +2504,7 @@ def _bigquery_sweep(ctx: Ctx) -> int:
                 for row in rows:
                     try:
                         reason = sweep_reason(row, now)
-                    except GrantError:
+                    except Exception:  # noqa: BLE001 - keep sweeping valid rows
                         invalid.append(row.plan.grant_id)
                         continue
                     if reason is not None:
@@ -2503,6 +2512,10 @@ def _bigquery_sweep(ctx: Ctx) -> int:
                 stale = [p.request_id for p in client.list_due_requests(now)]
             except GrantError as exc:
                 raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
+            except Exception:  # noqa: BLE001 - never print a sweep traceback
+                raise CliError(
+                    "BigQuery sweep skipped an invalid grant record", EXIT_FAILED
+                ) from None
         ctx.emit(
             {
                 "dry_run": True,
@@ -2526,6 +2539,8 @@ def _bigquery_sweep(ctx: Ctx) -> int:
             expired = expire_pending(client, sink)
         except GrantError as exc:
             raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
+        except Exception:  # noqa: BLE001 - never print a sweep traceback
+            raise CliError("BigQuery sweep skipped an invalid grant record", EXIT_FAILED) from None
     expired_requests = [item.request_id for item in expired]
     request_receipt_error = next(
         (item.receipt_error for item in expired if item.receipt_error), None

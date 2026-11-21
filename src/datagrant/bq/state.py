@@ -24,6 +24,11 @@ from datagrant.bq.revoke import (
     Reason,
     RevokeResult,
     aware_timestamp,
+    cleanup_complete_value,
+    cleanup_reason_value,
+    optional_claimed_at,
+    revision_value,
+    status_value,
 )
 from datagrant.oidc import VerifiedIdentity
 from datagrant.policy import Policy
@@ -266,12 +271,12 @@ WHERE grant_id = @grant_id AND {predicate}
                 facts=facts,
                 request_id=row["request_id"],
             ),
-            status=row["status"],
+            status=status_value(row["status"]),
             started_at=aware_timestamp(row["started_at"], "started_at"),
-            revision=row["revision"],
-            cleanup_reason=row["cleanup_reason"],
-            claimed_at=row["claimed_at"],
-            cleanup_complete=row["cleanup_complete"],
+            revision=revision_value(row["revision"]),
+            cleanup_reason=cleanup_reason_value(row["cleanup_reason"]),
+            claimed_at=optional_claimed_at(row["claimed_at"]),
+            cleanup_complete=cleanup_complete_value(row["cleanup_complete"]),
         )
 
     def get_grant(self, grant_id: str) -> GrantRecord | None:

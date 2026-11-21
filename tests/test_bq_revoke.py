@@ -392,3 +392,31 @@ def test_sweep_skips_null_expires_at_and_revokes_valid() -> None:
     assert by_id[other_id].outcome == "failed"
     assert by_id[other_id].error == "invalid grant record"
     assert client.rows[other_id].status == "active"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"claimed_at": NOW.replace(tzinfo=None)},
+        {"claimed_at": "2026-01-01T00:00:00Z"},
+        {"revision": "0"},
+    ],
+)
+def test_sweep_skips_bad_claimed_at_or_revision_and_revokes_valid(fields: dict) -> None:
+    client = Store()
+    valid = client.add()
+    other_id = "012345abcdef"
+    other = replace(
+        valid.plan,
+        grant_id=other_id,
+        view_id=valid.plan.view_id.replace(GID, other_id),
+    )
+    client.rows[other_id] = replace(GrantRecord(other, "active", NOW), **fields)
+    client.status[other_id] = "active"
+    results = sweep(client, now=NOW + timedelta(hours=2))
+    by_id = {item.grant_id: item for item in results}
+    assert by_id[GID].outcome == "revoked"
+    assert client.rows[GID].status == "expired"
+    assert by_id[other_id].outcome == "failed"
+    assert by_id[other_id].error == "invalid grant record"
+    assert client.rows[other_id].status == "active"

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal, Protocol, get_args
 
 from datagrant import receipt
 from datagrant.bq.grant import (
@@ -114,6 +114,49 @@ def aware_timestamp(value: object, field: str) -> datetime:
     return value
 
 
+def optional_claimed_at(value: object) -> datetime | None:
+    if value is None:
+        return None
+    return aware_timestamp(value, "claimed_at")
+
+
+def revision_value(value: object) -> int:
+    if type(value) is not int or value < 0:
+        raise GrantError("BigQuery grant record has an invalid revision")
+    return value
+
+
+def status_value(value: object) -> str:
+    if type(value) is not str:
+        raise GrantError("BigQuery grant record has an invalid status")
+    return value
+
+
+def cleanup_complete_value(value: object) -> bool:
+    if type(value) is not bool:
+        raise GrantError("BigQuery grant record has an invalid cleanup_complete")
+    return value
+
+
+def cleanup_reason_value(value: object) -> Reason | None:
+    if value is None:
+        return None
+    if value not in get_args(Reason):
+        raise GrantError("BigQuery grant record has an invalid cleanup_reason")
+    return value  # type: ignore[return-value]
+
+
+def require_grant_record(row: GrantRecord) -> None:
+    """Raise GrantError if a listed GrantRecord cannot be swept safely."""
+    aware_timestamp(row.plan.expires_at, "expires_at")
+    aware_timestamp(row.started_at, "started_at")
+    revision_value(row.revision)
+    optional_claimed_at(row.claimed_at)
+    cleanup_reason_value(row.cleanup_reason)
+    status_value(row.status)
+    cleanup_complete_value(row.cleanup_complete)
+
+
 def _row_id(row: GrantRecord) -> str:
     gid = getattr(getattr(row, "plan", None), "grant_id", None)
     if isinstance(gid, str) and _GRANT_ID_RE.fullmatch(gid):
@@ -124,8 +167,9 @@ def _row_id(row: GrantRecord) -> str:
 def sweep_reason(row: GrantRecord, now: datetime) -> Reason | None:
     """Return the sweep reason, or None if this row should be left alone.
 
-    Invalid timestamps raise ``GrantError`` so the caller can skip the row.
+    Invalid timestamps or fields raise ``GrantError`` so the caller can skip the row.
     """
+    require_grant_record(row)
     expires = aware_timestamp(row.plan.expires_at, "expires_at")
     started = aware_timestamp(row.started_at, "started_at")
     if row.cleanup_complete or row.status in {"revoked", "expired"}:
@@ -282,7 +326,7 @@ def sweep(
     for row in rows:
         try:
             reason = sweep_reason(row, current)
-        except GrantError:
+        except Exception:  # noqa: BLE001 - one bad row must not abort the sweep
             results.append(
                 RevokeResult(_row_id(row), "failed", "manual", error="invalid grant record")
             )
@@ -290,7 +334,12 @@ def sweep(
         if reason is None:
             continue
         # Re-read and CAS each record so a stale list cannot take another writer's claim.
-        results.append(revoke(client, row.plan.grant_id, reason, receipts, now=current))
+        try:
+            results.append(revoke(client, row.plan.grant_id, reason, receipts, now=current))
+        except Exception:  # noqa: BLE001 - one bad row must not abort the sweep
+            results.append(
+                RevokeResult(_row_id(row), "failed", reason, error="invalid grant record")
+            )
     return results
 
 

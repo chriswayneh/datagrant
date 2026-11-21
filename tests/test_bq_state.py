@@ -332,3 +332,37 @@ def test_list_grants_skips_invalid_expiry_and_get_grant_fails_closed(plan: Grant
     client.rows = [missing]
     with pytest.raises(GrantError, match="invalid grant record"):
         store.get_grant("012345abcdef")
+
+
+def test_list_grants_skips_bad_claimed_at_and_revision(plan: GrantPlan) -> None:
+    client = Client()
+    store = GrantStore(client, SDK, PROJECT, "US")
+    store.insert_issuing(plan)
+    good = {name: value for name, (_, value) in client.calls[0][1].items()}
+    good.update(
+        status="issuing",
+        started_at=NOW,
+        revision=0,
+        cleanup_complete=False,
+        claimed_at=None,
+        cleanup_reason=None,
+    )
+
+    def bad(**fields: Any) -> dict[str, Any]:
+        row = dict(good)
+        row["facts_json"] = None
+        row.update(fields)
+        return row
+
+    naive = bad(grant_id="012345abcdef", claimed_at=NOW.replace(tzinfo=None))
+    as_str = bad(grant_id="fedcba654321", claimed_at="2026-01-01T00:00:00Z")
+    rev = bad(grant_id="abcabcabcabc", revision="0")
+    client.rows = [naive, as_str, rev, good]
+    listed = store.list_grants()
+    assert [row.plan.grant_id for row in listed] == [GID]
+    assert [item.grant_id for item in store.invalid_grant_results] == [
+        "012345abcdef",
+        "fedcba654321",
+        "abcabcabcabc",
+    ]
+    assert {item.error for item in store.invalid_grant_results} == {"invalid grant record"}
