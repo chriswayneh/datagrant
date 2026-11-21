@@ -16,7 +16,7 @@ Coming in [v0.8.0](ROADMAP.md): PCI DSS support pack (PAN masking, cardholder-da
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres, Snowflake, and BigQuery. Each grant covers only the columns and rows they need, masks sensitive values, and expires. Signed receipts record who was granted access, what the grant allowed, and when it expired or was revoked.
 
-**Status:** v0.7.0 is shipped pending tag ([release notes](docs/release-notes/v0.7.0.md)). Mock- and CI-tested; a live GCP test was not run. v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Status:** [v0.7.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0) ([release notes](docs/release-notes/v0.7.0.md)). Mock- and CI-tested; a live GCP test was not run. v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
 ![Released Postgres, Snowflake, and BigQuery at v0.7.0. PCI DSS support pack next in v0.8.0.](docs/assets/datagrant-progress.svg)
 

@@ -15,7 +15,7 @@
 | Construction | M3 / v0.5.0 | ✅ Released (PRs #40 to #45, tag `v0.5.0` at `9aadcf2`, 2026-11-11 CT). |
 | Construction | M4 / v0.6.0 | ✅ Released (PRs #47 to #53, tag `v0.6.0` at `6581ab8`, 2026-11-14 CT). |
 | Inception | M5 / BigQuery design | **Design approved** 2026-11-14 4:51 PM CT (picks 1B through 11B). Artifact: [docs/design/bigquery.md](../docs/design/bigquery.md). |
-| Construction | M5 / BigQuery | ✅ v0.7.0 shipped pending tag (2026-11-21). Mock- and CI-tested; a live GCP test was not run. |
+| Construction | M5 / BigQuery | ✅ v0.7.0 released (2026-11-21). Mock- and CI-tested; a live GCP test was not run. |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
-**Current stage:** M5 complete. v0.7.0 shipped pending tag. Next is the PCI pack (v0.8.0). Inception (U1–U8) approved 2026-11-02.
+**Current stage:** M5 complete. v0.7.0 is released. Next is the PCI pack (v0.8.0). Inception (U1–U8) approved 2026-11-02.

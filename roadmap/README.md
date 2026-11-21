@@ -2,7 +2,7 @@
 
 The [roadmap overview](../ROADMAP.md) is the readable plan and the summary of what has shipped. [Task definitions](issues.yml) hold early planning (why, files, acceptance, size, dependencies). Treat `ROADMAP.md` as current; `issues.yml` is historical and does not list M4.
 
-**v0.7.0 is shipped pending tag** (2026-11-21). BigQuery warehouse support on top of v0.6.1. Notes: [docs/release-notes/v0.7.0.md](../docs/release-notes/v0.7.0.md). Product README: [../README.md](../README.md). Mock- and CI-tested; a live GCP test was not run.
+**v0.7.0 is released** (2026-11-21). BigQuery warehouse support on top of v0.6.1. Notes: [docs/release-notes/v0.7.0.md](../docs/release-notes/v0.7.0.md). Product README: [../README.md](../README.md). Mock- and CI-tested; a live GCP test was not run.
 
 **Next:** the PCI pack in v0.8.0, beta in v0.9.0 and 1.0. See the [roadmap overview](../ROADMAP.md).
 

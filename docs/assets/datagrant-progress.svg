@@ -1,17 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" role="img" aria-labelledby="title description">
-  <title id="title">datagrant: released engines including BigQuery, PCI pack next</title>
-  <desc id="description">Postgres, Snowflake, and BigQuery are released at v0.7.0. M5 is complete. A PCI DSS support pack is next in v0.8.0.</desc>
-  <rect width="760" height="320" rx="12" fill="#f0f5fa"/>
-  <g font-family="sans-serif" fill="#15263a">
-    <text x="28" y="36" font-size="22" font-weight="700">Temporary, masked grants</text>
-    <rect x="28" y="52" width="704" height="70" rx="5" fill="#fff" stroke="#526982"/>
-    <text x="45" y="78" font-size="17" font-weight="700">Released · Postgres, Snowflake, and BigQuery (v0.7.0)</text>
-    <text x="45" y="102" font-size="15">Limit rows and columns, mask values, expire grants, and sign receipts.</text>
-    <rect x="28" y="134" width="704" height="70" rx="5" fill="#fff" stroke="#526982"/>
-    <text x="45" y="158" font-size="17" font-weight="700">Complete · M5 BigQuery</text>
-    <text x="45" y="182" font-size="15">request, approve, issue --apply, revoke, sweep, masks including hash.</text>
-    <rect x="28" y="216" width="704" height="70" rx="5" fill="#fff" stroke="#526982" stroke-dasharray="6 4"/>
-    <text x="45" y="242" font-size="17" font-weight="700">Next · PCI DSS support pack (v0.8.0)</text>
-    <text x="45" y="266" font-size="15">PAN masking, cardholder-data policy, and an evidence report.</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="242" viewBox="0 0 400 242" role="img" aria-labelledby="title description">
+  <title id="title">DataGrant v0.7.0 is released</title>
+  <desc id="description">Postgres, Snowflake, and BigQuery are supported. BigQuery passed mock tests and CI, with no live Google Cloud test. A PCI DSS support pack is planned for v0.8.0.</desc>
+  <rect width="400" height="242" rx="12" fill="#eff5fa"/>
+  <g fill="#fff" stroke="#526982">
+    <rect x="18" y="18" width="364" height="108" rx="5"/>
+    <rect x="18" y="139" width="364" height="84" rx="5" stroke-dasharray="6 4"/>
+  </g>
+  <g font-family="Verdana, sans-serif" fill="#15263a">
+    <g font-size="20" font-weight="700">
+      <text x="34" y="46">Released · v0.7.0</text>
+      <text x="34" y="168">Planned · v0.8.0</text>
+    </g>
+    <g font-size="17">
+      <text x="34" y="71">Postgres, Snowflake, BigQuery</text>
+      <text x="34" y="94">BigQuery passed mock tests and CI.</text>
+      <text x="34" y="115">No live Google Cloud test.</text>
+      <text x="34" y="195">PCI DSS support pack</text>
+    </g>
   </g>
 </svg>

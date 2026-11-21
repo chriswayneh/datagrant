@@ -1,6 +1,6 @@
 # datagrant docs
 
-These pages match v0.7.0 (shipped pending tag). The product README is at the [repo root](../README.md).
+These pages match [v0.7.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0). The product README is at the [repo root](../README.md).
 
 | Page | What it covers |
 | --- | --- |
