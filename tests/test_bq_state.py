@@ -23,12 +23,28 @@ class SDK:
     def QueryJobConfig(*, query_parameters: list) -> dict:
         return dict(query_parameters)
 
+    class SchemaField:
+        def __init__(self, name: str, field_type: str) -> None:
+            self.name = name
+            self.field_type = field_type
+
+    class SourceFormat:
+        NEWLINE_DELIMITED_JSON = "NEWLINE_DELIMITED_JSON"
+
+    class WriteDisposition:
+        WRITE_TRUNCATE = "WRITE_TRUNCATE"
+
+    @staticmethod
+    def LoadJobConfig(**kwargs: Any) -> dict:
+        return kwargs
+
 
 class Client:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.num_dml_affected_rows = 1
         self.rows: list[dict] = []
+        self.loads: list[tuple[str, bytes, Any]] = []
 
     def query(self, sql: str, **kwargs: Any) -> "Client":
         assert kwargs["project"] == PROJECT and kwargs["location"] == "US"
@@ -36,7 +52,12 @@ class Client:
         self.calls.append((sql, kwargs["job_config"]))
         return self
 
-    def result(self, *, timeout: int, job_retry: None) -> list[dict]:
+    def load_table_from_file(self, fileobj: Any, table: str, **kwargs: Any) -> "Client":
+        data = fileobj.read() if hasattr(fileobj, "read") else fileobj
+        self.loads.append((table, data, kwargs.get("job_config")))
+        return self
+
+    def result(self, *, timeout: int, job_retry: None = None) -> list[dict]:
         assert timeout > 0
         return self.rows
 

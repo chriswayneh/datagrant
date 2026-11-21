@@ -308,3 +308,180 @@ def test_mixed_case_conditional_grantee_bind_and_unbind(plan: GrantPlan) -> None
     ]
     assert len(emails) == 1
     assert emails[0].lower() == "alice@example.com"
+
+
+STATE_URL = f"{BASE}/{PROJECT}/datasets/datagrant"
+ROUTINE_URL = f"{BASE}/{PROJECT}/datasets/datagrant/routines/hash_hmac"
+TABLE_URL = f"{BASE}/{PROJECT}/datasets/datagrant/tables/_hash_master"
+ROUTINE = {"projectId": PROJECT, "datasetId": "datagrant", "routineId": "hash_hmac"}
+ROUTINE_ACL = {"routine": ROUTINE}
+
+
+def test_hash_preflight_gets_routine_then_hash_master(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"routineReference": {"routineId": "hash_hmac"}}),
+        Response(body={"tableReference": {"tableId": "_hash_master"}}),
+    )
+    DatasetAccessClient(session, grant_project=PROJECT).require_hash_objects(PROJECT)
+    assert [(method, url) for method, url, _ in session.calls] == [
+        ("GET", ROUTINE_URL),
+        ("GET", TABLE_URL),
+    ]
+    for _, _, kwargs in session.calls:
+        assert kwargs.get("params") is None
+        assert kwargs.get("allow_redirects") is False
+
+
+def test_hash_preflight_fails_closed_when_routine_missing() -> None:
+    session = Session(Response(status_code=404, body={}))
+    with pytest.raises(GrantError, match="hash_hmac routine is unavailable"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_objects(PROJECT)
+    assert session.calls[0][1] == ROUTINE_URL
+
+
+def test_hash_preflight_fails_closed_when_table_missing() -> None:
+    session = Session(
+        Response(body={"routineReference": {"routineId": "hash_hmac"}}),
+        Response(status_code=404, body={}),
+    )
+    with pytest.raises(GrantError, match="hash-master table is unavailable"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_objects(PROJECT)
+    assert session.calls[1][1] == TABLE_URL
+
+
+def test_hash_routine_acl_is_routine_only_and_preserves_access(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source(EXISTING),
+        Response(),
+        source(EXISTING),
+        Response(),
+    )
+    client = DatasetAccessClient(session, grant_project=PROJECT)
+    assert client.authorize_hash_routine_if_missing(plan)
+    urls = [url for _, url, _ in session.calls]
+    assert urls == [VIEWS_URL, STATE_URL, VIEWS_URL, VIEWS_URL, STATE_URL, STATE_URL]
+    methods = [method for method, _, _ in session.calls]
+    assert methods == ["GET", "GET", "GET", "PATCH", "GET", "PATCH"]
+    views_patch = session.calls[3][2]["json"]["access"]
+    state_patch = session.calls[5][2]["json"]["access"]
+    assert views_patch == [*EXISTING, ROUTINE_ACL]
+    assert state_patch == [*EXISTING, ROUTINE_ACL]
+    for access in (views_patch, state_patch):
+        added = access[-1]
+        assert list(added) == ["routine"]
+        assert added["routine"] == ROUTINE
+        assert PRINCIPAL not in repr(added)
+        assert "userByEmail" not in added
+        assert not any(
+            entry.get("userByEmail") == PRINCIPAL.split(":", 1)[1]
+            or entry.get("iamMember") == PRINCIPAL
+            for entry in access
+        )
+
+
+def test_hash_routine_acl_skips_write_when_present(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source([*EXISTING, ROUTINE_ACL]),
+        source([*EXISTING, ROUTINE_ACL]),
+    )
+    client = DatasetAccessClient(session, grant_project=PROJECT)
+    assert not client.authorize_hash_routine_if_missing(plan)
+    assert [method for method, _, _ in session.calls] == ["GET", "GET", "GET", "GET"]
+    assert not any(method == "PATCH" for method, _, _ in session.calls)
+
+
+def test_hash_routine_acl_retries_etag_conflict(plan: GrantPlan) -> None:
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source(EXISTING),
+        Response(412),
+        source(EXISTING, 'W/"2"'),
+        Response(),
+        source(EXISTING),
+        Response(),
+    )
+    client = DatasetAccessClient(session, grant_project=PROJECT)
+    assert client.authorize_hash_routine_if_missing(plan)
+    assert session.calls[5][2]["headers"] == {"If-Match": 'W/"2"'}
+    assert session.calls[5][2]["json"] == {"access": [*EXISTING, ROUTINE_ACL]}
+
+
+def test_hash_routine_acl_refuses_location_mismatch_and_wrong_project(plan: GrantPlan) -> None:
+    mismatched = Session(Response(body={"location": "US"}), Response(body={"location": "EU"}))
+    with pytest.raises(GrantError, match="locations must match"):
+        DatasetAccessClient(mismatched, grant_project=PROJECT).authorize_hash_routine_if_missing(
+            plan
+        )
+    empty = Session()
+    with pytest.raises(GrantError, match="configured grant project"):
+        DatasetAccessClient(empty, grant_project=PROJECT).authorize_hash_routine_if_missing(
+            replace(plan, project="other-proj")
+        )
+    assert not empty.calls
+
+
+def test_hash_routine_acl_does_not_grant_grantee_datagrant_access(plan: GrantPlan) -> None:
+    owners = [{"role": "OWNER", "specialGroup": "projectOwners"}]
+    session = Session(
+        Response(body={"location": "US"}),
+        Response(body={"location": "US"}),
+        source(owners),
+        Response(),
+        source(owners),
+        Response(),
+    )
+    DatasetAccessClient(session, grant_project=PROJECT).authorize_hash_routine_if_missing(plan)
+    state_access = session.calls[-1][2]["json"]["access"]
+    assert session.calls[-1][1] == STATE_URL
+    assert state_access == [*owners, ROUTINE_ACL]
+    assert PRINCIPAL not in repr(state_access)
+    assert all("userByEmail" not in entry for entry in state_access)
+    assert all("groupByEmail" not in entry for entry in state_access)
+    assert all("iamMember" not in entry for entry in state_access)
+
+
+TABLE_IAM_URL = f"{TABLE_URL}:getIamPolicy"
+ROUTINE_IAM_URL = f"{ROUTINE_URL}:getIamPolicy"
+OPERATOR_ACCESS = [
+    {"role": "OWNER", "specialGroup": "projectOwners"},
+    {"role": "WRITER", "specialGroup": "projectWriters"},
+]
+
+
+def test_hash_acl_refuses_project_readers() -> None:
+    session = Session(
+        source([*OPERATOR_ACCESS, {"role": "READER", "specialGroup": "projectReaders"}])
+    )
+    with pytest.raises(GrantError, match="operator-only"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_dataset_locked(PROJECT)
+    assert session.calls[0][1] == STATE_URL
+    assert session.calls[0][0] == "GET"
+
+
+def test_hash_acl_accepts_operator_only() -> None:
+    session = Session(source(OPERATOR_ACCESS))
+    DatasetAccessClient(session, grant_project=PROJECT).require_hash_dataset_locked(PROJECT)
+
+
+def test_hash_object_iam_is_refused() -> None:
+    session = Session(
+        Response(
+            body={"bindings": [{"role": "roles/bigquery.dataViewer", "members": ["projectViewer"]}]}
+        ),
+        Response(body={"bindings": []}),
+    )
+    with pytest.raises(GrantError, match="table-level IAM"):
+        DatasetAccessClient(session, grant_project=PROJECT).require_hash_object_iam_absent(PROJECT)
+    assert session.calls[0][0] == "POST"
+    assert session.calls[0][1] == TABLE_IAM_URL
+
+
+def test_hash_object_iam_absent_when_404() -> None:
+    session = Session(Response(status_code=404, body={}), Response(status_code=404, body={}))
+    DatasetAccessClient(session, grant_project=PROJECT).require_hash_object_iam_absent(PROJECT)
+    assert [url for _, url, _ in session.calls] == [TABLE_IAM_URL, ROUTINE_IAM_URL]

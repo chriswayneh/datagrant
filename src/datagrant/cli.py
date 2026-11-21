@@ -6,8 +6,8 @@ written so nothing was issued), 4 revoke failed (grant still active; retried
 by the next sweep).
 
 Every command that changes something (keys init, request, approve, revoke,
-sweep, preflight) is a dry run unless ``--apply`` is given: it prints what
-would change and changes nothing. A dry run never generates or prints a
+sweep, preflight, setup) is a dry run unless ``--apply`` is given: it prints
+what would change and changes nothing. A dry run never generates or prints a
 password or verifier. ``--dry-run`` is accepted as a no-op alias.
 
 Identity is the OS user (getpass.getuser()). ``--as-user`` overrides it for
@@ -1143,6 +1143,16 @@ def _bq_policy_location(policy: Any, dataset: str | None = None) -> str | None:
     return None
 
 
+def _bq_inspect_catalog(client: Any, ds: Any, req: Any) -> Any:
+    inspect = getattr(client, "inspect_table", None)
+    if not callable(inspect):
+        return None
+    from datagrant.bq.grant import _split_table
+
+    dataset, table = _split_table(req.table, ds.schema)
+    return inspect(dataset, table, location=ds.location)
+
+
 def _bq_require_apply_setup(args: argparse.Namespace) -> None:
     from datagrant.bigquery_support import (
         BigQuerySetupError,
@@ -1160,6 +1170,47 @@ def _bq_require_apply_setup(args: argparse.Namespace) -> None:
         require_adc()
     except BigQuerySetupError as exc:
         raise CliError(str(exc), EXIT_USAGE) from None
+
+
+def cmd_setup_bigquery(ctx: Ctx) -> int:
+    """Provision hash-master and hash_hmac. Dry run unless --apply."""
+    from datagrant.bigquery_support import EXTRA_HINT
+    from datagrant.bq.grant import GrantError
+
+    a = ctx.args
+    rotate = bool(getattr(a, "rotate_hash_key", False))
+    if rotate:
+        _warn(ctx, "rotating the BigQuery hash key changes every pseudonym")
+    _bq_refuse_locator(a)
+    if not a.apply:
+        what = "rotate the hash-master key" if rotate else "provision hash-master and hash_hmac"
+        ctx.emit(
+            {
+                "dry_run": True,
+                "engine": "bigquery",
+                "rotate_hash_key": rotate,
+            },
+            "dry run: with --apply datagrant would "
+            f"require {EXTRA_HINT}, ${BIGQUERY_PROJECT_ENV}, and ADC, then {what}. "
+            "The datagrant dataset must be operator-only (no projectReaders). "
+            "Project-level BigQuery data roles are key-equivalent; use a dedicated hash project.",
+        )
+        return EXIT_OK
+    _bq_require_apply_setup(a)
+    key = load_hash_key(resolve_key_path("hash", a.hash_key))
+    with _bq_grant_client(a) as client:
+        try:
+            setup = getattr(client, "setup_hash", None)
+            if not callable(setup):
+                raise GrantError("BigQuery client cannot provision hash-master")
+            setup(key, rotate=rotate)
+        except GrantError as exc:
+            raise CliError(str(exc), EXIT_FAILED) from None
+    ctx.emit(
+        {"engine": "bigquery", "rotate_hash_key": rotate, "status": "ready"},
+        "rotated BigQuery hash-master" if rotate else "provisioned BigQuery hash-master",
+    )
+    return EXIT_OK
 
 
 def _bigquery_request(
@@ -1268,6 +1319,7 @@ def _bigquery_request(
                 now=now,
                 hash_key=hash_key,
                 requester_identity=caller.receipt_dict(),
+                catalog=_bq_inspect_catalog(client, ds, req),
             )
             apply_plan(
                 client,
@@ -1415,6 +1467,7 @@ def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
                 now=now,
                 hash_key=hash_key,
                 max_concurrent=policy.concurrent_grant_cap(ds.name),
+                catalog=_bq_inspect_catalog(client, ds, claim.approval.request),
             )
         except GrantError as exc:
             raise CliError(str(exc), EXIT_FAILED) from None
@@ -2513,9 +2566,7 @@ def _bigquery_sweep(ctx: Ctx) -> int:
             except GrantError as exc:
                 raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
             except Exception:  # noqa: BLE001 - never print a sweep traceback
-                raise CliError(
-                    "BigQuery sweep skipped an invalid grant record", EXIT_FAILED
-                ) from None
+                raise CliError("BigQuery sweep failed", EXIT_FAILED) from None
         ctx.emit(
             {
                 "dry_run": True,
@@ -2540,7 +2591,7 @@ def _bigquery_sweep(ctx: Ctx) -> int:
         except GrantError as exc:
             raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
         except Exception:  # noqa: BLE001 - never print a sweep traceback
-            raise CliError("BigQuery sweep skipped an invalid grant record", EXIT_FAILED) from None
+            raise CliError("BigQuery sweep failed", EXIT_FAILED) from None
     expired_requests = [item.request_id for item in expired]
     request_receipt_error = next(
         (item.receipt_error for item in expired if item.receipt_error), None
@@ -3250,6 +3301,25 @@ def build_parser() -> argparse.ArgumentParser:
         "export-pubkey", parents=only("json", "signing_key"), help="print the receipt public key"
     ).set_defaults(fn=cmd_keys_export)
 
+    su = sub.add_parser("setup", help="provision engine state").add_subparsers(
+        dest="sub", required=True, parser_class=_SafeArgumentParser
+    )
+    bqsu = su.add_parser(
+        "bigquery",
+        parents=[*only("json", "hash_key"), apply],
+        help="provision BigQuery hash-master and hash_hmac",
+    )
+    bqsu.add_argument("--bigquery-project", help=_BQ_PROJECT_HELP)
+    bqsu.add_argument("--bigquery-location", help=_BQ_LOCATION_HELP)
+    bqsu.add_argument("--bigquery-dsn", help=_BQ_DSN_HELP)
+    bqsu.add_argument("--credentials-path", dest="credentials_path", help=_BQ_CREDS_HELP)
+    bqsu.add_argument(
+        "--rotate-hash-key",
+        action="store_true",
+        help="replace the hash-master key (changes every BigQuery pseudonym)",
+    )
+    bqsu.set_defaults(fn=cmd_setup_bigquery)
+
     pc = sub.add_parser("policy", help="policy tools").add_subparsers(
         dest="sub", required=True, parser_class=_SafeArgumentParser
     )
@@ -3378,6 +3448,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
     table: dict[Any, tuple[str, ...]] = {
         cmd_keys_init: ("signing_key", "hash_key"),
         cmd_keys_export: ("signing_key",),
+        cmd_setup_bigquery: ("hash_key",),
         cmd_request: _GRANTING,
         cmd_approve: _GRANTING,
         cmd_revoke: _REVOKING,

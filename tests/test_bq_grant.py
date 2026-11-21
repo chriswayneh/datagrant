@@ -91,6 +91,11 @@ class FakeClient:
         conflict_dataset: int = 0,
         conflict_project: int = 0,
         extra_live: int = 0,
+        missing_hash_objects: bool = False,
+        hash_mismatch: bool = False,
+        hash_duplicate: bool = False,
+        table_iam: bool = False,
+        routine_iam: bool = False,
     ) -> None:
         self.calls: list[str] = []
         self.fail_on = fail_on
@@ -111,11 +116,71 @@ class FakeClient:
         self.iam_versions: list[int] = []
         self.iam_etags: list[str] = []
         self.extra_live = extra_live
+        self.hash_sqls: list[str] = []
+        self.hash_params: list[bytes] = []
+        self.hash_loads: list[bytes] = []
+        self.hash_access: list[dict[str, Any]] = [
+            {"role": "OWNER", "specialGroup": "projectOwners"},
+            {"role": "WRITER", "specialGroup": "projectWriters"},
+        ]
+        self.views_access: list[dict[str, Any]] = []
+        self.state_access: list[dict[str, Any]] = []
+        self.missing_hash_objects = missing_hash_objects
+        self.hash_mismatch = hash_mismatch
+        self.hash_duplicate = hash_duplicate
+        self.table_iam = table_iam
+        self.routine_iam = routine_iam
+        self.catalog: Any = None
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
         if self.fail_on == name:
             raise RuntimeError(f"stub:{name}")
+
+    def inspect_table(self, dataset: str, table: str, *, location: str | None = None) -> Any:
+        from datagrant.bq.mask import TableCatalog
+
+        self.calls.append("inspect_table")
+        if self.catalog is not None:
+            return self.catalog
+        return TableCatalog({"patient_id": "STRING", "ssn": "STRING", "email": "STRING"})
+
+    def setup_hash(self, key: Any, *, rotate: bool = False) -> None:
+        from datagrant.bq.dataset_access import check_hash_dataset_access
+        from datagrant.bq.hash import key_fingerprint
+
+        self.calls.append("setup_hash")
+        check_hash_dataset_access(self.hash_access, PROJECT)
+        if self.table_iam:
+            raise GrantError("BigQuery hash-master table has table-level IAM")
+        if self.routine_iam:
+            raise GrantError("BigQuery hash_hmac routine has routine-level IAM")
+        if self.hash_duplicate:
+            raise GrantError("BigQuery hash-master has duplicate rows")
+        if self.hash_mismatch and not rotate:
+            raise GrantError("BigQuery hash-master key does not match; rotate explicitly")
+        self.hash_loads.append(key.derived)
+        self.hash_mismatch = False
+        _ = key_fingerprint(key)
+
+    def ensure_hash(self, plan: GrantPlan) -> None:
+        from datagrant.bq.dataset_access import check_hash_dataset_access
+        from datagrant.bq.hash import uses_hash_mask
+
+        self._step("ensure_hash")
+        if not uses_hash_mask(plan):
+            return
+        check_hash_dataset_access(self.hash_access, plan.project)
+        if self.table_iam:
+            raise GrantError("BigQuery hash-master table has table-level IAM")
+        if self.routine_iam:
+            raise GrantError("BigQuery hash_hmac routine has routine-level IAM")
+        if self.missing_hash_objects:
+            raise GrantError("BigQuery hash_hmac routine is unavailable")
+        if self.hash_duplicate:
+            raise GrantError("BigQuery hash-master has duplicate rows")
+        if self.hash_mismatch:
+            raise GrantError("BigQuery hash-master key does not match; rotate explicitly")
 
     def insert_issuing(self, plan: GrantPlan) -> None:
         self._step("insert_issuing")
@@ -458,6 +523,7 @@ def test_apply_order_iam_last_before_active(tmp_path: Path) -> None:
     client = FakeClient()
     apply_plan(client, _plan(), _sink(tmp_path))
     assert client.calls == [
+        "ensure_hash",
         "insert_issuing",
         "create_view",
         "authorize",
@@ -1295,7 +1361,7 @@ def test_apply_plan_rechecks_concurrent_cap_by_requester(tmp_path: Path) -> None
     client = FakeClient(extra_live=1)
     with pytest.raises(GrantError, match="concurrent grant cap exceeded"):
         apply_plan(client, _plan(), _sink(tmp_path), max_concurrent=1)
-    assert client.calls[0] == "insert_issuing"
+    assert client.calls[:2] == ["ensure_hash", "insert_issuing"]
     assert "drop_view" in client.calls
     assert "bind_iam" not in client.calls
     ok = FakeClient()

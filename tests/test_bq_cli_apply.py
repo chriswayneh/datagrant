@@ -632,3 +632,139 @@ def test_grant_list_and_status_warn_invalid_count(
     )
     status_err = capsys.readouterr().err
     assert "skipped 1 invalid grant record" in status_err
+
+
+def test_sweep_revoke_exception_labels_class_on_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = SweepClient()
+    client.add()
+    _ready(tmp_path, monkeypatch, client)
+
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("token=sekrit-token")
+
+    monkeypatch.setattr("datagrant.bq.revoke.revoke", boom)
+    out: list[str] = []
+    code = cli.main(
+        ["sweep", "--apply", "--json", "--bigquery-location", "US"],
+        out.append,
+    )
+    err = capsys.readouterr().err
+    assert code == EXIT_REVOKE_FAILED
+    assert "Traceback" not in err
+    assert "sekrit-token" not in err
+    body = json.loads(out[0])
+    assert body["results"][0]["error"] == "revoke error: TypeError"
+    assert client.rows[GID].status == "active"
+
+
+def test_sweep_non_row_error_says_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Boom(SweepClient):
+        def list_grants(self) -> list[GrantRecord]:
+            raise RuntimeError("token=sekrit-token")
+
+    client = Boom()
+    _ready(tmp_path, monkeypatch, client)
+    dry_code = cli.main(["sweep", "--bigquery-location", "US"])
+    dry_err = capsys.readouterr().err
+    assert dry_code == EXIT_FAILED
+    assert "BigQuery sweep failed" in dry_err
+    assert "Traceback" not in dry_err
+    assert "sekrit-token" not in dry_err
+    assert "RuntimeError" not in dry_err
+
+    code = cli.main(["sweep", "--apply", "--bigquery-location", "US"])
+    err = capsys.readouterr().err
+    assert code == EXIT_FAILED
+    assert "BigQuery sweep failed" in err
+    assert "Traceback" not in err
+    assert "sekrit-token" not in err
+    assert "RuntimeError" not in err
+
+
+def test_setup_bigquery_dry_run_and_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = ApplyClient()
+    _ready(tmp_path, monkeypatch, client)
+    out: list[str] = []
+    dry = cli.main(["setup", "bigquery", "--json"], out.append)
+    assert dry == EXIT_OK
+    assert json.loads(out[0])["dry_run"] is True
+    assert "setup_hash" not in client.calls
+    applied: list[str] = []
+    code = cli.main(["setup", "bigquery", "--apply", "--json"], applied.append)
+    assert code == EXIT_OK
+    assert json.loads(applied[0])["status"] == "ready"
+    assert client.calls.count("setup_hash") == 1
+    assert client.hash_loads
+
+
+def test_setup_refuses_project_readers_and_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_bq_hash import DEFAULT_READERS
+
+    blocked = ApplyClient()
+    blocked.hash_access = DEFAULT_READERS
+    _ready(tmp_path / "blocked", monkeypatch, blocked)
+    code = cli.main(["setup", "bigquery", "--apply"])
+    err = capsys.readouterr().err
+    assert code == EXIT_FAILED
+    assert "operator-only" in err
+    assert blocked.hash_loads == []
+
+    mismatch = ApplyClient(hash_mismatch=True)
+    _ready(tmp_path / "mismatch", monkeypatch, mismatch)
+    code = cli.main(["setup", "bigquery", "--apply"])
+    err = capsys.readouterr().err
+    assert code == EXIT_FAILED
+    assert "rotate explicitly" in err
+    assert mismatch.hash_loads == []
+
+    rotated = ApplyClient(hash_mismatch=True)
+    _ready(tmp_path / "rotated", monkeypatch, rotated)
+    out: list[str] = []
+    code = cli.main(
+        ["setup", "bigquery", "--rotate-hash-key", "--apply", "--json"],
+        out.append,
+    )
+    rotate_err = capsys.readouterr().err
+    assert code == EXIT_OK
+    assert "changes every pseudonym" in rotate_err
+    assert rotated.hash_loads
+
+
+def test_cli_inspect_types_null_mask_case_insensitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datagrant.bq.mask import TableCatalog
+
+    yaml = MIXED.replace(
+        "columns: {patient_id: passthrough, ssn: hash}",
+        'columns: {patient_id: passthrough, ssn: hash, email: "null"}',
+    )
+    path = tmp_path / "null.yaml"
+    path.write_text(yaml)
+    path.chmod(0o600)
+    client = ApplyClient()
+    client.catalog = TableCatalog({"Patient_ID": "INT64", "ssn": "STRING", "Email": "DATE"})
+    _ready(tmp_path, monkeypatch, client)
+    code = cli.main(
+        [
+            *BQ_REQ,
+            "--columns",
+            "patient_id,email",
+            "--policy",
+            str(path),
+            "--apply",
+        ]
+    )
+    assert code == EXIT_OK
+    assert "inspect_table" in client.calls
+    assert client.view_sql is not None
+    assert "CAST(NULL AS DATE) AS `email`" in client.view_sql
+    assert "CAST(NULL AS STRING) AS `email`" not in client.view_sql
