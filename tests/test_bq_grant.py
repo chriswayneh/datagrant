@@ -20,6 +20,7 @@ from datagrant.bq.grant import (
     GrantError,
     GrantPlan,
     IamPolicy,
+    _parse_principal,
     _upsert_binding,
     apply_bind,
     apply_plan,
@@ -588,10 +589,9 @@ def test_iam_failure_after_issued_drops_view_writes_revoked(tmp_path: Path) -> N
     assert _events(tmp_path / "r.jsonl") == ["issued", "revoked"]
 
 
-def test_cli_apply_still_not_implemented() -> None:
+def test_cli_apply_is_wired() -> None:
     src = Path("src/datagrant/cli.py").read_text()
-    assert "BigQuery grant --apply is not implemented yet" in src
-    assert src.count("BigQuery grant --apply is not implemented yet") >= 2
+    assert "BigQuery grant --apply is not implemented yet" not in src
 
 
 def test_plan_guards_and_quoting() -> None:
@@ -954,6 +954,19 @@ def test_resolve_google_principal_identity_first() -> None:
     )
     with pytest.raises(GrantError, match="google principal is required"):
         resolve_google_principal()
+    with pytest.raises(GrantError, match="unsupported identity mode"):
+        resolve_google_principal(flag="user:alice@example.com", identity_mode="ldap")
+    with pytest.raises(GrantError, match="unsupported identity mode"):
+        resolve_google_principal(mapped="user:map@example.com", identity_mode="saml")
+
+
+def test_parse_principal_null_fails_closed() -> None:
+    with pytest.raises(GrantError, match="google principal is required"):
+        _parse_principal(None)
+    with pytest.raises(GrantError, match="google principal is required"):
+        _parse_principal(123)
+    with pytest.raises(GrantError, match="google principal is required"):
+        _parse_principal(b"user:alice@example.com")
 
 
 def test_identity_with_principal_pins_canonical_member() -> None:
