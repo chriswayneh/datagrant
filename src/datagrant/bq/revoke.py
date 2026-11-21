@@ -12,7 +12,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
 from datagrant import receipt
-from datagrant.bq.grant import GrantClient, GrantError, GrantPlan, apply_unbind
+from datagrant.bq.grant import (
+    _GRANT_ID_RE,
+    GrantClient,
+    GrantError,
+    GrantPlan,
+    apply_unbind,
+)
 from datagrant.pg.grant import ReceiptSink
 from datagrant.receipt import GrantFacts
 
@@ -99,6 +105,40 @@ def _now(now: datetime | None) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise GrantError("now must be timezone-aware")
     return value
+
+
+def aware_timestamp(value: object, field: str) -> datetime:
+    """Require a timezone-aware datetime. The error does not echo the value."""
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise GrantError(f"BigQuery grant record has an invalid {field}")
+    return value
+
+
+def _row_id(row: GrantRecord) -> str:
+    gid = getattr(getattr(row, "plan", None), "grant_id", None)
+    if isinstance(gid, str) and _GRANT_ID_RE.fullmatch(gid):
+        return gid
+    return "unknown"
+
+
+def sweep_reason(row: GrantRecord, now: datetime) -> Reason | None:
+    """Return the sweep reason, or None if this row should be left alone.
+
+    Invalid timestamps raise ``GrantError`` so the caller can skip the row.
+    """
+    expires = aware_timestamp(row.plan.expires_at, "expires_at")
+    started = aware_timestamp(row.started_at, "started_at")
+    if row.cleanup_complete or row.status in {"revoked", "expired"}:
+        return None
+    if row.status == "active" and expires <= now:
+        return "expired"
+    if row.status in {"issuing", "enabling"} and now - started >= GRACE:
+        return "stale_issuing"
+    if row.status == "failed":
+        return "failed_cleanup"
+    if row.status == "revoking":
+        return row.cleanup_reason or "manual"
+    return None
 
 
 def _write_receipt(
@@ -234,20 +274,20 @@ def sweep(
     client: RevokeClient, receipts: ReceiptSink | None = None, *, now: datetime | None = None
 ) -> list[RevokeResult]:
     current = _now(now)
-    results = []
-    for row in list_grants(client, active_only=False):
-        if row.cleanup_complete or row.status in {"revoked", "expired"}:
+    results: list[RevokeResult] = []
+    rows = list_grants(client, active_only=False)
+    extras = getattr(client, "invalid_grant_results", None)
+    if extras:
+        results.extend(list(extras))
+    for row in rows:
+        try:
+            reason = sweep_reason(row, current)
+        except GrantError:
+            results.append(
+                RevokeResult(_row_id(row), "failed", "manual", error="invalid grant record")
+            )
             continue
-        reason: Reason
-        if row.status == "active" and row.plan.expires_at <= current:
-            reason = "expired"
-        elif row.status in {"issuing", "enabling"} and current - row.started_at >= GRACE:
-            reason = "stale_issuing"
-        elif row.status == "failed":
-            reason = "failed_cleanup"
-        elif row.status == "revoking":
-            reason = row.cleanup_reason or "manual"
-        else:
+        if reason is None:
             continue
         # Re-read and CAS each record so a stale list cannot take another writer's claim.
         results.append(revoke(client, row.plan.grant_id, reason, receipts, now=current))

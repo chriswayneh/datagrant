@@ -17,7 +17,14 @@ from datagrant.bq.grant import (
     q_project,
 )
 from datagrant.bq.rest import TIMEOUT
-from datagrant.bq.revoke import GRACE, GrantRecord, PendingRequest, Reason
+from datagrant.bq.revoke import (
+    GRACE,
+    GrantRecord,
+    PendingRequest,
+    Reason,
+    RevokeResult,
+    aware_timestamp,
+)
 from datagrant.oidc import VerifiedIdentity
 from datagrant.policy import Policy
 from datagrant.receipt import GrantFacts
@@ -32,6 +39,7 @@ class _Store:
         self._sdk = sdk
         self._project = project
         self._location = location
+        self.invalid_grant_results: list[RevokeResult] = []
 
     def _query(self, sql: str, values: dict[str, tuple[str, Any]]) -> tuple[Any, Any]:
         try:
@@ -214,12 +222,29 @@ WHERE grant_id = @grant_id AND {predicate}
     def release_revoke(self, grant_id: str, revision: int, error: str) -> None:
         self._complete(grant_id, revision, "claimed_at = NULL")
 
-    def _read(self, sql: str, **values: tuple[str, Any]) -> list[GrantRecord]:
+    def _read(
+        self, sql: str, *, skip_invalid: bool = False, **values: tuple[str, Any]
+    ) -> list[GrantRecord]:
         _, rows = self._query(sql, values)
-        try:
-            return [self._decode(row) for row in rows]
-        except (KeyError, TypeError, ValueError):
-            raise GrantError("BigQuery returned an invalid grant record") from None
+        out: list[GrantRecord] = []
+        invalid: list[RevokeResult] = []
+        for row in rows:
+            try:
+                out.append(self._decode(row))
+            except (GrantError, KeyError, TypeError, ValueError):
+                if not skip_invalid:
+                    raise GrantError("BigQuery returned an invalid grant record") from None
+                invalid.append(
+                    RevokeResult(
+                        _row_grant_id(row),
+                        "failed",
+                        "manual",
+                        error="invalid grant record",
+                    )
+                )
+        if skip_invalid:
+            self.invalid_grant_results = invalid
+        return out
 
     def _decode(self, row: Any) -> GrantRecord:
         facts = None
@@ -236,13 +261,13 @@ WHERE grant_id = @grant_id AND {predicate}
                 source_dataset=row["source_dataset"],
                 source_table=row["source_table"],
                 principal=row["principal"],
-                expires_at=row["expires_at"],
+                expires_at=aware_timestamp(row["expires_at"], "expires_at"),
                 location=row["location"],
                 facts=facts,
                 request_id=row["request_id"],
             ),
             status=row["status"],
-            started_at=row["started_at"],
+            started_at=aware_timestamp(row["started_at"], "started_at"),
             revision=row["revision"],
             cleanup_reason=row["cleanup_reason"],
             claimed_at=row["claimed_at"],
@@ -259,13 +284,23 @@ WHERE grant_id = @grant_id AND {predicate}
         return rows[0] if rows else None
 
     def list_grants(self) -> list[GrantRecord]:
-        return self._read(f"SELECT * FROM {self._table}")  # nosec B608
+        return self._read(f"SELECT * FROM {self._table}", skip_invalid=True)  # nosec B608
 
 
 def _grant_id(grant_id: str) -> tuple[str, str]:
     if not isinstance(grant_id, str) or not _GRANT_ID_RE.fullmatch(grant_id):
         raise GrantError("invalid BigQuery grant state id")
     return ("STRING", grant_id)
+
+
+def _row_grant_id(row: Any) -> str:
+    try:
+        gid = row["grant_id"]
+    except Exception:  # noqa: BLE001 - skip path must not echo the row
+        return "unknown"
+    if isinstance(gid, str) and _GRANT_ID_RE.fullmatch(gid):
+        return gid
+    return "unknown"
 
 
 def _encode_facts(facts: GrantFacts) -> str:
@@ -302,6 +337,16 @@ class ApprovalRef:
 class ApprovalClaim(ApprovalRef):
     snapshot: RequestSnapshot
     approval: Approval
+
+
+@dataclass(frozen=True)
+class VoteResult:
+    """Counts from the vote record_vote actually persisted or declined to add."""
+
+    recorded: int
+    required: int
+    added: bool
+    claim: ApprovalClaim | None = None
 
 
 class RequestStore(_Store):
@@ -383,7 +428,7 @@ COMMIT TRANSACTION;
         *,
         now: datetime,
         grant_id: str,
-    ) -> ApprovalClaim | None:
+    ) -> VoteResult:
         """Save a vote or claim final approval from the exact evaluated revision."""
         grant_param = _grant_id(grant_id)
         snapshot = self.get_pending(request_id)
@@ -391,8 +436,9 @@ COMMIT TRANSACTION;
             raise GrantError("BigQuery request is no longer pending")
         row = snapshot.pending
         approval = evaluate_approval(policy, row, caller, snapshot.votes, now=now)
+        counts = VoteResult(len(approval.votes), approval.required, approval.added)
         if not approval.added and not approval.is_final:
-            return None
+            return counts
         sql = f"""
 UPDATE {self._table}
 SET votes_json = @votes, status = @status, grant_id = @grant_id, revision = revision + 1
@@ -415,8 +461,13 @@ WHERE request_id = @request_id AND status = 'pending' AND revision = @revision
         if count != 1:
             raise GrantError("BigQuery pending request changed; reload before approving")
         if approval.is_final:
-            return ApprovalClaim(request_id, row.revision + 1, grant_id, snapshot, approval)
-        return None
+            return VoteResult(
+                counts.recorded,
+                counts.required,
+                counts.added,
+                ApprovalClaim(request_id, row.revision + 1, grant_id, snapshot, approval),
+            )
+        return counts
 
     def claim_expired_request(self, row: PendingRequest, now: datetime) -> int:
         sql = f"""

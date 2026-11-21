@@ -370,3 +370,25 @@ def test_claim_loser_cannot_finish_and_does_not_write_a_receipt(tmp_path: Path) 
     sink = _sink(tmp_path)
     assert revoke(client, GID, receipts=sink, now=NOW).outcome == "noop"
     assert not sink.log.exists()
+
+
+def test_sweep_skips_null_expires_at_and_revokes_valid() -> None:
+    client = Store()
+    valid = client.add()
+    other_id = "012345abcdef"
+    other = replace(
+        valid.plan,
+        grant_id=other_id,
+        view_id=valid.plan.view_id.replace(GID, other_id),
+        expires_at=None,
+    )
+    client.rows[other_id] = GrantRecord(other, "active", NOW)
+    client.status[other_id] = "active"
+    results = sweep(client, now=NOW + timedelta(hours=2))
+    by_id = {item.grant_id: item for item in results}
+    assert by_id[GID].outcome == "revoked"
+    assert client.rows[GID].status == "expired"
+    assert valid.plan.view_id not in client.views
+    assert by_id[other_id].outcome == "failed"
+    assert by_id[other_id].error == "invalid grant record"
+    assert client.rows[other_id].status == "active"

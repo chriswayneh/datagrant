@@ -1010,8 +1010,9 @@ def _print_bq_grant(
 
 
 def _deliver_bq_issued(ctx: Ctx, client: Any, plan: Any, local: Any) -> None:
-    """Flush the outbox. Required sink failure reverse-drops the BigQuery grant."""
-    from datagrant.bq.grant import append_revoked, reverse_drop
+    """Flush the outbox. Required sink failure revokes the BigQuery grant."""
+    from datagrant.bq.grant import GrantError
+    from datagrant.bq.revoke import revoke
     from datagrant.outbox import flush, quick
 
     remote = _remote(ctx.args)
@@ -1023,14 +1024,18 @@ def _deliver_bq_issued(ctx: Ctx, client: Any, plan: Any, local: Any) -> None:
     if remote.mode != "required":
         _warn(ctx, f"receipt not delivered to sink, {res.pending} pending: {res.error}")
         return
-    reverse_drop(client, plan, unbind=True)
-    append_revoked(plan, local, reason="sink_failed")
+    try:
+        r = revoke(client, plan.grant_id, "manual", local)
+    except GrantError as exc:
+        raise CliError(_hide_token(str(exc)), EXIT_RECEIPT) from None
     flush(local.log, quick(remote.sink))
+    state = (
+        "grant revoked"
+        if r.outcome == "revoked"
+        else f"revoke {r.outcome}: grant STILL ACTIVE until the next sweep"
+    )
     raise CliError(
-        _hide_token(
-            f"grant {plan.grant_id}: receipt not delivered to sink ({res.error}); "
-            "BigQuery view dropped"
-        ),
+        _hide_token(f"grant {plan.grant_id}: receipt not delivered to sink ({res.error}); {state}"),
         EXIT_RECEIPT,
     )
 
@@ -1340,15 +1345,16 @@ def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
             return EXIT_OK
         grant_id = secrets.token_hex(6)
         try:
-            claim = client.requests.record_vote(
+            vote = client.requests.record_vote(
                 a.request_id, policy, caller, now=now, grant_id=grant_id
             )
         except GrantError as exc:
-            raise CliError(str(exc), EXIT_FAILED) from None
-        recorded = len(approval.votes)
-        required = approval.required
+            raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
+        recorded = vote.recorded
+        required = vote.required
+        claim = vote.claim
         if claim is None:
-            if not approval.added:
+            if not vote.added:
                 ctx.emit(
                     {
                         "status": "pending",
@@ -1421,8 +1427,8 @@ def _bigquery_approve(ctx: Ctx, policy: Any, caller: Any) -> int:
             plan,
             requester,
             req_source,
-            approvals_recorded=len(claim.approval.votes),
-            approvals_required=claim.approval.required,
+            approvals_recorded=recorded,
+            approvals_required=required,
         )
 
 
@@ -2427,7 +2433,7 @@ def _bigquery_revoke(ctx: Ctx) -> int:
             try:
                 row = get_grant(client, a.grant_id)
             except GrantError as exc:
-                raise CliError(str(exc), EXIT_FAILED) from None
+                raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
         if row is None:
             raise CliError(f"unknown grant {a.grant_id}")
         active = row.status not in {"revoked", "expired"} and not row.cleanup_complete
@@ -2452,7 +2458,7 @@ def _bigquery_revoke(ctx: Ctx) -> int:
         try:
             r = revoke(client, a.grant_id, "manual", sink)
         except GrantError as exc:
-            raise CliError(str(exc), EXIT_FAILED) from None
+            raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
     delivery = _deliver_quick(ctx, sink)
     code = _exit_for([r] if r.outcome != "noop" else [], key_problem)
     msg = f"grant {r.grant_id}: {r.outcome}"
@@ -2471,7 +2477,7 @@ def _bigquery_revoke(ctx: Ctx) -> int:
 
 def _bigquery_sweep(ctx: Ctx) -> int:
     from datagrant.bq.grant import GrantError
-    from datagrant.bq.revoke import expire_pending, list_grants, sweep
+    from datagrant.bq.revoke import expire_pending, list_grants, sweep, sweep_reason
 
     a = ctx.args
     _bq_refuse_locator(a)
@@ -2481,29 +2487,37 @@ def _bigquery_sweep(ctx: Ctx) -> int:
         now = datetime.now(UTC)
         with _bq_grant_client(a) as client:
             try:
-                due_ids = [
-                    r.plan.grant_id
-                    for r in list_grants(client, active_only=False)
-                    if r.status == "active" and r.plan.expires_at <= now
+                rows = list_grants(client, active_only=False)
+                due_ids: list[str] = []
+                invalid: list[str] = [
+                    item.grant_id for item in getattr(client, "invalid_grant_results", ())
                 ]
+                for row in rows:
+                    try:
+                        reason = sweep_reason(row, now)
+                    except GrantError:
+                        invalid.append(row.plan.grant_id)
+                        continue
+                    if reason is not None:
+                        due_ids.append(row.plan.grant_id)
                 stale = [p.request_id for p in client.list_due_requests(now)]
             except GrantError as exc:
-                raise CliError(str(exc), EXIT_FAILED) from None
+                raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
         ctx.emit(
             {
                 "dry_run": True,
                 "engine": "bigquery",
                 "would_revoke": due_ids,
                 "would_expire_requests": stale,
+                "invalid_grants": invalid,
             },
             "dry run: --apply would "
-            + (
-                f"revoke expired BigQuery grants {', '.join(due_ids)}"
-                if due_ids
-                else "revoke no grants"
-            )
-            + (f" and expire requests {', '.join(stale)}" if stale else ""),
+            + (f"revoke BigQuery grants {', '.join(due_ids)}" if due_ids else "revoke no grants")
+            + (f" and expire requests {', '.join(stale)}" if stale else "")
+            + (f"; skip invalid grant records {', '.join(invalid)}" if invalid else ""),
         )
+        if invalid:
+            raise CliError("BigQuery sweep skipped an invalid grant record", EXIT_FAILED)
         return EXIT_OK
     sink, key_problem = _revoke_receipts(ctx)
     with _bq_grant_client(a) as client:
@@ -2511,7 +2525,7 @@ def _bigquery_sweep(ctx: Ctx) -> int:
             results = sweep(client, sink)
             expired = expire_pending(client, sink)
         except GrantError as exc:
-            raise CliError(str(exc), EXIT_FAILED) from None
+            raise CliError(_hide_token(str(exc)), EXIT_FAILED) from None
     expired_requests = [item.request_id for item in expired]
     request_receipt_error = next(
         (item.receipt_error for item in expired if item.receipt_error), None
@@ -3364,6 +3378,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
 
 
 def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) -> int:
+    from datagrant.bq.grant import GrantError as BigQueryGrantError
     from datagrant.oidc import IdentityError
     from datagrant.pg.grant import GrantError
     from datagrant.pg.mask import MaskError
@@ -3422,6 +3437,7 @@ def main(argv: Sequence[str] | None = None, out: Callable[[str], None] = print) 
         KeyFileError,
         GrantError,
         SnowflakeGrantError,
+        BigQueryGrantError,
         MaskError,
         ReceiptError,
         RowFilterError,

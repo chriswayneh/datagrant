@@ -4,22 +4,24 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from test_bigquery_routing import BQ_REQ, MIXED, STORED_PRINCIPAL, _policy, _two_person
-from test_bq_grant import FakeClient, _events
+from test_bq_grant import GID, FakeClient, _events, _plan
 from test_bq_revoke import Store
 
 from datagrant import cli
 from datagrant.bigquery_support import ADC_CHECKING_MSG, BIGQUERY_PROJECT_ENV
 from datagrant.bq.approval import evaluate_approval
-from datagrant.bq.grant import GrantError, GrantPlan
-from datagrant.bq.revoke import GrantRecord, PendingRequest
-from datagrant.bq.state import ApprovalClaim, RequestSnapshot
-from datagrant.cli import EXIT_FAILED, EXIT_OK
+from datagrant.bq.grant import GrantError, GrantPlan, apply_bind
+from datagrant.bq.revoke import GRACE, GrantRecord, PendingRequest
+from datagrant.bq.state import ApprovalClaim, RequestSnapshot, VoteResult
+from datagrant.cli import EXIT_FAILED, EXIT_OK, EXIT_RECEIPT, EXIT_REVOKE_FAILED
+from datagrant.sink import SinkConfig, SinkError
 
 
 class ApplyClient(FakeClient):
@@ -59,21 +61,27 @@ class ApplyClient(FakeClient):
         *,
         now: datetime,
         grant_id: str,
-    ) -> ApprovalClaim | None:
+    ) -> VoteResult:
         snapshot = self.get_pending(request_id)
         if snapshot is None:
             raise GrantError("BigQuery request is no longer pending")
         approval = evaluate_approval(policy, snapshot.pending, caller, snapshot.votes, now=now)
+        counts = VoteResult(len(approval.votes), approval.required, approval.added)
         if not approval.added and not approval.is_final:
-            return None
+            return counts
         pending = snapshot.pending
         bumped = PendingRequest(
             pending.request_id, pending.expires_at, pending.facts, pending.revision + 1
         )
         self.snapshot = RequestSnapshot(bumped, snapshot.principal, approval.votes)
         if approval.is_final:
-            return ApprovalClaim(request_id, bumped.revision, grant_id, snapshot, approval)
-        return None
+            return VoteResult(
+                counts.recorded,
+                counts.required,
+                counts.added,
+                ApprovalClaim(request_id, bumped.revision, grant_id, snapshot, approval),
+            )
+        return counts
 
     def finish_approval(self, claim: Any) -> int:
         self.snapshot = None
@@ -106,6 +114,38 @@ class ApplyClient(FakeClient):
 
     def list_due_requests(self, now: datetime) -> list[PendingRequest]:
         return list(self.due_requests)
+
+    def claim_revoke(self, row: GrantRecord, reason: Any, now: datetime) -> int:
+        current = self.grants.get(row.plan.grant_id)
+        if current is None or current.revision != row.revision or current.status != row.status:
+            return 0
+        self.grants[row.plan.grant_id] = replace(
+            current,
+            status="revoking",
+            revision=row.revision + 1,
+            cleanup_reason=reason,
+            claimed_at=now,
+        )
+        self.status[row.plan.grant_id] = "revoking"
+        return 1
+
+    def finish_revoke(self, grant_id: str, revision: int, status: str) -> int:
+        current = self.grants.get(grant_id)
+        if current is None or current.revision != revision or current.status != "revoking":
+            return 0
+        self.grants[grant_id] = replace(
+            current, status=status, cleanup_complete=True, claimed_at=None, revision=revision + 1
+        )
+        self.status[grant_id] = status
+        return 1
+
+    def release_revoke(self, grant_id: str, revision: int, error: str) -> None:
+        row = self.grants.get(grant_id)
+        if row is not None and row.revision == revision and row.status == "revoking":
+            self.grants[grant_id] = replace(row, claimed_at=None, revision=revision + 1)
+
+    def cancel_jobs(self, plan: GrantPlan) -> int:
+        return 0
 
     def claim_expired_request(self, row: PendingRequest, now: datetime) -> int:
         self.due_requests = [
@@ -235,6 +275,8 @@ def test_two_person_approve_apply_issues_stored_principal(
     body = json.loads(granted[0])
     assert body["status"] == "granted"
     assert body["google_principal"] == STORED_PRINCIPAL
+    assert body["approvals_recorded"] == 1
+    assert body["approvals_required"] == 1
     assert client.applied and client.applied[0].principal == STORED_PRINCIPAL
     assert "carol@" not in client.applied[0].principal
     assert _events(log) == ["issued"]
@@ -358,3 +400,113 @@ def test_apply_prints_adc_checking(
     assert ADC_CHECKING_MSG in err
     assert json.loads(out[0])["status"] == "granted"
     assert "not implemented" not in err
+
+
+_UNSET = object()
+
+
+def _store_row(
+    client: Store,
+    grant_id: str,
+    status: str,
+    *,
+    started_at: datetime | None = None,
+    expires_at: Any = _UNSET,
+) -> GrantRecord:
+    base = _plan()
+    plan = replace(
+        base,
+        grant_id=grant_id,
+        view_id=base.view_id.replace(GID, grant_id),
+        expires_at=base.expires_at if expires_at is _UNSET else expires_at,
+    )
+    row = GrantRecord(plan, status, started_at or datetime.now(UTC))
+    client.rows[grant_id] = row
+    client.status[grant_id] = status
+    client.views.add(plan.view_id)
+    if expires_at is not None:
+        apply_bind(client, plan)
+    return row
+
+
+def test_required_sink_failure_after_active_revokes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Boom:
+        name = "boom"
+
+        def deliver(self, line: bytes) -> None:
+            raise SinkError("down")
+
+        def head(self) -> None:
+            return None
+
+    client = ApplyClient()
+    _ready(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(cli, "_remote", lambda args: SinkConfig(Boom(), "required"))
+    path = _policy(tmp_path)
+    code = cli.main([*BQ_REQ, "--policy", str(path), "--apply"])
+    err = capsys.readouterr().err
+    assert code == EXIT_RECEIPT
+    assert "grant revoked" in err
+    assert "STILL ACTIVE" not in err
+    assert "Traceback" not in err
+    assert not client.views
+    assert not client.dataset_policy.bindings
+    assert not client.project_policy.bindings
+    assert client.grants
+    row = next(iter(client.grants.values()))
+    assert row.status == "revoked"
+
+
+def test_sweep_dry_run_lists_failed_stale_and_revoking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = SweepClient()
+    _store_row(client, "aaaaaaaaaaaa", "failed")
+    _store_row(client, "bbbbbbbbbbbb", "issuing", started_at=datetime.now(UTC) - GRACE)
+    _store_row(client, "cccccccccccc", "revoking")
+    _store_row(
+        client,
+        "dddddddddddd",
+        "active",
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    _store_row(client, "eeeeeeeeeeee", "issuing", started_at=datetime.now(UTC))
+    _ready(tmp_path, monkeypatch, client)
+    out: list[str] = []
+    code = cli.main(["sweep", "--json", "--bigquery-location", "US"], out.append)
+    assert code == EXIT_OK
+    body = json.loads(out[0])
+    assert set(body["would_revoke"]) == {
+        "aaaaaaaaaaaa",
+        "bbbbbbbbbbbb",
+        "cccccccccccc",
+        "dddddddddddd",
+    }
+
+
+def test_sweep_null_expiry_skips_and_revokes_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = SweepClient()
+    valid = client.add()
+    _store_row(client, "012345abcdef", "active", expires_at=None)
+    _ready(tmp_path, monkeypatch, client)
+    out: list[str] = []
+    code = cli.main(
+        ["sweep", "--apply", "--json", "--bigquery-location", "US"],
+        out.append,
+    )
+    err = capsys.readouterr().err
+    assert "TypeError" not in err
+    assert "Traceback" not in err
+    assert code == EXIT_REVOKE_FAILED
+    body = json.loads(out[0])
+    by_id = {item["grant_id"]: item for item in body["results"]}
+    assert by_id[GID]["outcome"] == "revoked"
+    assert by_id["012345abcdef"]["outcome"] == "failed"
+    assert by_id["012345abcdef"]["error"] == "invalid grant record"
+    assert client.rows[GID].status == "expired"
+    assert valid.plan.view_id not in client.views
+    assert client.rows["012345abcdef"].status == "active"
