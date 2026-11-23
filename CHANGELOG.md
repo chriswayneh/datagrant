@@ -5,6 +5,7 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 ## [Unreleased]
 
 - Add explicit card-data policy tags and a PAN display mask across Postgres, Snowflake, and BigQuery. Tagged PAN cannot pass through or be used in filters, and tagged CVV and track data cannot be granted.
+- Add a fictional three-engine PCI DSS policy example with OIDC, separate approvers, and short grant and approval windows.
 
 ## [0.7.0] - 2026-11-21
 
