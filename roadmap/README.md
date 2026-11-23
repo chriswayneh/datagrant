@@ -4,7 +4,7 @@ The [roadmap overview](../ROADMAP.md) is the readable plan and the summary of wh
 
 **v0.8.0 adds the PCI DSS support pack.** See the [release notes](../docs/release-notes/v0.8.0.md) and [product README](../README.md).
 
-**Next:** the PCI pack in v0.8.0, beta in v0.9.0 and 1.0. See the [roadmap overview](../ROADMAP.md).
+**Next:** beta in v0.9.0, followed by v1.0. See the [roadmap overview](../ROADMAP.md).
 
 Update task status in `issues.yml` and the overview in the same PR as the work. Mark a version released only after the maintainer publishes it.
 

@@ -2,7 +2,7 @@
 
 datagrant gives people short-lived, masked, receipted access to sensitive data, with approval, and takes it away on its own. It grows in small, reviewed pull requests with tests and docs. The planning history is in [roadmap/](roadmap/) and [aidlc-docs/](aidlc-docs/).
 
-**Where we are:** alpha. The core flow works on Postgres, Snowflake, and BigQuery. [v0.7.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0). The policy file and receipt format can still change before 1.0.
+**Where we are:** alpha. The core flow works on Postgres, Snowflake, and BigQuery. [v0.8.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.8.0). The policy file and receipt format can still change before 1.0.
 
 ## At a glance
 
@@ -11,7 +11,7 @@ datagrant gives people short-lived, masked, receipted access to sensitive data, 
 | Alpha: core | v0.1.0 to v0.6.0 | Expiring, masked, receipted access on Postgres and Snowflake, real identity, two-person approval, ops hardening | ✅ Released |
 | Alpha: core | v0.6.1 | Patch: Snowflake setup fix | ✅ Released |
 | Alpha: core | v0.7.0 | BigQuery | ✅ Released |
-| Alpha: compliance | v0.8.0 | PCI pack | Implemented. [Release notes](docs/release-notes/v0.8.0.md) |
+| Alpha: compliance | v0.8.0 | PCI pack | ✅ Released. [Release notes](docs/release-notes/v0.8.0.md) |
 | Beta | v0.9.0 | Ready for outside teams | Planned |
 | Stable | v1.0.0 | Stable formats and a compatibility promise | Planned |
 
@@ -40,7 +40,7 @@ The same request, mask, expire and receipt flow on Google BigQuery: a per-grant 
 
 ## Alpha: compliance
 
-### v0.8.0: PCI pack
+### v0.8.0: PCI pack (released)
 
 Help teams that hold card data show that access to it is limited, approved, masked and recorded. datagrant **supports** PCI DSS controls. It does not make anyone PCI compliant on its own, and an assessor still decides.
 

@@ -10,6 +10,7 @@ These docs cover [v0.8.0](release-notes/v0.8.0.md). The product README is at the
 | [Operations](operations.md) | Runbook pointers, [Snowflake](operations.md#warehouses-v060), [BigQuery](operations.md#bigquery-v070), ops hardening |
 | [Demo](demo.md) | Local Postgres demo (`make demo`) |
 | [OIDC demo](demo-oidc.md) | Request and approve with synthetic tokens |
+| [v0.8.0 notes](release-notes/v0.8.0.md) | PCI DSS support pack |
 | [v0.7.0 notes](release-notes/v0.7.0.md) | BigQuery warehouse support |
 | [v0.6.1 notes](release-notes/v0.6.1.md) | Snowflake HMAC patch |
 | [v0.6.0 notes](release-notes/v0.6.0.md) | Snowflake warehouse support |

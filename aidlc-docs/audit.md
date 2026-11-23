@@ -126,3 +126,5 @@ Maintainer (Chris) approved the alpha, beta and 1.0 roadmap, including a v0.8.0 
 | 2026-11-23 CT | Construction | Codex | Prepared v0.8.0 release notes and updated the project overview to reflect the merged PCI DSS support pack. | **release preparation** |
 
 | 2026-11-23 CT | Construction | Codex | Maintainer authorized preparing the v0.8.0 release in chat. Aligned package versions, changelog, support policy, and documentation for the PCI DSS support pack. | **release preparation approved** |
+
+| 2026-11-23 CT | Construction | Codex | Rechecked the GitHub release and verified the v0.8.0 tag at the green release commit. Updated current documentation and the checked-in overview to reflect publication. | **release documentation verified** |

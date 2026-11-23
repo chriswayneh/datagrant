@@ -2,7 +2,7 @@
 
 datagrant follows the [AWS AI-Driven Development Life Cycle](https://github.com/awslabs/aidlc-workflows): Inception (what and why), Construction (how), Operations (run it). Each stage ends with a human approval gate.
 
-The product is at [v0.8.0](../docs/release-notes/v0.8.0.md) on this branch. M4 Snowflake warehouses shipped in v0.6.0. M5 BigQuery is complete. See the [product README](../README.md) and [ROADMAP.md](../ROADMAP.md).
+[v0.8.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.8.0). The PCI DSS support pack is described in the [release notes](../docs/release-notes/v0.8.0.md). M4 Snowflake warehouses shipped in v0.6.0. M5 BigQuery is complete. See the [product README](../README.md) and [ROADMAP.md](../ROADMAP.md).
 
 | Stage | Folder | Roadmap | Gate |
 | --- | --- | --- | --- |
