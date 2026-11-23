@@ -4,7 +4,8 @@
 
 | Version | Supported |
 | --- | :---: |
-| 0.7.x | ✅ |
+| 0.8.x | ✅ |
+| 0.7.x | ✅ (previous release) |
 | 0.6.x | ❌ (upgrade to 0.7.x) |
 | 0.5.x | ❌ (upgrade to 0.7.x) |
 | 0.4.x | ❌ (upgrade to 0.6.x) |

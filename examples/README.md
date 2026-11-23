@@ -11,7 +11,7 @@ These examples cover released engines (Postgres, Snowflake, and BigQuery in v0.7
 
 Check a file with `datagrant policy check examples/policy.yaml` (exit 0 valid, 1 invalid). See the [policy reference](../docs/policy.md) and [OIDC demo](../docs/demo-oidc.md).
 
-## PCI DSS support pack (unreleased)
+## PCI DSS support pack (v0.8.0)
 
 [PCI policy example](policies/pci.yaml) uses fictional OIDC settings with separate requester and approver groups. It allows only a transaction ID and a masked payment card number, limits grants to 30 minutes, and expires unapproved requests after 15 minutes. CVV and track tags mark prohibited column names; the example does not require those columns to exist or suggest storing them.
 
@@ -41,7 +41,7 @@ Add a dataset with `engine: snowflake`. Install `pip install '.[snowflake]'` fro
 
 ## BigQuery (v0.7.0)
 
-Add a dataset with `engine: bigquery`. Install `pip install '.[bigquery]'` from a checkout of the v0.7.0 tag. Set `$DATAGRANT_BIGQUERY_PROJECT` and use ADC (JSON keys refused). Run `datagrant setup bigquery --apply` once against an operator-only `datagrant` dataset. Prefer a dedicated hash project: project-level BigQuery data roles are key-equivalent.
+Add a dataset with `engine: bigquery`. Install `pip install '.[bigquery]'` from a v0.8.0 checkout. Set `$DATAGRANT_BIGQUERY_PROJECT` and use ADC (JSON keys refused). Run `datagrant setup bigquery --apply` once against an operator-only `datagrant` dataset. Prefer a dedicated hash project: project-level BigQuery data roles are key-equivalent.
 
 ```yaml
   - name: bq_clinic

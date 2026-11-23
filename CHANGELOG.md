@@ -4,6 +4,10 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-23
+
+[PCI DSS support pack release notes](docs/release-notes/v0.8.0.md)
+
 - Add explicit card-data policy tags and a PAN display mask across Postgres, Snowflake, and BigQuery. Tagged PAN cannot pass through or be used in filters, and tagged CVV and track data cannot be granted.
 - Add a fictional three-engine PCI DSS policy example with OIDC, separate approvers, and short grant and approval windows.
 - Add `receipts report` to generate Markdown or JSON access evidence from a verified signed receipt log.
