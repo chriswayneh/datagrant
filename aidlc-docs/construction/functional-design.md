@@ -141,3 +141,6 @@ Implemented (PRs #47 to #53). v0.6.0 released 2026-11-14. Optional dataset `engi
 `evaluate_approval` rechecks the request under current policy, tests eligible identities and separation of duties, and counts distinct current-policy votes. `RequestStore.record_vote` persists votes against that snapshot's revision and returns an owned claim only after the quorum and grant ID are committed together.
 
 `issue_approved` uses a freshly won claim to build and apply the linked grant. `reconcile_approval` only settles request state from an active or cleaned-up failed linked grant. It does not replay access changes or guess at ambiguous outcomes.
+## v0.8.0 / PCI DSS support: PAN display mask
+
+The optional table-level `card_data` mapping classifies PAN, CVV, and track columns. The policy refuses passthrough for tagged PAN and refuses to grant tagged CVV or track data. Tagged columns cannot participate in row predicates. The three engines display only the first six and last four digits of a valid 12–19 digit PAN; other non-NULL values are redacted. Operators classify the source data. This supports PCI DSS controls; it does not assess compliance.

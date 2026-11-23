@@ -119,4 +119,6 @@ Maintainer (Chris) approved the alpha, beta and 1.0 roadmap, including a v0.8.0 
 
 | 2026-11-21 CT | Construction | Codex | Verified the published v0.7.0 tag and updated the release status in the README, roadmap, release notes, and AI-DLC state. BigQuery mock and CI coverage is documented; live GCP acceptance was not run. | **documentation refresh** |
 
+| 2026-11-21 CT | Construction | Codex | Maintainer approved continuing PCI DSS support. Added the first v0.8.0 slice: explicit card-data classification, PAN display masks for three engines, and policy refusals for tagged card data in row filters or tagged CVV/track in grants. | **implementation in review** |
+| 2026-11-23 CT | Construction | Codex | Added and validated a fictional three-engine OIDC policy that uses the new PAN mask. Policy tests cover distinct approvers, short grants, and refusal of unlisted CVV access. | **sample policy in review** |
 | 2026-11-23 CT | Construction | Codex | Added PCI DSS support pack receipt evidence reporting. It verifies signatures, sequence, hash links, and the optional expected head before returning selected lifecycle metadata. Tested tampered and truncated logs and Markdown escaping. | **implementation in review** |

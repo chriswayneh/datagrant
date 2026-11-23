@@ -169,6 +169,14 @@ def _col_expr(col: str, mask: str, hash_scope: str, catalog: TableCatalog | None
             f"REPEAT('*', LENGTH(TO_VARCHAR({src})) - 4) || RIGHT(TO_VARCHAR({src}), 4) "
             f"ELSE REPEAT('*', LENGTH(TO_VARCHAR({src}))) END AS {ident}"
         )
+    if mask == "pan":
+        text = f"TO_VARCHAR({src})"
+        return (
+            f"CASE WHEN {src} IS NULL THEN NULL "
+            f"WHEN REGEXP_LIKE({text}, '[0123456789]{{12,19}}') "
+            f"THEN CONCAT(LEFT({text}, 6), REPEAT('*', LENGTH({text}) - 10), RIGHT({text}, 4)) "
+            f"ELSE {lit('[REDACTED]')} END AS {ident}"
+        )
     if mask == "hash":
         fn = f"{q(STATE_SCHEMA)}.{q(HASH_UDF)}"
         return f"{fn}({lit(hash_scope)}, TO_VARCHAR({src})) AS {ident}"
