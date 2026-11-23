@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="400" height="242" viewBox="0 0 400 242" role="img" aria-labelledby="title description">
   <title id="title">DataGrant v0.7.0 is released</title>
-  <desc id="description">Postgres, Snowflake, and BigQuery are supported. BigQuery passed mock tests and CI, with no live Google Cloud test. A PCI DSS support pack is planned for v0.8.0.</desc>
+  <desc id="description">Postgres, Snowflake, and BigQuery are supported. BigQuery passed mock tests and CI, with no live Google Cloud test. The PCI DSS support pack is on main for the upcoming v0.8.0 release.</desc>
   <rect width="400" height="242" rx="12" fill="#eff5fa"/>
   <g fill="#fff" stroke="#526982">
     <rect x="18" y="18" width="364" height="108" rx="5"/>
@@ -9,7 +9,7 @@
   <g font-family="Verdana, sans-serif" fill="#15263a">
     <g font-size="20" font-weight="700">
       <text x="34" y="46">Released · v0.7.0</text>
-      <text x="34" y="168">Planned · v0.8.0</text>
+      <text x="34" y="168">On main · v0.8.0</text>
     </g>
     <g font-size="17">
       <text x="34" y="71">Postgres, Snowflake, BigQuery</text>

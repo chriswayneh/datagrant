@@ -8,7 +8,7 @@
 
 **Temporary, masked access to PHI and PII in Postgres, Snowflake, and BigQuery, with signed access receipts.**
 
-**Planned for [v0.8.0](ROADMAP.md#v080-pci-pack): PCI DSS support pack.** The pack is planned to add payment card number masking, a sample cardholder-data policy, and an evidence report built from signed grant receipts.
+**The PCI DSS support pack is on `main` for v0.8.0.** It adds payment card number masking, a sample card-data policy, and access reports from signed receipts. [PCI DSS guide](docs/compliance/pci.md) · [Upcoming release notes](docs/release-notes/v0.8.0.md)
 
 [Watch the demo](#demo) · [Quick start](#quick-start) · [Examples](examples/README.md) · [Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
 
@@ -18,7 +18,7 @@ An open source command line tool that gives developers short, limited access to 
 
 **Status:** [v0.7.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0) ([release notes](docs/release-notes/v0.7.0.md)). Mock- and CI-tested; a live GCP test was not run. v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
-![Released Postgres, Snowflake, and BigQuery at v0.7.0. PCI DSS support pack next in v0.8.0.](docs/assets/datagrant-progress.svg)
+![v0.7.0 is the latest release. The PCI DSS support pack is on main for v0.8.0.](docs/assets/datagrant-progress.svg)
 
 ![A request passes through policy or approval, opens a masked view with a temporary login or key pair, and ends at expiry or revocation. Signed receipts record grant events.](docs/assets/grant-lifecycle.svg)
 
