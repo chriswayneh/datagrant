@@ -1,6 +1,6 @@
 # PCI DSS support pack
 
-Planned for DataGrant v0.8.0. The pack supports selected PCI DSS v4.0.1 controls for temporary warehouse access on Postgres, Snowflake, and BigQuery. Assessors evaluate the controls in the context of the organization's cardholder data environment. [PCI DSS v4.0.1](https://www.pcisecuritystandards.org/document_library/?class=pcidss&doc=pci_dss)
+Introduced in DataGrant v0.8.0. The pack supports selected PCI DSS v4.0.1 controls for temporary warehouse access on Postgres, Snowflake, and BigQuery. Assessors evaluate the controls in the context of the organization's cardholder data environment. [PCI DSS v4.0.1](https://www.pcisecuritystandards.org/document_library/?class=pcidss&doc=pci_dss)
 
 | Requirement | What DataGrant provides | Operator responsibilities |
 | --- | --- | --- |

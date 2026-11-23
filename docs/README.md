@@ -1,6 +1,6 @@
 # datagrant docs
 
-Released features are documented for [v0.7.0](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0). The product README is at the [repo root](../README.md).
+These docs cover [v0.8.0](release-notes/v0.8.0.md). The product README is at the [repo root](../README.md).
 
 | Page | What it covers |
 | --- | --- |
@@ -16,4 +16,4 @@ Released features are documented for [v0.7.0](https://github.com/chriswayneh/dat
 
 Design notes: [BigQuery](design/bigquery.md) (M5 / v0.7.0), [warehouses](design/warehouses.md) (M4 / v0.6.0, Snowflake shipped), [ops hardening](design/ops-hardening.md), [approvals](design/approvals-policy-limits.md), [OIDC](design/oidc-identity.md), [receipt sink](design/receipt-sink.md).
 
-Example policies live in [examples/](../examples/). Changelog and roadmap: [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md). The upcoming v0.8.0 [PCI DSS guide](compliance/pci.md) maps the support pack to selected controls.
+Example policies live in [examples/](../examples/). Changelog and roadmap: [CHANGELOG.md](../CHANGELOG.md), [ROADMAP.md](../ROADMAP.md). The v0.8.0 [PCI DSS guide](compliance/pci.md) maps the support pack to selected controls.

@@ -124,3 +124,5 @@ Maintainer (Chris) approved the alpha, beta and 1.0 roadmap, including a v0.8.0 
 | 2026-11-23 CT | Construction | Codex | Added PCI DSS support pack receipt evidence reporting. It verifies signatures, sequence, hash links, and the optional expected head before returning selected lifecycle metadata. Tested tampered and truncated logs and Markdown escaping. | **implementation in review** |
 | 2026-11-23 CT | Construction | Codex | Documented PCI DSS v4.0.1 control support for the three engines, operator responsibilities, and access review using verified grant receipts and warehouse logs. | **documentation in review** |
 | 2026-11-23 CT | Construction | Codex | Prepared v0.8.0 release notes and updated the project overview to reflect the merged PCI DSS support pack. | **release preparation** |
+
+| 2026-11-23 CT | Construction | Codex | Maintainer authorized preparing the v0.8.0 release in chat. Aligned package versions, changelog, support policy, and documentation for the PCI DSS support pack. | **release preparation approved** |

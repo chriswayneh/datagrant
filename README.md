@@ -8,7 +8,7 @@
 
 **Temporary, masked access to PHI and PII in Postgres, Snowflake, and BigQuery, with signed access receipts.**
 
-**The PCI DSS support pack is on `main` for v0.8.0.** It adds payment card number masking, a sample card-data policy, and access reports from signed receipts. [PCI DSS guide](docs/compliance/pci.md) · [Upcoming release notes](docs/release-notes/v0.8.0.md)
+**v0.8.0 adds the PCI DSS support pack.** It adds payment card number masking, a sample card-data policy, and access reports from signed receipts. [PCI DSS guide](docs/compliance/pci.md) · [Release notes](docs/release-notes/v0.8.0.md)
 
 [Watch the demo](#demo) · [Quick start](#quick-start) · [Examples](examples/README.md) · [Docs](docs/README.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
 
@@ -16,9 +16,9 @@
 
 An open source command line tool that gives developers short, limited access to PHI and PII in Postgres, Snowflake, and BigQuery. Each grant covers only the columns and rows they need, masks sensitive values, and expires. Signed receipts record who was granted access, what the grant allowed, and when it expired or was revoked.
 
-**Status:** [v0.7.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0) ([release notes](docs/release-notes/v0.7.0.md)). Mock- and CI-tested; a live GCP test was not run. v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
+**Version 0.8.0.** Postgres PAN masking has integration coverage. Snowflake and BigQuery PAN masking have generated-SQL coverage. v0.2.0 changes `hash` outputs from v0.1.0; see the [v0.2.0 notes](docs/release-notes/v0.2.0.md) before upgrading from 0.1.x. Until version 1.0, commands and options may change. Use fictional or test data until you have reviewed the [security model](docs/security.md).
 
-![v0.7.0 is the latest release. The PCI DSS support pack is on main for v0.8.0.](docs/assets/datagrant-progress.svg)
+![DataGrant v0.8.0 supports Postgres, Snowflake, and BigQuery and adds a PCI DSS support pack.](docs/assets/datagrant-progress.svg)
 
 ![A request passes through policy or approval, opens a masked view with a temporary login or key pair, and ends at expiry or revocation. Signed receipts record grant events.](docs/assets/grant-lifecycle.svg)
 
@@ -51,7 +51,9 @@ Snowflake without an account: `python3 scripts/demo_snowflake.py` prints the dry
 
 ## Features
 
-Only features that ship in v0.7.0 (verified against the CLI and source; BigQuery is mock- and CI-tested, a live GCP test was not run):
+Features in v0.8.0
+
+- [x] **PCI DSS support pack** (v0.8.0). Classify card data, mask PAN, and generate access-review reports from signed receipts. [PCI DSS guide](docs/compliance/pci.md)
 
 - [x] **Deny-by-default policy.** One YAML file decides who can request what, and for how long. Unknown keys are errors; evaluation refuses anything not allowed explicitly.
 - [x] **Narrow grants.**
@@ -67,7 +69,7 @@ Only features that ship in v0.7.0 (verified against the CLI and source; BigQuery
 - [x] **Two-person approval.** A different person in an `approvers` group must approve; self-approval is refused. Policy is re-checked at approval time.
 - [x] **Approvals and policy limits** (v0.4.0). Policy-wide `approvals_required` (1..8), optional `distinct-groups` SoD, `pending_ttl` / `max_columns` / `max_concurrent_grants`, and `--apply` receipts `denied` / `not_approved` / `approval_recorded` / `request_expired`. See the [policy reference](docs/policy.md) and [CLI](docs/cli.md).
 - [x] **Ops hardening** (v0.5.0). Session advisory lock on mutating `--apply`; `datagrant doctor`; optional `strict_preflight` and `strict_policy_permissions`; `--strict-policy-permissions` / `$DATAGRANT_STRICT_POLICY_PERMISSIONS`; receipt-log 0600 on access-creating `--apply`; `SET LOCAL log_statement = 'none'` when the admin can SET it. See the [CLI](docs/cli.md) and [operations](docs/operations.md#ops-hardening-v050).
-- [x] **Snowflake grants** (v0.6.0). Optional dataset `engine: snowflake`. Extra `datagrant[snowflake]`. Operator DSN is `$DATAGRANT_SNOWFLAKE_DSN` / `--snowflake-dsn` (service user, `private_key_file` only; a password in the DSN is refused). `request` / `approve --apply` create a per-grant `TYPE=SERVICE` user (key pair shown once) and a secure view. `revoke --apply` DISABLEs the user, then drops the view, role, and user. `sweep --apply` every 1 minute. Same five masks; `--apply` reads column types from `INFORMATION_SCHEMA.COLUMNS`. Row filters are re-emitted with `"SRC"."COL"` so an `IS NULL` filter on a `null`-masked column uses the base column. BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link. See the [policy reference](docs/policy.md), [CLI](docs/cli.md) and [operations](docs/operations.md#warehouses-v060).
+- [x] **Snowflake grants** (v0.6.0). Optional dataset `engine: snowflake`. Extra `datagrant[snowflake]`. Operator DSN is `$DATAGRANT_SNOWFLAKE_DSN` / `--snowflake-dsn` (service user, `private_key_file` only; a password in the DSN is refused). `request` / `approve --apply` create a per-grant `TYPE=SERVICE` user (key pair shown once) and a secure view. `revoke --apply` DISABLEs the user, then drops the view, role, and user. `sweep --apply` every 1 minute. Supports the same masks as Postgres and Snowflake; `--apply` reads column types from `INFORMATION_SCHEMA.COLUMNS`. Row filters are re-emitted with `"SRC"."COL"` so an `IS NULL` filter on a `null`-masked column uses the base column. BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link. See the [policy reference](docs/policy.md), [CLI](docs/cli.md) and [operations](docs/operations.md#warehouses-v060).
 - [x] **BigQuery grants** (v0.7.0). Optional dataset `engine: bigquery`. Extra `datagrant[bigquery]`. Operator auth is ADC (`$DATAGRANT_BIGQUERY_PROJECT` / `--bigquery-project`; JSON keys refused). `request` / `approve --apply` create a per-grant authorized view and bind IAM to the requester's Google principal. `datagrant setup bigquery --apply` provisions the hash-master table and `hash_hmac` UDF. `revoke --apply` drops the view then that grant's IAM binds. `sweep --apply` every 1 minute. Same five masks; `--apply` inspects `INFORMATION_SCHEMA.COLUMNS` in the source project. BigQuery and Postgres hashes of the same value under the same `hash_scope` are identical, and Snowflake's are the same value in uppercase. Use distinct `hash_scope` values per engine when hashes must not link. See the [policy reference](docs/policy.md), [CLI](docs/cli.md) and [operations](docs/operations.md#bigquery-v070).
 - [x] **OIDC identity** (v0.3.0). Optional `policy.identity.mode: oidc` verifies an ID token on `request` and `approve`. Default local mode still records the OS user or `--as-user`. See the [policy identity block](docs/policy.md#identity), [CLI](docs/cli.md#oidc-identity) and the [OIDC request and approve demo](docs/demo-oidc.md).
 - [x] **Signed, hash-chained receipts.** ed25519 signatures in an append-only JSONL log. Verify with `datagrant receipts verify` (optional `--expect-head` to catch truncation).
@@ -99,10 +101,10 @@ Every mutating command is a **dry run unless you add `--apply`**. On issue, if t
 
 ## Quick start
 
-Requires Python 3.11 or later. Postgres grants need Postgres (tested on version 16) and `pgcrypto` for the `hash` mask. Snowflake and BigQuery grants need the optional extras below. datagrant isn't on PyPI yet. Install from source at v0.7.0:
+Requires Python 3.11 or later. Postgres grants need Postgres (tested on version 16) and `pgcrypto` for the `hash` mask. Snowflake and BigQuery grants need the optional extras below. datagrant isn't on PyPI yet. Install from a checkout of the version you want.
 
 ```bash
-pip install git+https://github.com/chriswayneh/datagrant.git@v0.7.0
+pip install .
 datagrant --version    # prints: datagrant 0.7.0
 ```
 
@@ -123,7 +125,7 @@ datagrant sweep --apply                # run every minute from cron/systemd
 datagrant receipts verify
 ```
 
-**Snowflake** (v0.6.1 / v0.7.0). From a clone of the v0.7.0 tag, `pip install '.[snowflake]'` (`snowflake-connector-python>=4.7.3,<6`). A Snowflake `--apply` without that extra is exit 2. Prefer `$DATAGRANT_SNOWFLAKE_DSN` over `--snowflake-dsn` (`ps` / shell history). The DSN must be a service user with `private_key_file` (mode 0600, owned by the caller). Password auth is refused. `--apply` inspects column types, builds a secure view `FROM db.s.t AS "SRC"`, and prints the one-time private key. `make demo` stays Postgres.
+**Snowflake** (v0.6.1 / v0.7.0). From a v0.8.0 checkout, `pip install '.[snowflake]'` (`snowflake-connector-python>=4.7.3,<6`). A Snowflake `--apply` without that extra is exit 2. Prefer `$DATAGRANT_SNOWFLAKE_DSN` over `--snowflake-dsn` (`ps` / shell history). The DSN must be a service user with `private_key_file` (mode 0600, owned by the caller). Password auth is refused. `--apply` inspects column types, builds a secure view `FROM db.s.t AS "SRC"`, and prints the one-time private key. `make demo` stays Postgres.
 
 ```bash
 export DATAGRANT_SNOWFLAKE_DSN='snowflake://svc@org-acct/CLINIC_DB?warehouse=WH&private_key_file=/path/to/key.p8'
@@ -139,7 +141,7 @@ datagrant revoke GRANT_ID --apply
 datagrant sweep --apply
 ```
 
-**BigQuery** (v0.7.0). From a clone of the v0.7.0 tag, `pip install '.[bigquery]'` (`google-cloud-bigquery>=3.27.0,<4`). A BigQuery `--apply` without that extra is exit 2. Use Application Default Credentials (user login, workload identity, or impersonation of a user-login source). JSON key files are refused. Prefer `$DATAGRANT_BIGQUERY_PROJECT` over `--bigquery-project`. Put hash-master in a dedicated hash project: project-level BigQuery data roles are key-equivalent. `make demo` stays Postgres. Mock- and CI-tested; a live GCP test was not run.
+**BigQuery** (v0.7.0). From a v0.8.0 checkout, `pip install '.[bigquery]'` (`google-cloud-bigquery>=3.27.0,<4`). A BigQuery `--apply` without that extra is exit 2. Use Application Default Credentials (user login, workload identity, or impersonation of a user-login source). JSON key files are refused. Prefer `$DATAGRANT_BIGQUERY_PROJECT` over `--bigquery-project`. Put hash-master in a dedicated hash project: project-level BigQuery data roles are key-equivalent. `make demo` stays Postgres. Mock- and CI-tested; a live GCP test was not run.
 
 ```bash
 export DATAGRANT_BIGQUERY_PROJECT=grant-proj
@@ -198,7 +200,7 @@ datagrant narrows and time-boxes access and makes it auditable. It is not an ide
 - [Security model](docs/security.md) and [operations](docs/operations.md) (including [Snowflake](docs/operations.md#warehouses-v060) and [BigQuery](docs/operations.md#bigquery-v070))
 - [Demo](docs/demo.md) and [OIDC request and approve demo](docs/demo-oidc.md)
 - [Example policies](examples/)
-- [v0.7.0 release notes](docs/release-notes/v0.7.0.md), [v0.6.1 release notes](docs/release-notes/v0.6.1.md), [changelog](CHANGELOG.md), [roadmap](ROADMAP.md) and [security policy](SECURITY.md)
+- [v0.8.0 release notes](docs/release-notes/v0.8.0.md), [v0.7.0 release notes](docs/release-notes/v0.7.0.md), [v0.6.1 release notes](docs/release-notes/v0.6.1.md), [changelog](CHANGELOG.md), [roadmap](ROADMAP.md) and [security policy](SECURITY.md)
 
 ## Contributing
 
