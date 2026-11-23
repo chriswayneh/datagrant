@@ -44,13 +44,13 @@ The same request, mask, expire and receipt flow on Google BigQuery: a per-grant 
 
 Help teams that hold card data show that access to it is limited, approved, masked and recorded. datagrant **supports** PCI DSS controls. It does not make anyone PCI compliant on its own, and an assessor still decides.
 
-| Item | What | PCI DSS v4.0 |
+| Item | What | PCI DSS v4.0.1 |
 | --- | --- | --- |
-| Card-number mask | A built-in mask that shows at most the first 6 and last 4 digits of a card number (PAN). | Req. 3 (protect stored account data, mask PAN when displayed) |
+| Card-number mask | A built-in mask that shows at most the first 6 and last 4 digits of a card number (PAN). | Req. 3.4.1 (mask PAN when displayed) |
 | Sample cardholder-data policy | A ready-to-copy policy for a cardholder-data table: deny by default, least columns, short expiry, two-person approval. | Req. 7 (restrict access by need to know) |
 | Identity and approval mapping | Docs showing how signed-in requesters and approvers, and distinct approvers, map to unique IDs and approval. | Req. 8 (identify users and authenticate access) |
-| Evidence report | Turn signed receipts into a readable report of who asked, who approved, what they saw, and when access ended. | Req. 10 (log and monitor access), access reviews |
-| Mapping doc | `docs/compliance/pci.md`: each datagrant feature, the requirement it supports, and what stays the customer's job. | All of the above |
+| Evidence report | Turn signed receipts into a readable report of who requested and approved a grant, its scope and expiry, and any recorded revocation. | Req. 10 (log and monitor access), access reviews |
+| Mapping doc | [PCI DSS guide](docs/compliance/pci.md): each datagrant feature, the requirement it supports, and what stays the customer's job. | All of the above |
 
 ## Beta: ready for outside teams
 
