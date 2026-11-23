@@ -18,4 +18,4 @@
 | Construction | M5 / BigQuery | ✅ v0.7.0 released (2026-11-21). Mock- and CI-tested; a live GCP test was not run. |
 | Operations | Runbook / deployment | Runbook drafted; still awaiting review |
 
-**Current stage:** M5 complete. v0.7.0 is released. The v0.8.0 PCI DSS support pack is complete. Release publication is pending. Inception (U1–U8) approved 2026-11-02.
+**Current stage:** [v0.8.0 is released](https://github.com/chriswayneh/datagrant/releases/tag/v0.8.0). The PCI DSS support pack is complete. Inception (U1–U8) approved 2026-11-02.
