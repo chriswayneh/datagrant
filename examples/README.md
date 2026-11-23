@@ -11,6 +11,12 @@ These examples cover released engines (Postgres, Snowflake, and BigQuery in v0.7
 
 Check a file with `datagrant policy check examples/policy.yaml` (exit 0 valid, 1 invalid). See the [policy reference](../docs/policy.md) and [OIDC demo](../docs/demo-oidc.md).
 
+## PCI DSS support pack (unreleased)
+
+[PCI policy example](policies/pci.yaml) uses fictional OIDC settings with separate requester and approver groups. It allows only a transaction ID and a masked payment card number, limits grants to 30 minutes, and expires unapproved requests after 15 minutes. CVV and track tags mark prohibited column names; the example does not require those columns to exist or suggest storing them.
+
+From a checkout that includes the new mask, run `datagrant policy check examples/policies/pci.yaml`. Review table names, card-data classifications, and identity mappings before adapting this example. The policy supports PCI DSS access and display controls; using it does not demonstrate compliance.
+
 ## Snowflake (v0.6.0)
 
 Add a dataset with `engine: snowflake`. Install `pip install '.[snowflake]'` from a checkout of the v0.6.0 tag. Set `$DATAGRANT_SNOWFLAKE_DSN` to a service user with `private_key_file` (key-pair only; password auth is refused). `request` / `approve` / `revoke` / `sweep` / `grant list` take `--snowflake-dsn` when the env var is unset.

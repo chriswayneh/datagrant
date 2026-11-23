@@ -1,0 +1,64 @@
+# Fictional names only. Review the source schema and identity mappings before use.
+version: 1
+approval: two-person
+approvers: [payment-reviewers]
+separation_of_duties: distinct-groups
+max_duration: 30m
+pending_ttl: 15m
+groups:
+  payment-support: []
+  payment-reviewers: []
+identity:
+  mode: oidc
+  issuer: https://idp.example.com
+  audience: datagrant-cli
+  username_claim: email
+  groups_claim: groups
+  allowed_groups: [idp-payment-support, idp-payment-reviewers]
+  group_map:
+    idp-payment-support: payment-support
+    idp-payment-reviewers: payment-reviewers
+datasets:
+  - name: pg_payments
+    database: payments
+    tables:
+      - name: public.transactions
+        allowed_groups: [payment-support]
+        max_columns: 2
+        columns:
+          transaction_id: passthrough
+          pan: pan
+        card_data:
+          pan: pan
+          cvv: cvv
+          track_data: track
+  - name: sf_payments
+    engine: snowflake
+    database: PAYMENTS
+    schema: PUBLIC
+    tables:
+      - name: PUBLIC.TRANSACTIONS
+        allowed_groups: [payment-support]
+        max_columns: 2
+        columns:
+          TRANSACTION_ID: passthrough
+          PAN: pan
+        card_data:
+          PAN: pan
+          CVV: cvv
+          TRACK_DATA: track
+  - name: bq_payments
+    engine: bigquery
+    database: payments-example
+    schema: payments
+    tables:
+      - name: payments.transactions
+        allowed_groups: [payment-support]
+        max_columns: 2
+        columns:
+          transaction_id: passthrough
+          pan: pan
+        card_data:
+          pan: pan
+          cvv: cvv
+          track_data: track
