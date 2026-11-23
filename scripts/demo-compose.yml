@@ -3,7 +3,7 @@
 name: datagrant-demo
 services:
   postgres:
-    image: postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81  # Postgres 18 demo; CI integration also covers 16
+    image: postgres:19@sha256:bb6e70add742cd868fb62cb3b2f67d1dd2bdd2b65a521e778420748753687c60  # Postgres 18 demo; CI integration also covers 16
     environment:
       POSTGRES_PASSWORD: ${DATAGRANT_DEMO_PG_PASSWORD:?set by scripts/demo.sh}
     ports:
