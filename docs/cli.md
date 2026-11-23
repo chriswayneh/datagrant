@@ -76,6 +76,12 @@ Locks the role out and commits, terminates its sessions, then drops the view and
 ### `sweep [--apply]`
 Revokes every expired grant (`expired` receipts) and expires stale pending requests (`request_expired` receipts on `--apply`, with `details.request_id` and no `grant_id`). Dry runs write nothing. Missing `SET log_statement` privilege does not block sweep. If the expiry receipt cannot be written, the pending row is still expired (access was never granted) and the command exits 3; a later sweep does not write a duplicate. Run it on a schedule, for example every minute. With `--snowflake-dsn` / `$DATAGRANT_SNOWFLAKE_DSN` and no Postgres DSN, sweep reads Snowflake `datagrant.grants`, skips `issuing` and `enabling` rows younger than 10 minutes, cleans older issuing/enabling rows, and does not drop objects for pending TTL expiry. If `$DATAGRANT_SNOWFLAKE_DSN` / `--snowflake-dsn` and `$DATAGRANT_BIGQUERY_PROJECT` / `--bigquery-project` are both set and Postgres DSN is unset, sweep uses Snowflake. Unset the Snowflake DSN to target BigQuery.
 
+### `receipts report --pubkey HEX|FILE [--expect-head SHA256] [--receipt-log FILE] [--json]`
+
+Generate an access review report from a local signed receipt log. The report is Markdown by default or JSON with `--json`. It includes lifecycle events, requester and approvers, granted column names and masks, expiration, and the verified chain head. It omits free-text purpose, row predicates, and raw event details. It does not show which rows someone read or whether access is currently active.
+
+Use a trusted signing public key and, when available, an independently recorded expected head hash to detect deletion of the newest receipts. If any verification check fails, the command emits no evidence report. Report output contains identity and policy metadata; store it with the same care as receipt logs.
+
 ### `receipts verify [--pubkey HEX|FILE] [--expect-head SHA256] [--sink URL] [--receipt-log FILE] [--signing-key FILE]`
 Checks every signature, sequence number and hash link, and reports the first break. It prints the head hash. Record that hash somewhere off the host and pass it back with `--expect-head` to detect truncation of the newest entries.
 

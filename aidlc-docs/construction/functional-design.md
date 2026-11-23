@@ -1,5 +1,7 @@
 # Functional design
 
+The v0.8.0 PCI DSS support pack includes a read-only `receipts report` command. It projects a fixed set of lifecycle fields in the verifier's single read pass, emits nothing if verification fails, and renders Markdown or JSON without needing the signing private key.
+
 ## U1: Policy loader and evaluator
 
 **Status:** In progress (Construction start approved 2026-11-02 5:26 PM CT; see ../audit.md). Module: `src/datagrant/policy.py`. Example: `examples/policy.yaml`.

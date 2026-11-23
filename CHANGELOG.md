@@ -4,6 +4,8 @@ All notable changes to datagrant are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+- Add `receipts report` to generate Markdown or JSON access evidence from a verified signed receipt log.
+
 ## [0.7.0] - 2026-11-21
 
 [Released on GitHub](https://github.com/chriswayneh/datagrant/releases/tag/v0.7.0). BigQuery warehouse support was tested in CI with mocks; no live GCP test was run.

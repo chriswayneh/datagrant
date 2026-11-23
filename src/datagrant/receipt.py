@@ -22,7 +22,7 @@ import os
 import socket
 import stat
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -302,12 +302,19 @@ class VerifyResult:
 
 
 def verify(
-    log: str | Path, public_key: Ed25519PublicKey, *, expect_head: str | None = None
+    log: str | Path,
+    public_key: Ed25519PublicKey,
+    *,
+    expect_head: str | None = None,
+    on_verified: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> VerifyResult:
     """Check every signature, seq number and hash link; report the first break.
 
     ``expect_head`` (the head hash recorded earlier, e.g. in a ticket) also
     catches deletion of the newest lines.
+
+    ``on_verified`` sees individually verified rows before the final result.
+    Callers must discard those rows if the full verification fails.
     """
     kid = key_id_for(public_key)
     prev, n = GENESIS, 0
@@ -350,6 +357,8 @@ def verify(
                 return fail("hash chain break (a receipt was removed or reordered)", lineno)
             prev = hashlib.sha256(line).hexdigest()
             n += 1
+            if on_verified is not None:
+                on_verified(body)
     if expect_head is not None and expect_head != prev:
         return VerifyResult(False, n, prev, "head hash differs (newest receipts missing?)", None)
     return VerifyResult(True, n, prev)

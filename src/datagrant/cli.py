@@ -3082,6 +3082,21 @@ def cmd_receipts_verify(ctx: Ctx) -> int:
     return EXIT_OK if res.ok else EXIT_FAILED
 
 
+def cmd_receipts_report(ctx: Ctx) -> int:
+    from datagrant.evidence import build_report, render_markdown
+
+    args = ctx.args
+    pubkey = Path(args.pubkey)
+    pub = load_public_key(pubkey.read_text() if pubkey.is_file() else args.pubkey)
+    log = Path(args.receipt_log) if args.receipt_log else receipt.default_log_path()
+    try:
+        report = build_report(log, pub, expect_head=args.expect_head)
+    except receipt.ReceiptError as exc:
+        raise CliError(str(exc), EXIT_FAILED) from exc
+    ctx.emit(report, "" if ctx.json else render_markdown(report))
+    return EXIT_OK
+
+
 def cmd_receipts_push(ctx: Ctx) -> int:
     from datagrant.outbox import flush, pending_lines
 
@@ -3454,6 +3469,14 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--pubkey", help="public key hex, or a file containing it")
     v.add_argument("--expect-head", help="head hash recorded earlier (detects truncation)")
     v.set_defaults(fn=cmd_receipts_verify)
+    report = rc.add_parser(
+        "report",
+        parents=only("json", "receipt_log"),
+        help="verify signed receipts and print access evidence",
+    )
+    report.add_argument("--pubkey", required=True, help="public key hex or a file containing it")
+    report.add_argument("--expect-head", help="externally recorded head hash (detects truncation)")
+    report.set_defaults(fn=cmd_receipts_report)
     pu = rc.add_parser(
         "push",
         parents=[*only("json", "receipt_log", "receipt_sink"), apply],
@@ -3486,6 +3509,7 @@ def _accepts(args: argparse.Namespace) -> set[str]:
         cmd_sweep: _REVOKING,
         cmd_receipts_verify: ("signing_key", "receipt_log", "receipt_sink"),
         cmd_receipts_push: ("receipt_log", "receipt_sink"),
+        cmd_receipts_report: ("receipt_log",),
         cmd_grant_list: ("dsn",),
         cmd_grant_status: ("dsn",),
         cmd_preflight: ("dsn", "receipt_log"),
